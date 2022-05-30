@@ -17,7 +17,7 @@ const SchemeExecutorToken = "token-executor"
 // while processing a single job. It is up to the caller to ensure that this directory is
 // removed after the job has finished processing. If a repository name is supplied, then
 // that repository will be cloned (through the frontend API) into the workspace.
-func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Runner, repositoryName, commit string) (_ string, err error) {
+func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Runner, repositoryName, commit string, shallowClone bool) (_ string, err error) {
 	tempDir, err := makeTempDir()
 	if err != nil {
 		return "", err
@@ -44,9 +44,20 @@ func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Ru
 			h.options.ClientOptions.EndpointOptions.Token,
 		)
 
+		// TODO: Can we do something here to improve caching?
+		// Like keeping the same tmp dir for the .git but checking out into multiple workspaces?
+		// This might help with performance on configurations with fewer executors,
+		// but maybe it doesn't matter beyond a certain point.
+		fetchCommand := []string{}
+		if shallowClone {
+			fetchCommand = []string{"git", "-C", tempDir, "-c", "protocol.version=2", "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal", "fetch", cloneURL.String(), "--depth=1", commit}
+		} else {
+			fetchCommand = []string{"git", "-C", tempDir, "-c", "protocol.version=2", "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal", "fetch", cloneURL.String(), "-t", commit}
+		}
+
 		gitCommands := []command.CommandSpec{
 			{Key: "setup.git.init", Command: []string{"git", "-C", tempDir, "init"}, Operation: h.operations.SetupGitInit},
-			{Key: "setup.git.fetch", Command: []string{"git", "-C", tempDir, "-c", "protocol.version=2", "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal", "fetch", cloneURL.String(), "-t", commit}, Operation: h.operations.SetupGitFetch},
+			{Key: "setup.git.fetch", Command: fetchCommand, Operation: h.operations.SetupGitFetch},
 			{Key: "setup.git.add-remote", Command: []string{"git", "-C", tempDir, "remote", "add", "origin", repositoryName}, Operation: h.operations.SetupAddRemote},
 			{Key: "setup.git.checkout", Command: []string{"git", "-C", tempDir, "checkout", commit}, Operation: h.operations.SetupGitCheckout},
 		}

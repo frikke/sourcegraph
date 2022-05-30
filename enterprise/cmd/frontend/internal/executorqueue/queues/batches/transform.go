@@ -126,9 +126,14 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 	return apiclient.Job{
 		ID:                  int(job.ID),
 		VirtualMachineFiles: files,
+		RepositoryName:      string(repo.Name),
+		Commit:              workspace.Commit,
+		// We only care about the current repos content, so a shallow clone is good enough.
+		ShallowClone: true,
 		CliSteps: []apiclient.CliStep{
 			{
-				Commands: []string{"batch", "exec", "-f", "input.json"},
+				// TODO: Bind mode should not be required, we should default to a noop workspace instead.
+				Commands: []string{"batch", "exec", "-f", "input.json", "-workspace", "bind"},
 				Dir:      ".",
 				Env:      cliEnv,
 			},

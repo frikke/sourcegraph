@@ -99,7 +99,7 @@ func (h *handler) Handle(ctx context.Context, logger log.Logger, record workerut
 	logger.Info("Creating workspace")
 
 	hostRunner := h.runnerFactory("", commandLogger, command.Options{}, h.operations)
-	workingDirectory, err := h.prepareWorkspace(ctx, hostRunner, job.RepositoryName, job.Commit)
+	workingDirectory, err := h.prepareWorkspace(ctx, hostRunner, job.RepositoryName, job.Commit, job.ShallowClone)
 	if err != nil {
 		return errors.Wrap(err, "failed to prepare workspace")
 	}
