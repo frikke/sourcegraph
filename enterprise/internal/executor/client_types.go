@@ -15,7 +15,9 @@ type Job struct {
 	// Commit is the revhash that should be checked out prior to job execution.
 	Commit string `json:"commit"`
 
-	ShallowClone bool `json:"shallow_cline"`
+	ShallowClone bool `json:"shallow_clone"`
+
+	SparseCheckout string `json:"sparse_checkout,omitempty"`
 
 	// VirtualMachineFiles is a map from file names to content. Each entry in
 	// this map will be written into the workspace prior to job execution.

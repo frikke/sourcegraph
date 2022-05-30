@@ -123,13 +123,19 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 		}
 	}
 
+	sparseCheckout := ""
+	if workspace.OnlyFetchWorkspace {
+		sparseCheckout = workspace.Path
+	}
+
 	return apiclient.Job{
 		ID:                  int(job.ID),
 		VirtualMachineFiles: files,
 		RepositoryName:      string(repo.Name),
 		Commit:              workspace.Commit,
 		// We only care about the current repos content, so a shallow clone is good enough.
-		ShallowClone: true,
+		ShallowClone:   true,
+		SparseCheckout: sparseCheckout,
 		CliSteps: []apiclient.CliStep{
 			{
 				// TODO: Bind mode should not be required, we should default to a noop workspace instead.

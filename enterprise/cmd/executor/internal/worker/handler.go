@@ -99,7 +99,7 @@ func (h *handler) Handle(ctx context.Context, logger log.Logger, record workerut
 	logger.Info("Creating workspace")
 
 	hostRunner := h.runnerFactory("", commandLogger, command.Options{}, h.operations)
-	workingDirectory, err := h.prepareWorkspace(ctx, hostRunner, job.RepositoryName, job.Commit, job.ShallowClone)
+	workingDirectory, err := h.prepareWorkspace(ctx, hostRunner, job.RepositoryName, job.Commit, job.SparseCheckout, job.ShallowClone)
 	if err != nil {
 		return errors.Wrap(err, "failed to prepare workspace")
 	}
@@ -128,6 +128,10 @@ func (h *handler) Handle(ctx context.Context, logger log.Logger, record workerut
 		ExecutorName:       name,
 		FirecrackerOptions: h.options.FirecrackerOptions,
 		ResourceOptions:    h.options.ResourceOptions,
+	}
+	runnerWorkingDirectory := workingDirectory
+	if job.SparseCheckout != "" {
+		runnerWorkingDirectory = filepath.Join(runnerWorkingDirectory, job.SparseCheckout)
 	}
 	runner := h.runnerFactory(workingDirectory, commandLogger, options, h.operations)
 

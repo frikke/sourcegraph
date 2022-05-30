@@ -2,6 +2,7 @@ package resolvers
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"sync"
 
@@ -25,6 +26,9 @@ type batchChangesConnectionResolver struct {
 }
 
 func (r *batchChangesConnectionResolver) Nodes(ctx context.Context) ([]graphqlbackend.BatchChangeResolver, error) {
+	if 1 == 1 {
+		return nil, errors.New("new error")
+	}
 	nodes, _, err := r.compute(ctx)
 	if err != nil {
 		return nil, err

@@ -17,7 +17,7 @@ const SchemeExecutorToken = "token-executor"
 // while processing a single job. It is up to the caller to ensure that this directory is
 // removed after the job has finished processing. If a repository name is supplied, then
 // that repository will be cloned (through the frontend API) into the workspace.
-func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Runner, repositoryName, commit string, shallowClone bool) (_ string, err error) {
+func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Runner, repositoryName, commit, sparseCheckout string, shallowClone bool) (_ string, err error) {
 	tempDir, err := makeTempDir()
 	if err != nil {
 		return "", err
@@ -28,12 +28,22 @@ func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Ru
 		}
 	}()
 
+	repoPath := filepath.Join(tempDir, "repo")
+
+	if err := os.Mkdir(repoPath, os.ModePerm); err != nil {
+		return "", err
+	}
+
 	if repositoryName != "" {
 		cloneURL, err := makeRelativeURL(
 			h.options.ClientOptions.EndpointOptions.URL,
 			h.options.GitServicePath,
 			repositoryName,
 		)
+		if err != nil {
+			return "", err
+		}
+		cloneURL, err = url.Parse("https://github.com/sourcegraph/sourcegraph")
 		if err != nil {
 			return "", err
 		}
@@ -49,17 +59,27 @@ func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Ru
 		// This might help with performance on configurations with fewer executors,
 		// but maybe it doesn't matter beyond a certain point.
 		fetchCommand := []string{}
-		if shallowClone {
-			fetchCommand = []string{"git", "-C", tempDir, "-c", "protocol.version=2", "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal", "fetch", cloneURL.String(), "--depth=1", commit}
+		if sparseCheckout != "" {
+			fetchCommand = []string{"git", "-C", repoPath, "-c", "protocol.version=2",
+				// "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal",
+				"clone", cloneURL.String(), "--depth=1", "--filter=blob:none", "--no-checkout", repoPath}
+		} else if shallowClone {
+			fetchCommand = []string{"git", "-C", repoPath, "-c", "protocol.version=2", "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal", "fetch", cloneURL.String(), "--depth=1", commit}
 		} else {
-			fetchCommand = []string{"git", "-C", tempDir, "-c", "protocol.version=2", "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal", "fetch", cloneURL.String(), "-t", commit}
+			fetchCommand = []string{"git", "-C", repoPath, "-c", "protocol.version=2", "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal", "fetch", cloneURL.String(), "-t", commit}
 		}
 
 		gitCommands := []command.CommandSpec{
-			{Key: "setup.git.init", Command: []string{"git", "-C", tempDir, "init"}, Operation: h.operations.SetupGitInit},
+			// {Key: "setup.git.init", Command: []string{"git", "-C", repoPath, "init"}, Operation: h.operations.SetupGitInit},
 			{Key: "setup.git.fetch", Command: fetchCommand, Operation: h.operations.SetupGitFetch},
-			{Key: "setup.git.add-remote", Command: []string{"git", "-C", tempDir, "remote", "add", "origin", repositoryName}, Operation: h.operations.SetupAddRemote},
-			{Key: "setup.git.checkout", Command: []string{"git", "-C", tempDir, "checkout", commit}, Operation: h.operations.SetupGitCheckout},
+			// {Key: "setup.git.add-remote", Command: []string{"git", "-C", repoPath, "remote", "add", "origin", repositoryName}, Operation: h.operations.SetupAddRemote},
+		}
+		if sparseCheckout != "" {
+			gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.checkoutsparsecone", Command: []string{"git", "-C", repoPath, "sparse-checkout", "init", "--cone"}, Operation: h.operations.SetupGitCheckout})
+			gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.checkout", Command: []string{"git", "-C", repoPath, "checkout", commit}, Operation: h.operations.SetupGitCheckout})
+			gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.checkoutsparse", Command: []string{"git", "-C", repoPath, "sparse-checkout", "set", sparseCheckout}, Operation: h.operations.SetupGitCheckout})
+		} else {
+			gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.checkout", Command: []string{"git", "-C", repoPath, "checkout", commit}, Operation: h.operations.SetupGitCheckout})
 		}
 		for _, spec := range gitCommands {
 			if err := commandRunner.Run(ctx, spec); err != nil {
