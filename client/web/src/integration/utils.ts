@@ -2,10 +2,11 @@ import { Page } from 'puppeteer'
 
 import { SearchGraphQlOperations } from '@sourcegraph/search'
 import { SharedGraphQlOperations } from '@sourcegraph/shared/src/graphql-operations'
-import { percySnapshot } from '@sourcegraph/shared/src/testing/driver'
+import { Driver, percySnapshot } from '@sourcegraph/shared/src/testing/driver'
 import { readEnvironmentBoolean } from '@sourcegraph/shared/src/testing/utils'
 
 import { WebGraphQlOperations } from '../graphql-operations'
+import { Settings, SettingsExperimentalFeatures } from '@sourcegraph/shared/src/schema/settings.schema'
 
 const CODE_HIGHLIGHTING_QUERIES: Partial<
     keyof (WebGraphQlOperations & SharedGraphQlOperations & SearchGraphQlOperations)
@@ -92,11 +93,12 @@ export const setColorScheme = async (
     ])
 
     try {
-        // Check Monaco editor is styled correctly
+        // Check that Monaco/CodeMirror is styled correctly
         await page.waitForFunction(
             (expectedClassName: string) =>
-                document.querySelector('#monaco-query-input .monaco-editor') &&
-                document.querySelector('#monaco-query-input .monaco-editor')?.classList.contains(expectedClassName),
+                document.querySelector(`#monaco-query-input .monaco-editor.${expectedClassName}`) ||
+                // CodeMirror is styled via CSS modules and therefore we don't have to wait for it to update
+                document.querySelector('[data-test-id="codemirror-query-input"] .cm-content'),
             { timeout: 1000 },
             ColorSchemeToMonacoEditorClassName[scheme]
         )
@@ -126,13 +128,6 @@ export const percySnapshotWithVariants = async (
         return
     }
 
-    try {
-        // Wait for Monaco editor to finish rendering before taking screenshots
-        await page.waitForSelector('#monaco-query-input .monaco-editor', { visible: true, timeout: 1000 })
-    } catch {
-        // noop, page doesn't use monaco editor
-    }
-
     // Theme-light
     await setColorScheme(page, 'light', config?.waitForCodeHighlighting)
     await convertImgSourceHttpToBase64(page)
@@ -145,4 +140,163 @@ export const percySnapshotWithVariants = async (
 
     // Reset to light theme
     await setColorScheme(page, 'light', config?.waitForCodeHighlighting)
+}
+
+type Editor = NonNullable<SettingsExperimentalFeatures['editor']>
+
+interface EditorAPI {
+    name: Editor
+    /**
+     * Wait for editor to appear in the DOM.
+     */
+    waitForIt: (options?: Parameters<Page['waitForSelector']>[1]) => Promise<void>
+    /**
+     * Wait for suggestion with provided label appears
+     */
+    waitForSuggestion: (label: string) => Promise<void>
+    /**
+     * Moves focus to the editor's root node.
+     */
+    focus: () => Promise<void>
+    /**
+     * Returns the current value of the editor.
+     */
+    getValue: () => Promise<string | null | undefined>
+    /**
+     * Replaces the editor's content with the provided input.
+     */
+    replace: (input: string) => Promise<void>
+    /**
+     * Triggers application of the specified suggestion.
+     */
+    selectSuggestion: (label: string) => Promise<void>
+}
+
+const editors: Record<Editor, (driver: Driver, rootSelector: string) => EditorAPI> = {
+    // Using id selector rather than `test-` classes as Monaco doesn't allow customizing classes
+    monaco: (driver: Driver, rootSelector: string) => {
+        const inputSelector = `${rootSelector} textarea`
+        const completionSelector = `${rootSelector} .suggest-widget.visible`
+        const completionLabelSelector = `${completionSelector} span`
+
+        const api: EditorAPI = {
+            name: 'monaco',
+            async waitForIt(options) {
+                await driver.page.waitForSelector(rootSelector, options)
+            },
+            async focus() {
+                await api.waitForIt()
+                await driver.page.focus(rootSelector)
+            },
+            getValue() {
+                return driver.page.evaluate(
+                    (inputSelector: string) => document.querySelector<HTMLTextAreaElement>(inputSelector)?.value,
+                    inputSelector
+                )
+            },
+            replace(newText: string) {
+                return driver.replaceText({
+                    selector: rootSelector,
+                    newText,
+                    enterTextMethod: 'type',
+                })
+            },
+            async waitForSuggestion(suggestion: string) {
+                await driver.page.waitForSelector(completionSelector)
+                await driver.findElementWithText(suggestion, {
+                    selector: completionLabelSelector,
+                    wait: { timeout: 5000 },
+                })
+            },
+            async selectSuggestion(suggestion: string) {
+                await driver.page.waitForSelector(completionSelector)
+                await driver.findElementWithText(suggestion, {
+                    action: 'click',
+                    selector: completionLabelSelector,
+                    wait: { timeout: 5000 },
+                })
+            },
+        }
+        return api
+    },
+    codemirror6: (driver: Driver, rootSelector: string) => {
+        const inputSelector = `${rootSelector} .cm-content`
+        const completionSelector = `${rootSelector} .cm-tooltip-autocomplete`
+        const completionLabelSelector = `${completionSelector} .cm-completionLabel`
+
+        const api: EditorAPI = {
+            name: 'codemirror6',
+            async waitForIt(options) {
+                await driver.page.waitForSelector(rootSelector, options)
+            },
+            async focus() {
+                await api.waitForIt()
+                await driver.page.focus(rootSelector)
+            },
+            getValue() {
+                return driver.page.evaluate(
+                    (inputSelector: string) => document.querySelector<HTMLDivElement>(inputSelector)?.textContent,
+                    inputSelector
+                )
+            },
+            replace(newText: string) {
+                return driver.replaceText({
+                    selector: rootSelector,
+                    newText,
+                    enterTextMethod: 'type',
+                })
+            },
+            async waitForSuggestion(suggestion: string) {
+                await driver.page.waitForSelector(completionSelector)
+                await driver.findElementWithText(suggestion, {
+                    selector: completionLabelSelector,
+                    wait: { timeout: 5000 },
+                })
+            },
+            async selectSuggestion(suggestion: string) {
+                await driver.page.waitForSelector(completionSelector)
+                await driver.findElementWithText(suggestion, {
+                    action: 'click',
+                    selector: completionLabelSelector,
+                    wait: { timeout: 5000 },
+                })
+            },
+        }
+        return api
+    },
+}
+
+/**
+ * Creates the necessary user settings mock for enabling the specified editor.
+ * The caller is responsible for mocking the response with the returned object.
+ */
+export function enableEditor(editor: Editor): Partial<Settings> {
+    return {
+        experimentalFeatures: {
+            editor,
+        },
+    }
+}
+
+/**
+ * Returns an object for accessing editor related information at `rootSelector`.
+ */
+export const createEditorAPI = (driver: Driver, editor: Editor, rootSelector: string): EditorAPI => {
+    return editors[editor](driver, rootSelector)
+}
+
+/**
+ * Helper function for abstracting away testing different search query input
+ * implementations. The callback function gets passed the editor name and the
+ * main search query input selector, which can be used with {@link enableEditor}
+ * and {@link createEditorAPI}.
+ */
+export const withSearchQueryInput = (callback: (editorName: Editor, rootSelector: string) => void): void => {
+    const editorNames: [Editor, string][] = [
+        ['monaco', '#monaco-query-input'],
+        ['codemirror6', '[data-test-id="codemirror-query-input"]'],
+    ]
+    for (const [editor, selector] of editorNames) {
+        callback(editor, selector)
+    }
 }
