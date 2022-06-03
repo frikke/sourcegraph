@@ -43,10 +43,10 @@ func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Ru
 		if err != nil {
 			return "", err
 		}
-		cloneURL, err = url.Parse("https://github.com/sourcegraph/sourcegraph")
-		if err != nil {
-			return "", err
-		}
+		// cloneURL, err = url.Parse("https://github.com/sourcegraph/sourcegraph")
+		// if err != nil {
+		// 	return "", err
+		// }
 
 		authorizationOption := fmt.Sprintf(
 			"http.extraHeader=Authorization: %s %s",
@@ -70,9 +70,9 @@ func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Ru
 		}
 
 		gitCommands := []command.CommandSpec{
-			// {Key: "setup.git.init", Command: []string{"git", "-C", repoPath, "init"}, Operation: h.operations.SetupGitInit},
+			{Key: "setup.git.init", Command: []string{"git", "-C", repoPath, "init"}, Operation: h.operations.SetupGitInit},
 			{Key: "setup.git.fetch", Command: fetchCommand, Operation: h.operations.SetupGitFetch},
-			// {Key: "setup.git.add-remote", Command: []string{"git", "-C", repoPath, "remote", "add", "origin", repositoryName}, Operation: h.operations.SetupAddRemote},
+			{Key: "setup.git.add-remote", Command: []string{"git", "-C", repoPath, "remote", "add", "origin", repositoryName}, Operation: h.operations.SetupAddRemote},
 		}
 		if sparseCheckout != "" {
 			gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.checkoutsparsecone", Command: []string{"git", "-C", repoPath, "sparse-checkout", "init", "--cone"}, Operation: h.operations.SetupGitCheckout})

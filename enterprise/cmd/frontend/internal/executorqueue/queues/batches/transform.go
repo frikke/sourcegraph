@@ -52,10 +52,10 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 
 	// Create an internal access token that will get cleaned up when the job
 	// finishes.
-	token, err := createAndAttachInternalAccessToken(ctx, s, job.ID, batchSpec.UserID)
-	if err != nil {
-		return apiclient.Job{}, errors.Wrap(err, "creating internal access token")
-	}
+	// token, err := createAndAttachInternalAccessToken(ctx, s, job.ID, batchSpec.UserID)
+	// if err != nil {
+	// 	return apiclient.Job{}, errors.Wrap(err, "creating internal access token")
+	// }
 
 	executionInput := batcheslib.WorkspacesExecutionInput{
 		Repository: batcheslib.WorkspaceRepo{
@@ -92,8 +92,8 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 	}
 
 	cliEnv := []string{
-		fmt.Sprintf("SRC_ENDPOINT=%s", srcEndpoint),
-		fmt.Sprintf("SRC_ACCESS_TOKEN=%s", token),
+		fmt.Sprintf("SRC_ENDPOINT=%s", "http://localhost:10001/.api/wurst"),
+		// fmt.Sprintf("SRC_ACCESS_TOKEN=%s", token),
 	}
 
 	marshaledInput, err := json.Marshal(executionInput)
@@ -158,7 +158,7 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 
 			// 🚨 SECURITY: Redact the access token used for src-cli to talk to
 			// Sourcegraph instance.
-			token: "SRC_ACCESS_TOKEN_REMOVED",
+			// token: "SRC_ACCESS_TOKEN_REMOVED",
 		},
 	}, nil
 }
