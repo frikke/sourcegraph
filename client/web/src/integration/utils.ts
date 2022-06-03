@@ -91,23 +91,6 @@ export const setColorScheme = async (
         page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: scheme }]),
         shouldWaitForCodeHighlighting ? waitForCodeHighlighting(page) : Promise.resolve(),
     ])
-
-    try {
-        // Check that Monaco/CodeMirror is styled correctly
-        await page.waitForFunction(
-            (expectedClassName: string) =>
-                document.querySelector(`#monaco-query-input .monaco-editor.${expectedClassName}`) ||
-                // CodeMirror is styled via CSS modules and therefore we don't have to wait for it to update
-                document.querySelector('[data-test-id="codemirror-query-input"] .cm-content'),
-            { timeout: 1000 },
-            ColorSchemeToMonacoEditorClassName[scheme]
-        )
-
-        // Wait a tiny bit for Monaco syntax highlighting to be applied
-        await page.waitForTimeout(500)
-    } catch {
-        // noop, page doesn't use monaco editor
-    }
 }
 
 export interface PercySnapshotConfig {
@@ -128,21 +111,24 @@ export const percySnapshotWithVariants = async (
         return
     }
 
-    // Randome timeout to wait for things to settle down
-    await page.waitForTimeout(1000)
-
     // Theme-light
     await setColorScheme(page, 'light', config?.waitForCodeHighlighting)
     await convertImgSourceHttpToBase64(page)
+    // Random timeout to wait for things to settle down
+    await page.waitForTimeout(1000)
     await percySnapshot(page, `${name} - light theme`)
 
     // Theme-dark
     await setColorScheme(page, 'dark', config?.waitForCodeHighlighting)
     await convertImgSourceHttpToBase64(page)
+    // Random timeout to wait for things to settle down
+    await page.waitForTimeout(1000)
     await percySnapshot(page, `${name} - dark theme`)
 
     // Reset to light theme
     await setColorScheme(page, 'light', config?.waitForCodeHighlighting)
+    // Random timeout to wait for things to settle down
+    await page.waitForTimeout(1000)
 }
 
 type Editor = NonNullable<SettingsExperimentalFeatures['editor']>
