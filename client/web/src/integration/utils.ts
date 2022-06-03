@@ -128,6 +128,9 @@ export const percySnapshotWithVariants = async (
         return
     }
 
+    // Randome timeout to wait for things to settle down
+    await page.waitForTimeout(1000)
+
     // Theme-light
     await setColorScheme(page, 'light', config?.waitForCodeHighlighting)
     await convertImgSourceHttpToBase64(page)
