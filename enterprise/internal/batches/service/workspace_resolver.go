@@ -331,14 +331,11 @@ func (wr *workspaceResolver) resolveRepositoriesMatchingQuery(ctx context.Contex
 		for _, match := range matches {
 			switch m := match.(type) {
 			case *streamhttp.EventRepoMatch:
-				fmt.Printf("have a repo match: branches=%v\n", m.Branches)
 				repoIDs = append(repoIDs, api.RepoID(m.RepositoryID))
 			case *streamhttp.EventContentMatch:
-				fmt.Printf("have a content match: commit=%q branches=%v\n", m.Commit, m.Branches)
 				repoIDs = append(repoIDs, api.RepoID(m.RepositoryID))
 				addRepoFilePatch(api.RepoID(m.RepositoryID), m.Path)
 			case *streamhttp.EventPathMatch:
-				fmt.Printf("have a file match: commit=%q branches=%v\n", m.Commit, m.Branches)
 				repoIDs = append(repoIDs, api.RepoID(m.RepositoryID))
 				addRepoFilePatch(api.RepoID(m.RepositoryID), m.Path)
 			case *streamhttp.EventSymbolMatch:
