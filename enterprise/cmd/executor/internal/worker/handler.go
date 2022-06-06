@@ -263,6 +263,10 @@ func writeFiles(workspaceFileContentsByPath map[string][]byte, logger *command.L
 	}()
 
 	for path, content := range workspaceFileContentsByPath {
+		// Ensure the path exists.
+		if err := os.MkdirAll(filepath.Dir(path), os.ModePerm); err != nil {
+			return err
+		}
 		if err := os.WriteFile(path, content, os.ModePerm); err != nil {
 			return err
 		}

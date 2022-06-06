@@ -120,7 +120,6 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 				return apiclient.Job{}, errors.Wrap(err, "serializing cache entry")
 			}
 			// Add file to virtualMachineFiles.
-			// TODO: Validate this works.
 			files["cache/"+cacheEntry.Key+`.json`] = string(serializedCacheEntry)
 		}
 	}
@@ -146,7 +145,6 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 					"batch",
 					"exec",
 					"-f", "../input.json",
-					"-workspace", "bind",
 					// Tell src to look for cache files in the main directory. TODO: Did this ever work?
 					"-cache", "../cache",
 					"-sourcegraph-version", version.Version(),
