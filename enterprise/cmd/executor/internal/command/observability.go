@@ -10,14 +10,19 @@ import (
 )
 
 type Operations struct {
-	SetupGitInit              *observation.Operation
-	SetupGitFetch             *observation.Operation
-	SetupAddRemote            *observation.Operation
-	SetupGitCheckout          *observation.Operation
-	SetupFirecrackerStart     *observation.Operation
-	SetupStartupScript        *observation.Operation
-	TeardownFirecrackerRemove *observation.Operation
-	Exec                      *observation.Operation
+	SetupGitSafeDirectory        *observation.Operation
+	SetupGitInit                 *observation.Operation
+	SetupAddRemote               *observation.Operation
+	SetupGitDisableGC            *observation.Operation
+	SetupGitFetch                *observation.Operation
+	SetupGitSparseCheckoutConfig *observation.Operation
+	SetupGitSparseCheckoutInit   *observation.Operation
+	SetupGitCheckout             *observation.Operation
+	SetupGitSparseCheckoutSet    *observation.Operation
+	SetupFirecrackerStart        *observation.Operation
+	SetupStartupScript           *observation.Operation
+	TeardownFirecrackerRemove    *observation.Operation
+	Exec                         *observation.Operation
 
 	RunLockWaitTotal prometheus.Counter
 	RunLockHeldTotal prometheus.Counter
@@ -52,14 +57,19 @@ func NewOperations(observationContext *observation.Context) *Operations {
 	observationContext.Registerer.MustRegister(runLockHeldTotal)
 
 	return &Operations{
-		SetupGitInit:              op("setup.git.init"),
-		SetupGitFetch:             op("setup.git.fetch"),
-		SetupAddRemote:            op("setup.git.add-remote"),
-		SetupGitCheckout:          op("setup.git.checkout"),
-		SetupFirecrackerStart:     op("setup.firecracker.start"),
-		SetupStartupScript:        op("setup.startup-script"),
-		TeardownFirecrackerRemove: op("teardown.firecracker.remove"),
-		Exec:                      op("exec"),
+		SetupGitSafeDirectory:        op("setup.git.safe-directory"),
+		SetupGitInit:                 op("setup.git.init"),
+		SetupAddRemote:               op("setup.git.add-remote"),
+		SetupGitDisableGC:            op("setup.git.disable-gc"),
+		SetupGitFetch:                op("setup.git.fetch"),
+		SetupGitSparseCheckoutConfig: op("setup.git.sparse-checkout-config"),
+		SetupGitSparseCheckoutInit:   op("setup.git.sparse-checkout-init"),
+		SetupGitCheckout:             op("setup.git.checkout"),
+		SetupGitSparseCheckoutSet:    op("setup.git.sparse-checkout-set"),
+		SetupFirecrackerStart:        op("setup.firecracker.start"),
+		SetupStartupScript:           op("setup.startup-script"),
+		TeardownFirecrackerRemove:    op("teardown.firecracker.remove"),
+		Exec:                         op("exec"),
 
 		RunLockWaitTotal: runLockWaitTotal,
 		RunLockHeldTotal: runLockHeldTotal,

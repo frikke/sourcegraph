@@ -120,13 +120,14 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 				return apiclient.Job{}, errors.Wrap(err, "serializing cache entry")
 			}
 			// Add file to virtualMachineFiles.
-			files[cacheEntry.Key+`.json`] = string(serializedCacheEntry)
+			// TODO: Validate this works.
+			files["cache/"+cacheEntry.Key+`.json`] = string(serializedCacheEntry)
 		}
 	}
 
-	sparseCheckout := ""
+	sparseCheckout := []string{}
 	if workspace.OnlyFetchWorkspace {
-		sparseCheckout = workspace.Path
+		sparseCheckout = []string{workspace.Path}
 	}
 
 	return apiclient.Job{
@@ -141,11 +142,13 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 		CliSteps: []apiclient.CliStep{
 			{
 				// TODO: Bind mode should not be required, we should default to a noop workspace instead.
-				Commands: []string{"batch", "exec",
-					"-f", "input.json",
+				Commands: []string{
+					"batch",
+					"exec",
+					"-f", "../input.json",
 					"-workspace", "bind",
 					// Tell src to look for cache files in the main directory. TODO: Did this ever work?
-					"-cache", ".",
+					"-cache", "../cache",
 					"-sourcegraph-version", version.Version(),
 				},
 				Dir: ".",

@@ -15,12 +15,17 @@ type Job struct {
 	// Commit is the revhash that should be checked out prior to job execution.
 	Commit string `json:"commit"`
 
+	// ShallowClone, when true speeds up repo cloning by fetching only the target commit
+	// and no tags.
 	ShallowClone bool `json:"shallow_clone"`
 
-	SparseCheckout string `json:"sparse_checkout,omitempty"`
+	// SparseCheckout denotes the cone patterns to check out. This can be used to fetch
+	// only a part of a repository.
+	SparseCheckout []string `json:"sparse_checkout"`
 
 	// VirtualMachineFiles is a map from file names to content. Each entry in
 	// this map will be written into the workspace prior to job execution.
+	// The file paths must be relative and within the working directory.
 	VirtualMachineFiles map[string]string `json:"files"`
 
 	// DockerSteps describe a series of docker run commands to be invoked in the
