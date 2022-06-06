@@ -13,6 +13,7 @@ import (
 	"github.com/sourcegraph/sourcegraph/internal/actor"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/version"
 	batcheslib "github.com/sourcegraph/sourcegraph/lib/batches"
 	"github.com/sourcegraph/sourcegraph/lib/batches/template"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
@@ -134,14 +135,21 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 		RepositoryName:      string(repo.Name),
 		Commit:              workspace.Commit,
 		// We only care about the current repos content, so a shallow clone is good enough.
+		// Later we might allow to tweak more git parameters, like submodules and LFS.
 		ShallowClone:   true,
 		SparseCheckout: sparseCheckout,
 		CliSteps: []apiclient.CliStep{
 			{
 				// TODO: Bind mode should not be required, we should default to a noop workspace instead.
-				Commands: []string{"batch", "exec", "-f", "input.json", "-workspace", "bind"},
-				Dir:      ".",
-				Env:      cliEnv,
+				Commands: []string{"batch", "exec",
+					"-f", "input.json",
+					"-workspace", "bind",
+					// Tell src to look for cache files in the main directory. TODO: Did this ever work?
+					"-cache", ".",
+					"-sourcegraph-version", version.Version(),
+				},
+				Dir: ".",
+				Env: cliEnv,
 			},
 		},
 		RedactedValues: map[string]string{

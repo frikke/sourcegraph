@@ -245,6 +245,11 @@ func scriptNameFromJobStep(job executor.Job, i int) string {
 
 // writeFiles writes to the filesystem the content in the given map.
 func writeFiles(workspaceFileContentsByPath map[string][]byte, logger *command.Logger) (err error) {
+	// Bail out early if nothing to do, we don't need to spawn an empty log group.
+	if len(workspaceFileContentsByPath) == 0 {
+		return nil
+	}
+
 	handle := logger.Log("setup.fs", nil)
 	defer func() {
 		if err == nil {

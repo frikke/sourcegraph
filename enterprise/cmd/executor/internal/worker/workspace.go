@@ -28,11 +28,12 @@ func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Ru
 		}
 	}()
 
-	repoPath := filepath.Join(tempDir, "repo")
+	// // Store the repo in a subdirectory. Why? We want to be able to put other files in there, too and they shouldn't interfere.
+	// repoPath := filepath.Join(tempDir, "repo")
 
-	if err := os.Mkdir(repoPath, os.ModePerm); err != nil {
-		return "", err
-	}
+	// if err := os.Mkdir(repoPath, os.ModePerm); err != nil {
+	// 	return "", err
+	// }
 
 	if repositoryName != "" {
 		cloneURL, err := makeRelativeURL(
@@ -43,10 +44,6 @@ func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Ru
 		if err != nil {
 			return "", err
 		}
-		// cloneURL, err = url.Parse("https://github.com/sourcegraph/sourcegraph")
-		// if err != nil {
-		// 	return "", err
-		// }
 
 		authorizationOption := fmt.Sprintf(
 			"http.extraHeader=Authorization: %s %s",
@@ -58,29 +55,50 @@ func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Ru
 		// Like keeping the same tmp dir for the .git but checking out into multiple workspaces?
 		// This might help with performance on configurations with fewer executors,
 		// but maybe it doesn't matter beyond a certain point.
-		fetchCommand := []string{}
+
+		fetchCommand := []string{"git", "-C", tempDir, "-c", "protocol.version=2", "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal", "fetch", "--no-tags", "--prune", "--progress", "--no-recurse-submodules",
+			"--depth=1", "origin", commit}
+
 		if sparseCheckout != "" {
-			fetchCommand = []string{"git", "-C", repoPath, "-c", "protocol.version=2",
-				// "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal",
-				"clone", cloneURL.String(), "--depth=1", "--filter=blob:none", "--no-checkout", repoPath}
-		} else if shallowClone {
-			fetchCommand = []string{"git", "-C", repoPath, "-c", "protocol.version=2", "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal", "fetch", cloneURL.String(), "--depth=1", commit}
-		} else {
-			fetchCommand = []string{"git", "-C", repoPath, "-c", "protocol.version=2", "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal", "fetch", cloneURL.String(), "-t", commit}
+			fetchCommand = append(fetchCommand[:14], fetchCommand[13:]...)
+			fetchCommand[13] = "--filter=blob:none"
 		}
 
+		gitStdEnv := []string{"GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=Never"}
+
 		gitCommands := []command.CommandSpec{
-			{Key: "setup.git.init", Command: []string{"git", "-C", repoPath, "init"}, Operation: h.operations.SetupGitInit},
-			{Key: "setup.git.fetch", Command: fetchCommand, Operation: h.operations.SetupGitFetch},
-			{Key: "setup.git.add-remote", Command: []string{"git", "-C", repoPath, "remote", "add", "origin", repositoryName}, Operation: h.operations.SetupAddRemote},
+			// First, mark the repo as a safe directory. This will allow git commands to be run in the repo even if the UID changes.
+			// TODO: This will clutter the global config.
+			// TODO: This just failed in local dev with `error: could not lock config file /Users/erik/.gitconfig: File exists`.
+			{Key: "setup.git.safe-directory", Env: gitStdEnv, Command: []string{"git", "-C", tempDir, "config", "--global", "safe.directory", tempDir}, Operation: h.operations.SetupGitInit},
+			{Key: "setup.git.init", Env: gitStdEnv, Command: []string{"git", "-C", tempDir, "init"}, Operation: h.operations.SetupGitInit},
+			{Key: "setup.git.add-remote", Env: gitStdEnv, Command: []string{"git", "-C", tempDir, "remote", "add", "origin", cloneURL.String()}, Operation: h.operations.SetupAddRemote},
+			// Disable gc, this can improve performance.
+			{Key: "setup.git.disable-gc", Env: gitStdEnv, Command: []string{"git", "-C", tempDir, "config", "--local", "gc.auto", "0"}, Operation: h.operations.SetupAddRemote},
+			{Key: "setup.git.fetch", Env: gitStdEnv, Command: fetchCommand, Operation: h.operations.SetupGitFetch},
 		}
+
 		if sparseCheckout != "" {
-			gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.checkoutsparsecone", Command: []string{"git", "-C", repoPath, "sparse-checkout", "init", "--cone"}, Operation: h.operations.SetupGitCheckout})
-			gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.checkout", Command: []string{"git", "-C", repoPath, "checkout", commit}, Operation: h.operations.SetupGitCheckout})
-			gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.checkoutsparse", Command: []string{"git", "-C", repoPath, "sparse-checkout", "set", sparseCheckout}, Operation: h.operations.SetupGitCheckout})
-		} else {
-			gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.checkout", Command: []string{"git", "-C", repoPath, "checkout", commit}, Operation: h.operations.SetupGitCheckout})
+			// TODO: Is this required?
+			gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.sparse-checkout-config", Env: gitStdEnv, Command: []string{"git", "-C", tempDir, "config", "--local", "core.sparseCheckoutCone", "1"}, Operation: h.operations.SetupGitCheckout})
+			// TODO: `set` or `init`?
+			gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.sparse-checkout-init", Env: gitStdEnv, Command: []string{"git", "-C", tempDir, "sparse-checkout", "set", "--cone"}, Operation: h.operations.SetupGitCheckout})
 		}
+
+		gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.checkout", Env: gitStdEnv, Command: []string{"git", "-C", tempDir,
+			// TODO: This is only required for sparse checkouts:
+			"-c", "protocol.version=2", "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal",
+			"checkout", "--progress", "--force",
+			// TODO: the commit needs to be `+commit:ref`, instead of just commit. Maybe we don't need a proper branch though.
+			//  "-B",
+			commit}, Operation: h.operations.SetupGitCheckout})
+		if sparseCheckout != "" {
+			gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.sparse-checkout-set", Env: gitStdEnv, Command: []string{"git", "-C", tempDir, "-c", "protocol.version=2", "-c", authorizationOption, "-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal", "sparse-checkout", "set", "--", sparseCheckout}, Operation: h.operations.SetupGitCheckout})
+		}
+
+		// TODO: Remove, this just validates the files are there.
+		gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.ls-files", Env: gitStdEnv, Command: []string{"du", "-ahc", tempDir}, Operation: h.operations.SetupGitFetch})
+
 		for _, spec := range gitCommands {
 			if err := commandRunner.Run(ctx, spec); err != nil {
 				return "", errors.Wrap(err, fmt.Sprintf("failed %s", spec.Key))
