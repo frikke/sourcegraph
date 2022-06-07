@@ -38,10 +38,6 @@ const waitForCodeHighlighting = async (page: Page): Promise<void> => {
 
 type ColorScheme = 'dark' | 'light'
 
-const ColorSchemeToMonacoEditorClassName: Record<ColorScheme, string> = {
-    dark: 'vs-dark',
-    light: 'vs',
-}
 /**
  * Percy couldn't capture <img /> since they have `src` values with testing domain name.
  * We need to call this function before asking Percy to take snapshots,
