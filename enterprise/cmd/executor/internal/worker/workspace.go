@@ -168,9 +168,6 @@ func (h *handler) prepareWorkspace(ctx context.Context, commandRunner command.Ru
 			Operation: h.operations.SetupGitCheckout,
 		})
 
-		// TODO: Remove, this just validates the files are there.
-		gitCommands = append(gitCommands, command.CommandSpec{Key: "setup.git.ls-files", Env: gitStdEnv, Command: []string{"du", "-ahc", tempDir}, Operation: h.operations.SetupGitFetch})
-
 		for _, spec := range gitCommands {
 			if err := commandRunner.Run(ctx, spec); err != nil {
 				return "", "", errors.Wrap(err, fmt.Sprintf("failed %s", spec.Key))

@@ -14,7 +14,6 @@ import (
 
 	btypes "github.com/sourcegraph/sourcegraph/enterprise/internal/batches/types"
 	"github.com/sourcegraph/sourcegraph/internal/actor"
-	"github.com/sourcegraph/sourcegraph/internal/database"
 	"github.com/sourcegraph/sourcegraph/internal/database/basestore"
 	"github.com/sourcegraph/sourcegraph/internal/observation"
 	"github.com/sourcegraph/sourcegraph/internal/workerutil"
@@ -66,9 +65,9 @@ func NewBatchSpecWorkspaceExecutionWorkerStore(handle *basestore.TransactableHan
 	return &batchSpecWorkspaceExecutionWorkerStore{
 		Store:              dbworkerstore.NewWithMetrics(handle, batchSpecWorkspaceExecutionWorkerStoreOptions, observationContext),
 		observationContext: observationContext,
-		accessTokenDeleterForTX: func(tx *Store) accessTokenHardDeleter {
-			return tx.DatabaseDB().AccessTokens().HardDeleteByID
-		},
+		// accessTokenDeleterForTX: func(tx *Store) accessTokenHardDeleter {
+		// 	return tx.DatabaseDB().AccessTokens().HardDeleteByID
+		// },
 	}
 }
 
@@ -81,7 +80,7 @@ var _ dbworkerstore.Store = &batchSpecWorkspaceExecutionWorkerStore{}
 type batchSpecWorkspaceExecutionWorkerStore struct {
 	dbworkerstore.Store
 
-	accessTokenDeleterForTX func(tx *Store) accessTokenHardDeleter
+	// accessTokenDeleterForTX func(tx *Store) accessTokenHardDeleter
 
 	observationContext *observation.Context
 }
@@ -106,17 +105,17 @@ func (s *batchSpecWorkspaceExecutionWorkerStore) FetchCanceled(ctx context.Conte
 	return ids, nil
 }
 
-type accessTokenHardDeleter func(context.Context, int64) error
+// type accessTokenHardDeleter func(context.Context, int64) error
 
 // deleteAccessToken tries to delete the associated internal access
 // token. If the token cannot be found it does *not* return an error.
-func deleteAccessToken(ctx context.Context, deleteToken accessTokenHardDeleter, tokenID int64) error {
-	err := deleteToken(ctx, tokenID)
-	if err != nil && err != database.ErrAccessTokenNotFound {
-		return err
-	}
-	return nil
-}
+// func deleteAccessToken(ctx context.Context, deleteToken accessTokenHardDeleter, tokenID int64) error {
+// 	err := deleteToken(ctx, tokenID)
+// 	if err != nil && err != database.ErrAccessTokenNotFound {
+// 		return err
+// 	}
+// 	return nil
+// }
 
 type markFinal func(ctx context.Context, tx dbworkerstore.Store) (_ bool, err error)
 
@@ -143,10 +142,10 @@ func (s *batchSpecWorkspaceExecutionWorkerStore) markFinal(ctx context.Context, 
 		return false, err
 	}
 
-	err = deleteAccessToken(ctx, s.accessTokenDeleterForTX(tx), job.AccessTokenID)
-	if err != nil {
-		return false, err
-	}
+	// err = deleteAccessToken(ctx, s.accessTokenDeleterForTX(tx), job.AccessTokenID)
+	// if err != nil {
+	// 	return false, err
+	// }
 
 	events, err := logEventsFromLogEntries(job.ExecutionLogs)
 	if err != nil {
@@ -297,10 +296,10 @@ func (s *batchSpecWorkspaceExecutionWorkerStore) MarkComplete(ctx context.Contex
 		}
 	}
 
-	err = deleteAccessToken(ctx, s.accessTokenDeleterForTX(tx), job.AccessTokenID)
-	if err != nil {
-		return rollbackAndMarkFailed(err, fmt.Sprintf("failed to delete internal access token: %s", err))
-	}
+	// err = deleteAccessToken(ctx, s.accessTokenDeleterForTX(tx), job.AccessTokenID)
+	// if err != nil {
+	// 	return rollbackAndMarkFailed(err, fmt.Sprintf("failed to delete internal access token: %s", err))
+	// }
 
 	if err = s.setChangesetSpecIDs(ctx, job.BatchSpecWorkspaceID, changesetSpecIDs); err != nil {
 		return false, tx.Done(err)

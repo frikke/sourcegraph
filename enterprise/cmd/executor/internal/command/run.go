@@ -98,8 +98,6 @@ var allowedBinaries = []string{
 	"git",
 	"ignite",
 	"src",
-	// TODO: Remove, this is for debugging only.
-	"du",
 }
 
 var ErrIllegalCommand = errors.New("illegal command")

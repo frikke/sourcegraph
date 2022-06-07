@@ -93,6 +93,7 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 	}
 
 	cliEnv := []string{
+		// TODO: Remove this. I just want to be sure it doesn't talk to sourcegraph.com :D
 		fmt.Sprintf("SRC_ENDPOINT=%s", "http://localhost:10001/.api/wurst"),
 		// fmt.Sprintf("SRC_ACCESS_TOKEN=%s", token),
 	}
@@ -172,21 +173,21 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 	}, nil
 }
 
-const (
-	accessTokenNote  = "batch-spec-execution"
-	accessTokenScope = "user:all"
-)
+// const (
+// 	accessTokenNote  = "batch-spec-execution"
+// 	accessTokenScope = "user:all"
+// )
 
-func createAndAttachInternalAccessToken(ctx context.Context, s BatchesStore, jobID int64, userID int32) (string, error) {
-	tokenID, token, err := s.DatabaseDB().AccessTokens().CreateInternal(ctx, userID, []string{accessTokenScope}, accessTokenNote, userID)
-	if err != nil {
-		return "", err
-	}
-	if err := s.SetBatchSpecWorkspaceExecutionJobAccessToken(ctx, jobID, tokenID); err != nil {
-		return "", err
-	}
-	return token, nil
-}
+// func createAndAttachInternalAccessToken(ctx context.Context, s BatchesStore, jobID int64, userID int32) (string, error) {
+// 	tokenID, token, err := s.DatabaseDB().AccessTokens().CreateInternal(ctx, userID, []string{accessTokenScope}, accessTokenNote, userID)
+// 	if err != nil {
+// 		return "", err
+// 	}
+// 	if err := s.SetBatchSpecWorkspaceExecutionJobAccessToken(ctx, jobID, tokenID); err != nil {
+// 		return "", err
+// 	}
+// 	return token, nil
+// }
 
 func makeURL(base, password string) (string, error) {
 	u, err := url.Parse(base)
