@@ -44,32 +44,25 @@ type ColorScheme = 'dark' | 'light'
  * <img /> with base64 data would be visible on Percy snapshot
  */
 export const convertImgSourceHttpToBase64 = async (page: Page): Promise<void> => {
-    await page.evaluate(async () => {
+    await page.evaluate(() => {
         // Skip images with data-skip-percy
         // See https://github.com/sourcegraph/sourcegraph/issues/28949
         const imgs = document.querySelectorAll<HTMLImageElement>('img:not([data-skip-percy])')
-        await Promise.all(
-            Array.from(
-                imgs,
-                img =>
-                    new Promise<void>((resolve, reject) => {
-                        if (img.src.startsWith('data:image')) {
-                            return resolve()
-                        }
 
-                        const canvas = document.createElement('canvas')
-                        canvas.width = img.width
-                        canvas.height = img.height
+        for (const img of imgs) {
+            if (img.src.startsWith('data:image')) {
+                continue
+            }
 
-                        const context = canvas.getContext('2d')
-                        context?.drawImage(img, 0, 0)
+            const canvas = document.createElement('canvas')
+            canvas.width = img.width
+            canvas.height = img.height
 
-                        img.src = canvas.toDataURL('image/png')
-                        img.addEventListener('load', () => resolve())
-                        img.addEventListener('error', reject)
-                    })
-            )
-        )
+            const context = canvas.getContext('2d')
+            context?.drawImage(img, 0, 0)
+
+            img.src = canvas.toDataURL('image/png')
+        }
     })
 }
 
@@ -120,16 +113,18 @@ export const percySnapshotWithVariants = async (
 
     // Theme-dark
     await setColorScheme(page, 'dark', waitForCodeHighlighting)
-    await convertImgSourceHttpToBase64(page)
-    // Random timeout to wait for things to settle down
+    // Wait for the UI to settle before converting images and taking the
+    // screenshot.
     await page.waitForTimeout(timeout)
+    await convertImgSourceHttpToBase64(page)
     await percySnapshot(page, `${name} - dark theme`)
 
     // Theme-light
     await setColorScheme(page, 'light', waitForCodeHighlighting)
-    await convertImgSourceHttpToBase64(page)
-    // Random timeout to wait for things to settle down
+    // Wait for the UI to settle before converting images and taking the
+    // screenshot.
     await page.waitForTimeout(timeout)
+    await convertImgSourceHttpToBase64(page)
     await percySnapshot(page, `${name} - light theme`)
 }
 
