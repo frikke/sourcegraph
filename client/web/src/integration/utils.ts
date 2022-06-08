@@ -44,25 +44,32 @@ type ColorScheme = 'dark' | 'light'
  * <img /> with base64 data would be visible on Percy snapshot
  */
 export const convertImgSourceHttpToBase64 = async (page: Page): Promise<void> => {
-    await page.evaluate(() => {
+    await page.evaluate(async () => {
         // Skip images with data-skip-percy
         // See https://github.com/sourcegraph/sourcegraph/issues/28949
         const imgs = document.querySelectorAll<HTMLImageElement>('img:not([data-skip-percy])')
+        await Promise.all(
+            Array.from(
+                imgs,
+                img =>
+                    new Promise<void>((resolve, reject) => {
+                        if (img.src.startsWith('data:image')) {
+                            return resolve()
+                        }
 
-        for (const img of imgs) {
-            if (img.src.startsWith('data:image')) {
-                continue
-            }
+                        const canvas = document.createElement('canvas')
+                        canvas.width = img.width
+                        canvas.height = img.height
 
-            const canvas = document.createElement('canvas')
-            canvas.width = img.width
-            canvas.height = img.height
+                        const context = canvas.getContext('2d')
+                        context?.drawImage(img, 0, 0)
 
-            const context = canvas.getContext('2d')
-            context?.drawImage(img, 0, 0)
-
-            img.src = canvas.toDataURL('image/png')
-        }
+                        img.src = canvas.toDataURL('image/png')
+                        img.addEventListener('load', () => resolve())
+                        img.addEventListener('error', reject)
+                    })
+            )
+        )
     })
 }
 
@@ -90,6 +97,10 @@ export const setColorScheme = async (
 }
 
 export interface PercySnapshotConfig {
+    /**
+     * How long to wait for the UI to settle before taking a screenshot.
+     */
+    timeout: number
     waitForCodeHighlighting: boolean
 }
 
@@ -99,7 +110,7 @@ export interface PercySnapshotConfig {
 export const percySnapshotWithVariants = async (
     page: Page,
     name: string,
-    config?: PercySnapshotConfig
+    { timeout = 1000, waitForCodeHighlighting = false } = {}
 ): Promise<void> => {
     const percyEnabled = readEnvironmentBoolean({ variable: 'PERCY_ON', defaultValue: false })
 
@@ -107,24 +118,19 @@ export const percySnapshotWithVariants = async (
         return
     }
 
-    // Theme-light
-    await setColorScheme(page, 'light', config?.waitForCodeHighlighting)
-    await convertImgSourceHttpToBase64(page)
-    // Random timeout to wait for things to settle down
-    await page.waitForTimeout(1000)
-    await percySnapshot(page, `${name} - light theme`)
-
     // Theme-dark
-    await setColorScheme(page, 'dark', config?.waitForCodeHighlighting)
+    await setColorScheme(page, 'dark', waitForCodeHighlighting)
     await convertImgSourceHttpToBase64(page)
     // Random timeout to wait for things to settle down
-    await page.waitForTimeout(1000)
+    await page.waitForTimeout(timeout)
     await percySnapshot(page, `${name} - dark theme`)
 
-    // Reset to light theme
-    await setColorScheme(page, 'light', config?.waitForCodeHighlighting)
+    // Theme-light
+    await setColorScheme(page, 'light', waitForCodeHighlighting)
+    await convertImgSourceHttpToBase64(page)
     // Random timeout to wait for things to settle down
-    await page.waitForTimeout(1000)
+    await page.waitForTimeout(timeout)
+    await percySnapshot(page, `${name} - light theme`)
 }
 
 type Editor = NonNullable<SettingsExperimentalFeatures['editor']>
