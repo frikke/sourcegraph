@@ -95,16 +95,16 @@ func (h *handler) Handle(ctx context.Context, logger log.Logger, record workerut
 
 	// Create a working directory for this job which will be removed once the job completes.
 	// If a repository is supplied as part of the job configuration, it will be cloned into
-	// the working directory.
+	// the working directory under /repo.
 	logger.Info("Creating workspace")
 
 	hostRunner := h.runnerFactory("", commandLogger, command.Options{}, h.operations)
-	workingDirectory, err := h.prepareWorkspace(ctx, hostRunner, job.RepositoryName, job.Commit)
+	workspaceRoot, workingDirectory, err := h.prepareWorkspace(ctx, hostRunner, job.RepositoryName, job.Commit, job.ShallowClone, job.SparseCheckout)
 	if err != nil {
 		return errors.Wrap(err, "failed to prepare workspace")
 	}
 	defer func() {
-		_ = os.RemoveAll(workingDirectory)
+		_ = os.RemoveAll(workspaceRoot)
 	}()
 
 	vmNameSuffix, err := uuid.NewRandom()
@@ -129,7 +129,7 @@ func (h *handler) Handle(ctx context.Context, logger log.Logger, record workerut
 		FirecrackerOptions: h.options.FirecrackerOptions,
 		ResourceOptions:    h.options.ResourceOptions,
 	}
-	runner := h.runnerFactory(workingDirectory, commandLogger, options, h.operations)
+	runner := h.runnerFactory(workspaceRoot, commandLogger, options, h.operations)
 
 	// Construct a map from filenames to file content that should be accessible to jobs
 	// within the workspace. This consists of files supplied within the job record itself,
@@ -137,11 +137,11 @@ func (h *handler) Handle(ctx context.Context, logger log.Logger, record workerut
 	workspaceFileContentsByPath := map[string][]byte{}
 
 	for relativePath, content := range job.VirtualMachineFiles {
-		path, err := filepath.Abs(filepath.Join(workingDirectory, relativePath))
+		path, err := filepath.Abs(filepath.Join(workspaceRoot, relativePath))
 		if err != nil {
 			return err
 		}
-		if !strings.HasPrefix(path, workingDirectory) {
+		if !strings.HasPrefix(path, workspaceRoot) {
 			return errors.Errorf("refusing to write outside of working directory")
 		}
 
@@ -153,7 +153,7 @@ func (h *handler) Handle(ctx context.Context, logger log.Logger, record workerut
 		scriptName := scriptNameFromJobStep(job, i)
 		scriptNames = append(scriptNames, scriptName)
 
-		path := filepath.Join(workingDirectory, command.ScriptsPath, scriptName)
+		path := filepath.Join(workspaceRoot, command.ScriptsPath, scriptName)
 		workspaceFileContentsByPath[path] = buildScript(dockerStep)
 	}
 
@@ -176,13 +176,18 @@ func (h *handler) Handle(ctx context.Context, logger log.Logger, record workerut
 		}
 	}()
 
+	relativeWd, err := filepath.Rel(workspaceRoot, workingDirectory)
+	if err != nil {
+		return errors.Wrap(err, "resolving working directory")
+	}
+
 	// Invoke each docker step sequentially
 	for i, dockerStep := range job.DockerSteps {
 		dockerStepCommand := command.CommandSpec{
 			Key:        fmt.Sprintf("step.docker.%d", i),
 			Image:      dockerStep.Image,
 			ScriptPath: scriptNames[i],
-			Dir:        dockerStep.Dir,
+			Dir:        filepath.Join(relativeWd, dockerStep.Dir),
 			Env:        dockerStep.Env,
 			Operation:  h.operations.Exec,
 		}
@@ -201,7 +206,7 @@ func (h *handler) Handle(ctx context.Context, logger log.Logger, record workerut
 		cliStepCommand := command.CommandSpec{
 			Key:       fmt.Sprintf("step.src.%d", i),
 			Command:   append([]string{"src"}, cliStep.Commands...),
-			Dir:       cliStep.Dir,
+			Dir:       filepath.Join(relativeWd, cliStep.Dir),
 			Env:       cliStep.Env,
 			Operation: h.operations.Exec,
 		}
@@ -241,6 +246,11 @@ func scriptNameFromJobStep(job executor.Job, i int) string {
 
 // writeFiles writes to the filesystem the content in the given map.
 func writeFiles(workspaceFileContentsByPath map[string][]byte, logger *command.Logger) (err error) {
+	// Bail out early if nothing to do, we don't need to spawn an empty log group.
+	if len(workspaceFileContentsByPath) == 0 {
+		return nil
+	}
+
 	handle := logger.Log("setup.fs", nil)
 	defer func() {
 		if err == nil {
@@ -253,9 +263,14 @@ func writeFiles(workspaceFileContentsByPath map[string][]byte, logger *command.L
 	}()
 
 	for path, content := range workspaceFileContentsByPath {
+		// Ensure the path exists.
+		if err := os.MkdirAll(filepath.Dir(path), os.ModePerm); err != nil {
+			return err
+		}
 		if err := os.WriteFile(path, content, os.ModePerm); err != nil {
 			return err
 		}
+		handle.Write([]byte(fmt.Sprintf("Wrote %s\n", path)))
 	}
 
 	return nil

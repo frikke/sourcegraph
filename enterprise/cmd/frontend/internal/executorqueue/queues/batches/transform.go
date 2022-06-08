@@ -128,7 +128,7 @@ func transformRecord(ctx context.Context, s BatchesStore, job *btypes.BatchSpecW
 		VirtualMachineFiles: files,
 		CliSteps: []apiclient.CliStep{
 			{
-				Commands: []string{"batch", "exec", "-f", "input.json"},
+				Commands: []string{"batch", "exec", "-f", "../input.json"},
 				Dir:      ".",
 				Env:      cliEnv,
 			},

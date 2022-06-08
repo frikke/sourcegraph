@@ -124,7 +124,7 @@ func TestTransformRecord(t *testing.T) {
 			},
 			CliSteps: []apiclient.CliStep{
 				{
-					Commands: []string{"batch", "exec", "-f", "input.json"},
+					Commands: []string{"batch", "exec", "-f", "../input.json"},
 					Dir:      ".",
 					Env: []string{
 						"SRC_ENDPOINT=https://sourcegraph:hunter2@test.io",
@@ -163,7 +163,7 @@ func TestTransformRecord(t *testing.T) {
 			},
 			CliSteps: []apiclient.CliStep{
 				{
-					Commands: []string{"batch", "exec", "-f", "input.json"},
+					Commands: []string{"batch", "exec", "-f", "../input.json"},
 					Dir:      ".",
 					Env: []string{
 						"SRC_ENDPOINT=https://sourcegraph:hunter2@test.io",
