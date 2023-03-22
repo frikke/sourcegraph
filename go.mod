@@ -31,7 +31,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.1.2
 	github.com/coreos/go-oidc v2.2.1+incompatible
 	github.com/coreos/go-semver v0.3.0
-	github.com/crewjam/saml v0.4.6
+	github.com/crewjam/saml v0.4.13
 	github.com/davecgh/go-spew v1.1.1
 	github.com/daviddengcn/go-colortext v1.0.0
 	github.com/derision-test/glock v1.0.0
@@ -58,7 +58,7 @@ require (
 	github.com/gobwas/glob v0.2.3
 	github.com/gofrs/uuid v4.2.0+incompatible
 	github.com/gogo/protobuf v1.3.2
-	github.com/golang-jwt/jwt/v4 v4.2.0
+	github.com/golang-jwt/jwt/v4 v4.4.3
 	github.com/golang/gddo v0.0.0-20210115222349-20d68f94ee1f
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da
 	github.com/gomodule/oauth1 v0.2.0
@@ -123,7 +123,7 @@ require (
 	github.com/rafaeljusto/redigomock v2.4.0+incompatible
 	github.com/rjeczalik/notify v0.9.2
 	github.com/russellhaering/gosaml2 v0.6.0
-	github.com/russellhaering/goxmldsig v1.1.1
+	github.com/russellhaering/goxmldsig v1.2.0
 	github.com/schollz/progressbar/v3 v3.8.5
 	github.com/segmentio/fasthash v1.0.3
 	github.com/segmentio/ksuid v1.0.4
@@ -145,7 +145,7 @@ require (
 	github.com/sourcegraph/scip v0.1.0
 	github.com/sourcegraph/sourcegraph/enterprise/dev/ci/images v0.0.0-20220203145655-4d2a39d3038a
 	github.com/sourcegraph/sourcegraph/lib v0.0.0-20220511160847-5a43d3ea24eb
-	github.com/stretchr/testify v1.8.0
+	github.com/stretchr/testify v1.8.1
 	github.com/temoto/robotstxt v1.1.2
 	github.com/throttled/throttled/v2 v2.9.0
 	github.com/tidwall/gjson v1.14.0
@@ -224,7 +224,7 @@ require (
 
 require (
 	github.com/sourcegraph/zoekt v0.0.0-20221005081608-58d3b4eab28e
-	github.com/stretchr/objx v0.4.0 // indirect
+	github.com/stretchr/objx v0.5.0 // indirect
 )
 
 require (
@@ -350,7 +350,7 @@ require (
 	github.com/klauspost/compress v1.15.8 // indirect
 	github.com/klauspost/pgzip v1.2.5 // indirect
 	github.com/knadh/koanf v1.4.2 // indirect
-	github.com/kr/pretty v0.3.0 // indirect
+	github.com/kr/pretty v0.3.1 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattermost/xml-roundtrip-validator v0.1.0 // indirect
