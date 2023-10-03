@@ -309,7 +309,7 @@
     "open": "^7.0.4",
     "p-retry": "^4.2.0",
     "p-timeout": "^4.1.0",
-    "postcss": "^8.4.16",
+    "postcss": "^8.4.31",
     "postcss-custom-media": "^8.0.0",
     "postcss-focus-visible": "^5.0.0",
     "postcss-loader": "^6.1.1",
