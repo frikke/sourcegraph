@@ -1,7 +1,6 @@
 import { decode } from 'js-base64'
 
-import { SearchPatternType } from '@sourcegraph/search'
-
+import { SearchPatternType } from '../graphql-operations'
 import type { PreviewRequest, Request } from '../search/js-to-java-bridge'
 import type { Search, Theme } from '../search/types'
 
@@ -38,7 +37,7 @@ export function callJava(request: Request): Promise<object> {
         const onFailureCallback = (errorCode: number, errorMessage: string): void => {
             reject(new Error(`${errorCode} - ${errorMessage}`))
         }
-        console.log(`Got this request: ${requestAsString}`)
+        console.log(`The mock Java backend just received this request: ${requestAsString}`)
         handleRequest(request, onSuccessCallback, onFailureCallback)
     })
 }
@@ -54,10 +53,10 @@ function handleRequest(
             onSuccessCallback(
                 JSON.stringify({
                     instanceURL,
-                    isGlobbingEnabled: true,
                     accessToken,
-                    anonymousUserId: 'test',
+                    customRequestHeadersAsString: '',
                     pluginVersion: '1.2.3',
+                    anonymousUserId: 'test',
                 })
             )
             break
@@ -175,10 +174,10 @@ function setOverlay(content: string | null): void {
 }
 
 function escapeHTML(unsafe: string): string {
-    return unsafe.replace(
+    return unsafe.replaceAll(
         // eslint-disable-next-line no-control-regex
         /[\u0000-\u002F\u003A-\u0040\u005B-\u0060\u007B-\u00FF]/g,
-        // eslint-disable-next-line @typescript-eslint/restrict-plus-operands
+
         char => '&#' + ('000' + char.charCodeAt(0)).slice(-4) + ';'
     )
 }

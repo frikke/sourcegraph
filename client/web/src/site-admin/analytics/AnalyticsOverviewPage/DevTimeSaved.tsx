@@ -1,16 +1,16 @@
 import React from 'react'
 
-import { mdiMagnify, mdiSitemap, mdiBookOutline, mdiPuzzleOutline, mdiPoll } from '@mdi/js'
+import { mdiBookOutline, mdiMagnify, mdiPoll, mdiPuzzleOutline, mdiSitemap } from '@mdi/js'
 import classNames from 'classnames'
 
 import { useQuery } from '@sourcegraph/http-client'
-import { H2, H3, Text, LoadingSpinner, Link, Icon, Tooltip } from '@sourcegraph/wildcard'
+import { H2, H3, Icon, Link, LoadingSpinner, Text, Tooltip } from '@sourcegraph/wildcard'
 
 import { BatchChangesIconNav } from '../../../batches/icons'
 import {
-    OverviewDevTimeSavedResult,
-    OverviewDevTimeSavedVariables,
     AnalyticsDateRange,
+    type OverviewDevTimeSavedResult,
+    type OverviewDevTimeSavedVariables,
 } from '../../../graphql-operations'
 import { ValueLegendItem } from '../components/ValueLegendList'
 import { formatNumber } from '../utils'
@@ -23,6 +23,7 @@ interface DevTimeSavedProps {
     showAnnualProjection?: boolean
     dateRange: AnalyticsDateRange
 }
+
 export const DevTimeSaved: React.FunctionComponent<DevTimeSavedProps> = ({ showAnnualProjection, dateRange }) => {
     const { data, error, loading } = useQuery<OverviewDevTimeSavedResult, OverviewDevTimeSavedVariables>(
         OVERVIEW_DEV_TIME_SAVED,
@@ -113,13 +114,15 @@ export const DevTimeSaved: React.FunctionComponent<DevTimeSavedProps> = ({ showA
         return totalHoursSaved
     })()
 
+    const disableCodeSearchItems = !window.context?.codeSearchEnabledOnInstance
+
     return (
         <div>
             <H3 className="mb-3">Developer time saved</H3>
             <div className={classNames(styles.statsBox, 'p-4 mb-3')}>
                 <div className="d-flex">
                     <ValueLegendItem
-                        value={users.activity.summary.totalRegisteredUsers}
+                        value={users.activity.summary.totalUniqueUsers}
                         className={classNames('flex-1', styles.borderRight)}
                         description="Active Users"
                         color="var(--body-color)"
@@ -176,7 +179,7 @@ export const DevTimeSaved: React.FunctionComponent<DevTimeSavedProps> = ({ showA
                 <tbody>
                     <tr>
                         <td className="text-left">
-                            <Link to="/site-admin/analytics/search">
+                            <Link to={disableCodeSearchItems ? '/search' : '/site-admin/analytics/search'}>
                                 <Text as="span" className="d-flex align-items-center">
                                     <Icon svgPath={mdiMagnify} size="md" aria-label="Code Search" className="mr-1" />
                                     Search
@@ -192,7 +195,7 @@ export const DevTimeSaved: React.FunctionComponent<DevTimeSavedProps> = ({ showA
                     </tr>
                     <tr>
                         <td className="text-left">
-                            <Link to="/site-admin/analytics/code-intel">
+                            <Link to={disableCodeSearchItems ? '/search' : '/site-admin/analytics/code-intel'}>
                                 <Text as="span" className="d-flex align-items-center">
                                     <Icon
                                         svgPath={mdiSitemap}
@@ -213,7 +216,7 @@ export const DevTimeSaved: React.FunctionComponent<DevTimeSavedProps> = ({ showA
                     </tr>
                     <tr>
                         <td className="text-left">
-                            <Link to="/site-admin/analytics/batch-changes">
+                            <Link to={disableCodeSearchItems ? '/search' : '/site-admin/analytics/batch-changes'}>
                                 <Text as="span" className="d-flex align-items-center">
                                     <BatchChangesIconNav className="mr-1" />
                                     Batch Changes
@@ -229,7 +232,7 @@ export const DevTimeSaved: React.FunctionComponent<DevTimeSavedProps> = ({ showA
                     </tr>
                     <tr>
                         <td className="text-left">
-                            <Link to="/site-admin/analytics/notebooks">
+                            <Link to={disableCodeSearchItems ? '/search' : '/site-admin/analytics/notebooks'}>
                                 <Text as="span" className="d-flex align-items-center">
                                     <Icon svgPath={mdiBookOutline} size="md" aria-label="Notebooks" className="mr-1" />
                                     Notebooks
@@ -245,7 +248,7 @@ export const DevTimeSaved: React.FunctionComponent<DevTimeSavedProps> = ({ showA
                     </tr>
                     <tr>
                         <td className="text-left">
-                            <Link to="/site-admin/analytics/extensions">
+                            <Link to={disableCodeSearchItems ? '/search' : '/site-admin/analytics/extensions'}>
                                 <Text as="span" className="d-flex align-items-center">
                                     <Icon
                                         svgPath={mdiPuzzleOutline}
@@ -253,7 +256,7 @@ export const DevTimeSaved: React.FunctionComponent<DevTimeSavedProps> = ({ showA
                                         aria-label="Extensions"
                                         className="mr-1"
                                     />
-                                    Extensions
+                                    Search extensions
                                 </Text>
                             </Link>
                         </td>
@@ -266,7 +269,7 @@ export const DevTimeSaved: React.FunctionComponent<DevTimeSavedProps> = ({ showA
                     </tr>
                     <tr>
                         <td className="text-left">
-                            <Link to="/site-admin/analytics/code-insights">
+                            <Link to={disableCodeSearchItems ? '/search' : '/site-admin/analytics/code-insights'}>
                                 <Text as="span" className="d-flex align-items-center">
                                     <Icon svgPath={mdiPoll} size="md" aria-label="Extensions" className="mr-1" />
                                     Code insights

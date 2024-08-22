@@ -1,35 +1,89 @@
 package store
 
 import (
+	"bytes"
+	"database/sql"
+	"encoding/json"
+	"time"
+
+	"github.com/lib/pq"
+
 	"github.com/sourcegraph/sourcegraph/internal/codeintel/dependencies/shared"
-	"github.com/sourcegraph/sourcegraph/internal/database/basestore"
 	"github.com/sourcegraph/sourcegraph/internal/database/dbutil"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
-//
-// Scans `shared.Repo`
-
-func scanDependencyRepo(s dbutil.Scanner) (shared.Repo, error) {
-	var v shared.Repo
-	err := s.Scan(&v.ID, &v.Scheme, &v.Name, &v.Version)
-	return v, err
-}
-
-//
-// Scans `[]shared.Repo`
-
-var scanDependencyRepos = basestore.NewSliceScanner(scanDependencyRepo)
-
-// scanIntString scans a int, string pair.
-func scanIntString(s dbutil.Scanner) (int, string, error) {
+func scanDependencyRepoWithVersions(s dbutil.Scanner) (shared.PackageRepoReference, error) {
+	var ref shared.PackageRepoReference
 	var (
-		i   int
-		str string
+		versionStrings []string
+		ids            []int64
+		blocked        []bool
+		lastCheckedAt  []sql.NullString
 	)
-
-	if err := s.Scan(&i, &str); err != nil {
-		return 0, "", err
+	err := s.Scan(
+		&ref.ID,
+		&ref.Scheme,
+		&ref.Name,
+		&ref.Blocked,
+		&ref.LastCheckedAt,
+		pq.Array(&ids),
+		pq.Array(&versionStrings),
+		pq.Array(&blocked),
+		pq.Array(&lastCheckedAt),
+	)
+	if err != nil {
+		return shared.PackageRepoReference{}, err
 	}
 
-	return i, str, nil
+	ref.Versions = make([]shared.PackageRepoRefVersion, 0, len(versionStrings))
+	for i, version := range versionStrings {
+		// because pq.Array(&[]pq.NullTime) isnt supported...
+		var t *time.Time
+		if lastCheckedAt[i].Valid {
+			parsedT, err := pq.ParseTimestamp(nil, lastCheckedAt[i].String)
+			if err != nil {
+				return shared.PackageRepoReference{}, errors.Wrapf(err, "time string %q is not valid", lastCheckedAt[i].String)
+			}
+			t = &parsedT
+		}
+		ref.Versions = append(ref.Versions, shared.PackageRepoRefVersion{
+			ID:            int(ids[i]),
+			PackageRefID:  ref.ID,
+			Version:       version,
+			Blocked:       blocked[i],
+			LastCheckedAt: t,
+		})
+	}
+	return ref, err
+}
+
+func scanPackageFilter(s dbutil.Scanner) (shared.PackageRepoFilter, error) {
+	var filter shared.PackageRepoFilter
+	var data []byte
+	err := s.Scan(
+		&filter.ID,
+		&filter.Behaviour,
+		&filter.PackageScheme,
+		&data,
+		&filter.DeletedAt,
+		&filter.UpdatedAt,
+	)
+	if err != nil {
+		return shared.PackageRepoFilter{}, err
+	}
+
+	b := bytes.NewReader(data)
+	d := json.NewDecoder(b)
+	d.DisallowUnknownFields()
+
+	if err := d.Decode(&filter.NameFilter); err != nil {
+		// d.Decode will set NameFilter to != nil even if theres an error, meaning we potentially
+		// have both NameFilter and VersionFilter set to not nil
+		filter.NameFilter = nil
+		b.Seek(0, 0)
+		return filter, d.Decode(&filter.VersionFilter)
+	}
+
+	return filter, nil
 }

@@ -1,14 +1,15 @@
 import { downloadAndUnzipVSCode } from '@vscode/test-electron'
+import { beforeEach, describe, it } from 'mocha'
 
-import { mixedSearchStreamEvents, highlightFileResult } from '@sourcegraph/search'
-import { Settings } from '@sourcegraph/shared/src/settings/settings'
-import { setupExtensionMocking } from '@sourcegraph/shared/src/testing/integration/mockExtension'
+import {
+    mixedSearchStreamEvents,
+    highlightFileResult,
+} from '@sourcegraph/shared/src/search/integration/streaming-search-mocks'
+import type { Settings } from '@sourcegraph/shared/src/settings/settings'
 
-import { createVSCodeIntegrationTestContext, VSCodeIntegrationTestContext } from './context'
+import { createVSCodeIntegrationTestContext, type VSCodeIntegrationTestContext } from './context'
 import { getVSCodeWebviewFrames } from './getWebview'
-import { launchVsCode, VSCodeTestDriver } from './launch'
-
-const sourcegraphBaseUrl = 'https://sourcegraph.com'
+import { launchVsCode, type VSCodeTestDriver } from './launch'
 
 describe('VS Code extension', () => {
     let vsCodeDriver: VSCodeTestDriver
@@ -39,18 +40,11 @@ describe('VS Code extension', () => {
     // fixing before we add more test cases to the suite.
 
     it('works', async () => {
-        const { Extensions } = setupExtensionMocking({
-            pollyServer: testContext.server,
-            sourcegraphBaseUrl,
-        })
-
         const userSettings: Settings = {
             extensions: {},
         }
 
         testContext.overrideGraphQL({
-            Extensions,
-
             ...highlightFileResult,
             ViewerSettings: () => ({
                 viewerSettings: {
@@ -97,8 +91,8 @@ describe('VS Code extension', () => {
         const { searchPanelFrame, sidebarFrame } = await getVSCodeWebviewFrames(vsCodeDriver.page)
 
         // Focus search box
-        await searchPanelFrame.waitForSelector('.monaco-editor .view-lines')
-        await searchPanelFrame.click('.monaco-editor .view-lines')
+        await searchPanelFrame.waitForSelector('..cm-editor')
+        await searchPanelFrame.click('.cm-editor')
 
         await vsCodeDriver.page.keyboard.type('test', {
             delay: 50,

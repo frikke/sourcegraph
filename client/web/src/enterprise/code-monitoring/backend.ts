@@ -1,17 +1,19 @@
-import { Observable } from 'rxjs'
+import type { Observable } from 'rxjs'
 import { map } from 'rxjs/operators'
 
 import { logger } from '@sourcegraph/common'
 import { createInvalidGraphQLMutationResponseError, dataOrThrowErrors, gql } from '@sourcegraph/http-client'
 
 import { requestGraphQL } from '../../backend/graphql'
-import {
+import type {
     CreateCodeMonitorResult,
     CreateCodeMonitorVariables,
     DeleteCodeMonitorResult,
     DeleteCodeMonitorVariables,
     FetchCodeMonitorResult,
     FetchCodeMonitorVariables,
+    ListAllCodeMonitorsResult,
+    ListAllCodeMonitorsVariables,
     ListCodeMonitors,
     ListUserCodeMonitorsResult,
     ListUserCodeMonitorsVariables,
@@ -27,6 +29,40 @@ import {
     UpdateCodeMonitorVariables,
 } from '../../graphql-operations'
 
+const MonitorEmailFragment = gql`
+    fragment MonitorEmailFields on MonitorEmail {
+        __typename
+        id
+        enabled
+        includeResults
+        recipients {
+            nodes {
+                id
+            }
+        }
+    }
+`
+
+const MonitorWebhookFragment = gql`
+    fragment MonitorWebhookFields on MonitorWebhook {
+        __typename
+        id
+        enabled
+        includeResults
+        url
+    }
+`
+
+const MonitorSlackWebhookFragment = gql`
+    fragment MonitorSlackWebhookFields on MonitorSlackWebhook {
+        __typename
+        id
+        enabled
+        includeResults
+        url
+    }
+`
+
 const CodeMonitorFragment = gql`
     fragment CodeMonitorFields on Monitor {
         id
@@ -40,34 +76,21 @@ const CodeMonitorFragment = gql`
         }
         actions {
             nodes {
-                ... on MonitorEmail {
-                    __typename
-                    id
-                    enabled
-                    includeResults
-                    recipients {
-                        nodes {
-                            id
-                        }
-                    }
-                }
-                ... on MonitorWebhook {
-                    __typename
-                    id
-                    enabled
-                    includeResults
-                    url
-                }
-                ... on MonitorSlackWebhook {
-                    __typename
-                    id
-                    enabled
-                    includeResults
-                    url
-                }
+                __typename
+                ...MonitorEmailFields
+                ...MonitorWebhookFields
+                ...MonitorSlackWebhookFields
             }
         }
+        owner {
+            id
+            namespaceName
+            url
+        }
     }
+    ${MonitorEmailFragment}
+    ${MonitorWebhookFragment}
+    ${MonitorSlackWebhookFragment}
 `
 
 const ListCodeMonitorsFragment = gql`
@@ -150,6 +173,26 @@ export const fetchUserCodeMonitors = ({
     )
 }
 
+export const fetchCodeMonitors = ({ first, after }: ListAllCodeMonitorsVariables): Observable<ListCodeMonitors> => {
+    const query = gql`
+        query ListAllCodeMonitors($first: Int!, $after: String) {
+            monitors(first: $first, after: $after) {
+                ...ListCodeMonitors
+            }
+        }
+
+        ${ListCodeMonitorsFragment}
+    `
+
+    return requestGraphQL<ListAllCodeMonitorsResult, ListAllCodeMonitorsVariables>(query, {
+        first,
+        after,
+    }).pipe(
+        map(dataOrThrowErrors),
+        map(data => data.monitors)
+    )
+}
+
 export const toggleCodeMonitorEnabled = (
     id: string,
     enabled: boolean
@@ -183,6 +226,7 @@ export const fetchCodeMonitor = (id: string): Observable<FetchCodeMonitorResult>
                     owner {
                         id
                         namespaceName
+                        url
                     }
                     enabled
                     actions {

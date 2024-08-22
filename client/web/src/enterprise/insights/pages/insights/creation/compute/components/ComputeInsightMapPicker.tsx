@@ -1,12 +1,12 @@
-import { FC, MouseEvent, useEffect, useMemo } from 'react'
+import { type FC, type MouseEvent, useEffect, useMemo, forwardRef } from 'react'
 
 import { FilterType, resolveFilter } from '@sourcegraph/shared/src/search/query/filters'
 import { scanSearchQuery } from '@sourcegraph/shared/src/search/query/scanner'
-import { Filter } from '@sourcegraph/shared/src/search/query/token'
-import { Button, ButtonGroup, ButtonProps, Tooltip } from '@sourcegraph/wildcard'
+import type { Filter } from '@sourcegraph/shared/src/search/query/token'
+import { Button, ButtonGroup, type ButtonProps, Tooltip } from '@sourcegraph/wildcard'
 
 import { GroupByField } from '../../../../../../../graphql-operations'
-import { SearchBasedInsightSeries } from '../../../../../core'
+import type { SearchBasedInsightSeries } from '../../../../../core'
 
 const TOOLTIP_TEXT = 'Available only for queries with type:commit and type:diff'
 
@@ -94,12 +94,12 @@ interface OptionButtonProps extends ButtonProps {
     active?: boolean
 }
 
-const OptionButton: FC<OptionButtonProps> = props => {
+const OptionButton = forwardRef<HTMLButtonElement, OptionButtonProps>((props, reference) => {
     const { children, active, value, ...attributes } = props
 
     return (
-        <Button {...attributes} variant="secondary" outline={!active} value={value}>
+        <Button ref={reference} {...attributes} variant="secondary" outline={!active} value={value}>
             {children}
         </Button>
     )
-}
+})

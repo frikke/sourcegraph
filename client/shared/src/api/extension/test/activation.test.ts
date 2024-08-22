@@ -1,24 +1,26 @@
-import { BehaviorSubject, of } from 'rxjs'
+import { BehaviorSubject, firstValueFrom, of } from 'rxjs'
 import { filter, first } from 'rxjs/operators'
 import sinon from 'sinon'
-import sourcegraph from 'sourcegraph'
+import type sourcegraph from 'sourcegraph'
+import { describe, it } from 'vitest'
 
-import { Contributions } from '@sourcegraph/client-api'
+import type { Contributions } from '@sourcegraph/client-api'
 
-import { SettingsCascade } from '../../../settings/settings'
-import { MainThreadAPI } from '../../contract'
+import type { SettingsCascade } from '../../../settings/settings'
+import { noOpTelemetryRecorder } from '../../../telemetry'
+import type { MainThreadAPI } from '../../contract'
 import { pretendRemote } from '../../util'
-import { activateExtensions, ExecutableExtension } from '../activation'
-import { ExtensionHostState } from '../extensionHostState'
+import { activateExtensions, type ExecutableExtension } from '../activation'
+import type { ExtensionHostState } from '../extensionHostState'
 
 describe('Extension activation', () => {
     describe('activateExtensions()', () => {
         it('logs events for activated extensions', async () => {
             const logEvent = sinon.spy()
 
-            const mockMain = pretendRemote<Pick<MainThreadAPI, 'getScriptURLForExtension' | 'logEvent'>>({
-                getScriptURLForExtension: () => undefined,
+            const mockMain = pretendRemote<Pick<MainThreadAPI, 'logEvent' | 'getTelemetryRecorder'>>({
                 logEvent,
+                getTelemetryRecorder: () => noOpTelemetryRecorder,
             })
 
             const FIXTURE_EXTENSION: ExecutableExtension = {
@@ -57,12 +59,12 @@ describe('Extension activation', () => {
             )
 
             // Wait for extensions to load to check on the spy
-            await haveInitialExtensionsLoaded
-                .pipe(
+            await firstValueFrom(
+                haveInitialExtensionsLoaded.pipe(
                     filter(haveLoaded => haveLoaded),
                     first()
                 )
-                .toPromise()
+            )
 
             sinon.assert.calledWith(logEvent, 'ExtensionActivation', { extension_id: 'sourcegraph/fixture-extension' })
         })

@@ -1,12 +1,14 @@
 import assert from 'assert'
 
-import { Settings } from '@sourcegraph/shared/src/settings/settings'
-import { createDriverForTest, Driver } from '@sourcegraph/shared/src/testing/driver'
+import { afterEach, beforeEach, describe, it } from 'mocha'
+
+import type { Settings } from '@sourcegraph/shared/src/settings/settings'
+import { createDriverForTest, type Driver } from '@sourcegraph/shared/src/testing/driver'
 import { setupExtensionMocking, simpleHoverProvider } from '@sourcegraph/shared/src/testing/integration/mockExtension'
 import { afterEachSaveScreenshotIfFailed } from '@sourcegraph/shared/src/testing/screenshotReporter'
 import { readEnvironmentString, retry } from '@sourcegraph/shared/src/testing/utils'
 
-import { BrowserIntegrationTestContext, createBrowserIntegrationTestContext } from './context'
+import { type BrowserIntegrationTestContext, createBrowserIntegrationTestContext } from './context'
 import { closeInstallPageTab } from './shared'
 
 describe('GitLab', () => {
@@ -45,15 +47,15 @@ describe('GitLab', () => {
         })
 
         testContext.overrideGraphQL({
-            ViewerConfiguration: () => ({
-                viewerConfiguration: {
+            ViewerSettings: () => ({
+                viewerSettings: {
                     subjects: [],
                     merged: { contents: '', messages: [] },
                 },
             }),
             ResolveRepoName: () => ({
                 repository: {
-                    name: 'gitlab.com/sourcegraph/jsonrpc2',
+                    name: 'gitlab.com/SourcegraphCody/jsonrpc2',
                 },
             }),
             ResolveRev: () => ({
@@ -91,11 +93,6 @@ describe('GitLab', () => {
                     hasCodeIntelligence: true,
                 },
             }),
-            EnableLegacyExtensions: () => ({
-                site: {
-                    enableLegacyExtensions: true,
-                },
-            }),
         })
 
         // Ensure that the same assets are requested in all environments.
@@ -118,9 +115,10 @@ describe('GitLab', () => {
             }
         }
 
-        const repoName = 'gitlab.com/sourcegraph/jsonrpc2'
+        const repoName = 'gitlab.com/SourcegraphCody/jsonrpc2'
 
-        const url = 'https://gitlab.com/sourcegraph/jsonrpc2/blob/4fb7cd90793ee6ab445f466b900e6bffb9b63d78/call_opt.go'
+        const url =
+            'https://gitlab.com/SourcegraphCody/jsonrpc2/blob/4fb7cd90793ee6ab445f466b900e6bffb9b63d78/call_opt.go'
         await driver.page.goto(url)
 
         await driver.page.waitForSelector('[data-testid="code-view-toolbar"] [data-testid="open-on-sourcegraph"]', {
@@ -146,18 +144,16 @@ describe('GitLab', () => {
         })
     })
 
-    it('shows hover tooltips when hovering a token', async () => {
-        const { mockExtension, Extensions, extensionSettings } = setupExtensionMocking({
-            pollyServer: testContext.server,
-            sourcegraphBaseUrl: driver.sourcegraphBaseUrl,
-        })
+    // TODO(sqs): skipped because these have not been reimplemented after the extension API deprecation
+    it.skip('shows hover tooltips when hovering a token', async () => {
+        const { mockExtension, extensionSettings } = setupExtensionMocking()
 
         const userSettings: Settings = {
             extensions: extensionSettings,
         }
         testContext.overrideGraphQL({
-            ViewerConfiguration: () => ({
-                viewerConfiguration: {
+            ViewerSettings: () => ({
+                viewerSettings: {
                     subjects: [
                         {
                             __typename: 'User',
@@ -175,7 +171,6 @@ describe('GitLab', () => {
                     merged: { contents: JSON.stringify(userSettings), messages: [] },
                 },
             }),
-            Extensions,
         })
 
         // Serve a mock extension with a simple hover provider
@@ -185,7 +180,7 @@ describe('GitLab', () => {
         })
 
         await driver.page.goto(
-            'https://gitlab.com/sourcegraph/jsonrpc2/blob/4fb7cd90793ee6ab445f466b900e6bffb9b63d78/call_opt.go'
+            'https://gitlab.com/SourcegraphCody/jsonrpc2/blob/4fb7cd90793ee6ab445f466b900e6bffb9b63d78/call_opt.go'
         )
         await driver.page.waitForSelector('[data-testid="code-view-toolbar"] [data-testid="open-on-sourcegraph"]')
 
@@ -212,8 +207,5 @@ describe('GitLab', () => {
                 timeout: 6000,
             },
         })
-
-        // disable flaky snapshot
-        // await percySnapshot(driver.page, 'Browser extension: GitLab - blob view with code intel popup')
     })
 })

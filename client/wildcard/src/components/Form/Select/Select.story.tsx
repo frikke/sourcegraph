@@ -1,23 +1,17 @@
 import React, { useCallback } from 'react'
 
-import { Meta, Story } from '@storybook/react'
-
-import { BrandedStory } from '@sourcegraph/branded/src/components/BrandedStory'
-import webStyles from '@sourcegraph/web/src/SourcegraphWebApp.scss'
+import type { Meta, StoryFn } from '@storybook/react'
 
 import { H1, H2 } from '../..'
+import { BrandedStory } from '../../../stories/BrandedStory'
 import { Grid } from '../../Grid/Grid'
 
-import { Select, SelectProps } from './Select'
+import { Select, type SelectProps } from './Select'
 
 const config: Meta = {
     title: 'wildcard/Select',
 
-    decorators: [
-        story => (
-            <BrandedStory styles={webStyles}>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>
-        ),
-    ],
+    decorators: [story => <BrandedStory>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>],
 
     parameters: {
         component: Select,
@@ -42,6 +36,7 @@ const BaseSelect = (props: { id: string } & Pick<SelectProps, 'isCustomStyle' | 
         <Select
             label="What is your favorite fruit?"
             message="I am a message"
+            description="I am a description"
             value={selected}
             onChange={handleChange}
             {...props}
@@ -78,7 +73,7 @@ const SelectVariants = ({ isCustomStyle }: Pick<SelectProps, 'isCustomStyle'>) =
     )
 }
 
-export const SelectExamples: Story = () => (
+export const SelectExamples: StoryFn = () => (
     <>
         <H1>Select</H1>
         <H2>Native</H2>
@@ -87,10 +82,3 @@ export const SelectExamples: Story = () => (
         <SelectVariants isCustomStyle={true} />
     </>
 )
-
-SelectExamples.parameters = {
-    chromatic: {
-        enableDarkMode: true,
-        disableSnapshot: false,
-    },
-}

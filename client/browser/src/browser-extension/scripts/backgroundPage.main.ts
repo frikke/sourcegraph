@@ -1,8 +1,11 @@
-// We want to polyfill first.
+// Set globals first before any imports.
+import '../../config/extension.entry'
+import '../../config/background.entry'
+// Polyfill before other imports.
 import '../../shared/polyfills'
 
-import { Endpoint } from 'comlink'
-import { combineLatest, merge, Observable, of, Subject, Subscription, timer } from 'rxjs'
+import type { Endpoint } from 'comlink'
+import { combineLatest, merge, type Observable, of, Subject, Subscription, timer, lastValueFrom } from 'rxjs'
 import {
     bufferCount,
     filter,
@@ -12,16 +15,15 @@ import {
     switchMap,
     take,
     concatMap,
-    mapTo,
     catchError,
     distinctUntilChanged,
 } from 'rxjs/operators'
 import addDomainPermissionToggle from 'webext-domain-permission-toggle'
 
 import { isDefined, fetchCache } from '@sourcegraph/common'
-import { GraphQLResult, requestGraphQLCommon } from '@sourcegraph/http-client'
+import { type GraphQLResult, requestGraphQLCommon } from '@sourcegraph/http-client'
 import { createExtensionHostWorker } from '@sourcegraph/shared/src/api/extension/worker'
-import { EndpointPair } from '@sourcegraph/shared/src/platform/context'
+import type { EndpointPair } from '@sourcegraph/shared/src/platform/context'
 import { createURLWithUTM } from '@sourcegraph/shared/src/tracking/utm'
 
 import { getHeaders } from '../../shared/backend/headers'
@@ -30,14 +32,15 @@ import { initializeOmniboxInterface } from '../../shared/cli'
 import { browserPortToMessagePort, findMessagePorts } from '../../shared/platform/ports'
 import { createBlobURLForBundle } from '../../shared/platform/worker'
 import { initSentry } from '../../shared/sentry'
+import { ConditionalTelemetryRecorderProvider } from '../../shared/telemetry'
 import { EventLogger } from '../../shared/tracking/eventLogger'
 import { getExtensionVersion, getPlatformName, observeSourcegraphURL } from '../../shared/util/context'
-import { BrowserActionIconState, setBrowserActionIconState } from '../browser-action-icon'
+import { type BrowserActionIconState, setBrowserActionIconState } from '../browser-action-icon'
 import { assertEnvironment } from '../environmentAssertion'
 import { checkUrlPermissions, IsProductionVersion } from '../util'
 import { fromBrowserEvent } from '../web-extension-api/fromBrowserEvent'
 import { observeStorageKey, storage } from '../web-extension-api/storage'
-import { BackgroundPageApi, BackgroundPageApiHandlers } from '../web-extension-api/types'
+import type { BackgroundPageApi, BackgroundPageApiHandlers } from '../web-extension-api/types'
 
 const IS_EXTENSION = true
 
@@ -146,6 +149,9 @@ async function main(): Promise<void> {
                             .log('BrowserExtensionInstalled')
                             .then(() => console.log(`Triggered "BrowserExtensionInstalled" using ${sourcegraphURL}`))
                             .catch(error => console.error('Error triggering "BrowserExtensionInstalled" event:', error))
+                        new ConditionalTelemetryRecorderProvider(of(true), requestGraphQL)
+                            .getRecorder()
+                            .recordEvent('browserExtension', 'install')
                     })
             )
         }
@@ -204,7 +210,7 @@ async function main(): Promise<void> {
                          * See https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Content_scripts#loading_content_scripts
                          */
                         await browser.tabs.executeScript(tabId, {
-                            file: 'js/inject.bundle.js',
+                            file: 'js/contentPage.main.bundle.js',
                             runAt: 'document_end',
                         })
                     }
@@ -235,7 +241,7 @@ async function main(): Promise<void> {
             variables: V
             sourcegraphURL?: string
         }): Promise<GraphQLResult<T>> {
-            return requestGraphQL<T, V>({ request, variables, sourcegraphURL }).toPromise()
+            return lastValueFrom(requestGraphQL<T, V>({ request, variables, sourcegraphURL }))
         },
 
         async notifyRepoSyncError({ sourcegraphURL, hasRepoSyncError }, sender: browser.runtime.MessageSender) {
@@ -262,15 +268,17 @@ async function main(): Promise<void> {
         }
 
         // https://stackoverflow.com/questions/55572797/why-does-typescript-expect-never-as-function-argument-when-retrieving-the-func
-        return (handlers[method] as (
-            payload: any,
-            sender?: browser.runtime.MessageSender
-        ) => ReturnType<BackgroundPageApi[typeof method]>)(message.payload, sender)
+        return (
+            handlers[method] as (
+                payload: any,
+                sender?: browser.runtime.MessageSender
+            ) => ReturnType<BackgroundPageApi[typeof method]>
+        )(message.payload, sender)
     })
 
     await browser.runtime.setUninstallURL(
         createURLWithUTM(
-            new URL('https://about.sourcegraph.com/uninstall'),
+            new URL('https://sourcegraph.com/uninstall'),
             IsProductionVersion
                 ? {
                       utm_source: getPlatformName(),
@@ -419,7 +427,7 @@ main()
 
 function validateSite(): Observable<boolean> {
     return fetchSite(requestGraphQL).pipe(
-        mapTo(true),
+        map(() => true),
         catchError(() => [false])
     )
 }
@@ -453,7 +461,7 @@ function observeCurrentTabRepoSyncError(): Observable<boolean> {
 function observeSourcegraphUrlValidation(): Observable<boolean> {
     return merge(
         // Whenever the URL was persisted to storage, we can assume it was validated before-hand
-        observeStorageKey('sync', 'sourcegraphURL').pipe(mapTo(true)),
+        observeStorageKey('sync', 'sourcegraphURL').pipe(map(() => true)),
         timer(0, INTERVAL_FOR_SOURCEGRPAH_URL_CHECK).pipe(mergeMap(() => validateSite()))
     )
 }

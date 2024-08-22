@@ -215,6 +215,12 @@ func TestParseURL(t *testing.T) {
 			formatStdlib, "perforce", "admin:pa$$word", "ssl:192.168.1.100:1666", "//Sourcegraph/",
 			"perforce://admin:pa$$word@ssl:192.168.1.100:1666//Sourcegraph/", "",
 		),
+		// iap://
+		newParseURLTest(
+			"iap://admin:pa$$word@gitlab.sgdev.org/test/repo.git",
+			formatStdlib, "iap", "admin:pa$$word", "gitlab.sgdev.org", "/test/repo.git",
+			"iap://admin:pa$$word@gitlab.sgdev.org/test/repo.git", "",
+		),
 	}
 
 	for _, tt := range tests {
@@ -229,6 +235,147 @@ func TestParseURL(t *testing.T) {
 		str := got.String()
 		if str != tt.wantStr {
 			t.Errorf("Parse(%q).String() = %q, want %q", tt.in, str, tt.wantStr)
+		}
+	}
+}
+
+// Test copied and adjusted from TestJoinPath in go1.19
+func TestJoinPath(t *testing.T) {
+	tests := []struct {
+		base string
+		elem []string
+		out  string
+	}{
+		{
+			base: "https://go.googlesource.com",
+			elem: []string{"go"},
+			out:  "https://go.googlesource.com/go",
+		},
+		{
+			base: "https://go.googlesource.com/a/b/c",
+			elem: []string{"../../../go"},
+			out:  "https://go.googlesource.com/go",
+		},
+		{
+			base: "https://go.googlesource.com/",
+			elem: []string{"../go"},
+			out:  "https://go.googlesource.com/go",
+		},
+		{
+			base: "https://go.googlesource.com",
+			elem: []string{"../go"},
+			out:  "https://go.googlesource.com/go",
+		},
+		{
+			base: "https://go.googlesource.com",
+			elem: []string{"../go", "../../go", "../../../go"},
+			out:  "https://go.googlesource.com/go",
+		},
+		{
+			base: "https://go.googlesource.com/../go",
+			elem: nil,
+			out:  "https://go.googlesource.com/go",
+		},
+		{
+			base: "https://go.googlesource.com/",
+			elem: []string{"./go"},
+			out:  "https://go.googlesource.com/go",
+		},
+		{
+			base: "https://go.googlesource.com//",
+			elem: []string{"/go"},
+			out:  "https://go.googlesource.com/go",
+		},
+		{
+			base: "https://go.googlesource.com//",
+			elem: []string{"/go", "a", "b", "c"},
+			out:  "https://go.googlesource.com/go/a/b/c",
+		},
+		{
+			base: "https://go.googlesource.com",
+			elem: []string{"go/"},
+			out:  "https://go.googlesource.com/go/",
+		},
+		{
+			base: "https://go.googlesource.com",
+			elem: []string{"go//"},
+			out:  "https://go.googlesource.com/go/",
+		},
+		{
+			base: "https://go.googlesource.com",
+			elem: nil,
+			out:  "https://go.googlesource.com/",
+		},
+		{
+			base: "https://go.googlesource.com/",
+			elem: nil,
+			out:  "https://go.googlesource.com/",
+		},
+		{
+			base: "https://go.googlesource.com/a%2fb",
+			elem: []string{"c"},
+			out:  "https://go.googlesource.com/a%2fb/c",
+		},
+		{
+			base: "https://go.googlesource.com/a%2fb",
+			elem: []string{"c%2fd"},
+			out:  "https://go.googlesource.com/a%2fb/c%2fd",
+		},
+		{
+			base: "https://go.googlesource.com/a/b",
+			elem: []string{"/go"},
+			out:  "https://go.googlesource.com/a/b/go",
+		},
+		{
+			base: "/",
+			elem: nil,
+			out:  "file:///",
+		},
+		{
+			base: "a",
+			elem: nil,
+			out:  "file://a",
+		},
+		{
+			base: "a",
+			elem: []string{"b"},
+			out:  "file://a/b",
+		},
+		{
+			base: "a",
+			elem: []string{"../b"},
+			out:  "file://b",
+		},
+		{
+			base: "a",
+			elem: []string{"../../b"},
+			out:  "file://b",
+		},
+		{
+			base: "",
+			elem: []string{"a"},
+			out:  "file://a",
+		},
+		{
+			base: "",
+			elem: []string{"../a"},
+			out:  "file://a",
+		},
+	}
+
+	for _, tt := range tests {
+		wantErr := "nil"
+		if tt.out == "" {
+			wantErr = "non-nil error"
+		}
+		var out string
+		u, err := ParseURL(tt.base)
+		if err == nil {
+			u = u.JoinPath(tt.elem...)
+			out = u.String()
+		}
+		if out != tt.out || (err == nil) != (tt.out != "") {
+			t.Errorf("Parse(%q).JoinPath(%q) = %q, %v, want %q, %v", tt.base, tt.elem, out, err, tt.out, wantErr)
 		}
 	}
 }

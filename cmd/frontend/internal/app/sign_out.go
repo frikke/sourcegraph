@@ -5,63 +5,65 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/inconshreveable/log15"
+	"github.com/sourcegraph/log"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/session"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/auth/openidconnect"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/auth/saml"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/auth/session"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/auth/sourcegraphoperator"
 	"github.com/sourcegraph/sourcegraph/internal/actor"
+	internalauth "github.com/sourcegraph/sourcegraph/internal/auth"
+	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/cookie"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/telemetry"
+	"github.com/sourcegraph/sourcegraph/internal/telemetry/telemetryrecorder"
+	"github.com/sourcegraph/sourcegraph/internal/telemetry/telemetrystore/teestore"
 )
 
-type SignOutURL struct {
-	ProviderDisplayName string
-	ProviderServiceType string
-	URL                 string
-}
+func serveSignOutHandler(logger log.Logger, db database.DB) http.HandlerFunc {
+	logger = logger.Scoped("signOut")
+	recorder := telemetryrecorder.NewBestEffort(logger, db)
 
-var ssoSignOutHandler func(w http.ResponseWriter, r *http.Request)
-
-// RegisterSSOSignOutHandler registers a SSO sign-out handler that takes care of cleaning up SSO
-// session state, both on Sourcegraph and on the SSO provider. This function should only be called
-// once from an init function.
-func RegisterSSOSignOutHandler(f func(w http.ResponseWriter, r *http.Request)) {
-	if ssoSignOutHandler != nil {
-		panic("RegisterSSOSignOutHandler already called")
-	}
-	ssoSignOutHandler = f
-}
-
-func serveSignOutHandler(db database.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		logSignOutEvent(r, db, database.SecurityEventNameSignOutAttempted, nil)
+		// In this code, we still use legacy events (usagestats.LogBackendEvent),
+		// so do not tee events automatically.
+		// TODO: We should remove this in 5.3 entirely
+		ctx := teestore.WithoutV1(r.Context())
+
+		recordSecurityEvent(r, db, database.SecurityEventNameSignOutAttempted, nil)
 
 		// Invalidate all user sessions first
 		// This way, any other signout failures should not leave a valid session
 		var err error
 		if err = session.InvalidateSessionCurrentUser(w, r, db); err != nil {
-			logSignOutEvent(r, db, database.SecurityEventNameSignOutFailed, err)
-			log15.Error("serveSignOutHandler", "err", err)
+			recordSecurityEvent(r, db, database.SecurityEventNameSignOutFailed, err)
+			recorder.Record(ctx, "signOut", telemetry.ActionFailed, nil)
+			logger.Error("serveSignOutHandler", log.Error(err))
 		}
 
 		if err = session.SetActor(w, r, nil, 0, time.Time{}); err != nil {
-			logSignOutEvent(r, db, database.SecurityEventNameSignOutFailed, err)
-			log15.Error("serveSignOutHandler", "err", err)
+			recordSecurityEvent(r, db, database.SecurityEventNameSignOutFailed, err)
+			recorder.Record(ctx, "signOut", telemetry.ActionFailed, nil)
+			logger.Error("serveSignOutHandler", log.Error(err))
 		}
 
-		if ssoSignOutHandler != nil {
-			ssoSignOutHandler(w, r)
-		}
+		session.SetSignOutCookie(w)
+
+		ssoSignOutHandler(w, r)
 
 		if err == nil {
-			logSignOutEvent(r, db, database.SecurityEventNameSignOutSucceeded, nil)
+			recordSecurityEvent(r, db, database.SecurityEventNameSignOutSucceeded, nil)
+
+			recorder.Record(ctx, "signOut", telemetry.ActionSucceeded, nil)
 		}
 
 		http.Redirect(w, r, "/search", http.StatusSeeOther)
 	}
 }
 
-// logSignOutEvent records an event into the security event log.
-func logSignOutEvent(r *http.Request, db database.DB, name database.SecurityEventName, err error) {
+// recordSecurityEvent records an event into the security event log.
+func recordSecurityEvent(r *http.Request, db database.DB, name database.SecurityEventName, err error) {
 	ctx := r.Context()
 	a := actor.FromContext(ctx)
 
@@ -71,20 +73,56 @@ func logSignOutEvent(r *http.Request, db database.DB, name database.SecurityEven
 	if err != nil {
 		arg.Error = err.Error()
 	}
-
 	marshalled, _ := json.Marshal(arg)
 
-	event := &database.SecurityEvent{
-		Name:      name,
-		URL:       r.URL.Path,
-		UserID:    uint32(a.UID),
-		Argument:  marshalled,
-		Source:    "BACKEND",
-		Timestamp: time.Now(),
+	// Safe to ignore this error
+	anonymousUserID, _ := cookie.AnonymousUID(r)
+
+	if errsec := db.SecurityEventLogs().LogSecurityEvent(ctx, name, r.URL.Path, uint32(a.UID), anonymousUserID, "BACKEND", arg); errsec != nil {
+		log.Error(errsec)
 	}
 
-	// Safe to ignore this error
-	event.AnonymousUserID, _ = cookie.AnonymousUID(r)
+	// Legacy event - TODO: Remove in 5.3, alongside the teestore.WithoutV1
+	// context.
+	logEvent := &database.Event{
+		Name:            string(name),
+		URL:             r.URL.Host,
+		UserID:          uint32(a.UID),
+		AnonymousUserID: "backend",
+		Argument:        marshalled,
+		Source:          "BACKEND",
+		Timestamp:       time.Now(),
+	}
+	//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
+	_ = db.EventLogs().Insert(ctx, logEvent)
+}
 
-	db.SecurityEventLogs().LogEvent(ctx, event)
+func ssoSignOutHandler(w http.ResponseWriter, r *http.Request) {
+	logger := log.Scoped("ssoSignOutHandler")
+	for _, p := range conf.Get().AuthProviders {
+		var err error
+		switch {
+		case p.Openidconnect != nil:
+			_, err = openidconnect.SignOut(w, r, openidconnect.SessionKey, openidconnect.GetProvider)
+		case p.Saml != nil:
+			_, err = saml.SignOut(w, r)
+		}
+		if err != nil {
+			logger.Error("failed to clear auth provider session data", log.Error(err))
+		}
+	}
+
+	if p := sourcegraphoperator.GetOIDCProvider(internalauth.SourcegraphOperatorProviderType); p != nil {
+		_, err := openidconnect.SignOut(
+			w,
+			r,
+			sourcegraphoperator.SessionKey,
+			func(string) *openidconnect.Provider {
+				return p
+			},
+		)
+		if err != nil {
+			logger.Error("failed to clear auth provider session data", log.Error(err))
+		}
+	}
 }

@@ -1,8 +1,8 @@
-import { Observable } from 'rxjs'
+import type { Observable } from 'rxjs'
 import { map } from 'rxjs/operators'
 
 import { createAggregateError, memoizeObservable } from '@sourcegraph/common'
-import { gql } from '@sourcegraph/http-client'
+import { dataOrThrowErrors, gql } from '@sourcegraph/http-client'
 import {
     CloneInProgressError,
     RepoNotFoundError,
@@ -10,15 +10,20 @@ import {
     RevisionNotFoundError,
 } from '@sourcegraph/shared/src/backend/errors'
 import {
-    makeRepoURI,
-    RepoRevision,
-    RepoSpec,
-    ResolvedRevisionSpec,
-    RevisionSpec,
+    makeRepoGitURI,
+    type RepoRevision,
+    type RepoSpec,
+    type ResolvedRevisionSpec,
+    type RevisionSpec,
 } from '@sourcegraph/shared/src/util/url'
 
-import { queryGraphQL } from '../backend/graphql'
-import { ExternalLinkFields, RepositoryFields } from '../graphql-operations'
+import { queryGraphQL, requestGraphQL } from '../backend/graphql'
+import type {
+    ExternalLinkFields,
+    FileExternalLinksResult,
+    RepositoryFields,
+    ResolveRepoRevResult,
+} from '../graphql-operations'
 
 export const externalLinkFieldsFragment = gql`
     fragment ExternalLinkFields on ExternalLink {
@@ -32,12 +37,14 @@ export const repositoryFragment = gql`
         id
         name
         url
+        sourceType
         externalURLs {
             url
             serviceKind
         }
         externalRepository {
             serviceType
+            serviceID
         }
         description
         viewerCanAdminister
@@ -45,6 +52,12 @@ export const repositoryFragment = gql`
             displayName
             abbrevName
         }
+        isFork
+        metadata {
+            key
+            value
+        }
+        topics
     }
 `
 
@@ -66,7 +79,7 @@ export interface Repo {
  */
 export const resolveRepoRevision = memoizeObservable(
     ({ repoName, revision }: RepoSpec & Partial<RevisionSpec>): Observable<ResolvedRevision & Repo> =>
-        queryGraphQL(
+        queryGraphQL<ResolveRepoRevResult>(
             gql`
                 query ResolveRepoRev($repoName: String!, $revision: String!) {
                     repositoryRedirect(name: $repoName) {
@@ -79,9 +92,16 @@ export const resolveRepoRevision = memoizeObservable(
                                 cloned
                             }
                             commit(rev: $revision) {
-                                oid
-                                tree(path: "") {
-                                    url
+                                __typename
+                                ...GitCommitFieldsWithTree
+                            }
+                            changelist(cid: $revision) {
+                                __typename
+                                cid
+                                canonicalURL
+                                commit {
+                                    __typename
+                                    ...GitCommitFieldsWithTree
                                 }
                             }
                             defaultBranch {
@@ -91,6 +111,13 @@ export const resolveRepoRevision = memoizeObservable(
                         ... on Redirect {
                             url
                         }
+                    }
+                }
+
+                fragment GitCommitFieldsWithTree on GitCommit {
+                    oid
+                    tree(path: "") {
+                        url
                     }
                 }
                 ${repositoryFragment}
@@ -116,30 +143,33 @@ export const resolveRepoRevision = memoizeObservable(
                 if (!data.repositoryRedirect.mirrorInfo.cloned) {
                     throw new CloneInProgressError(repoName, 'queued for cloning')
                 }
-                if (!data.repositoryRedirect.commit) {
+
+                // The "revision" we queried for could be a commit or a changelist.
+                const commit = data.repositoryRedirect.commit || data.repositoryRedirect.changelist?.commit
+                if (!commit) {
                     throw new RevisionNotFoundError(revision)
                 }
 
                 const defaultBranch = data.repositoryRedirect.defaultBranch?.abbrevName || 'HEAD'
 
-                if (!data.repositoryRedirect.commit.tree) {
+                if (!commit.tree) {
                     throw new RevisionNotFoundError(defaultBranch)
                 }
 
                 return {
                     repo: data.repositoryRedirect,
-                    commitID: data.repositoryRedirect.commit.oid,
+                    commitID: commit.oid,
                     defaultBranch,
-                    rootTreeURL: data.repositoryRedirect.commit.tree.url,
+                    rootTreeURL: commit.tree.url,
                 }
             })
         ),
-    makeRepoURI
+    makeRepoGitURI
 )
 
 export const fetchFileExternalLinks = memoizeObservable(
     (context: RepoRevision & { filePath: string }): Observable<ExternalLinkFields[]> =>
-        queryGraphQL(
+        queryGraphQL<FileExternalLinksResult>(
             gql`
                 query FileExternalLinks($repoName: String!, $revision: String!, $filePath: String!) {
                     repository(name: $repoName) {
@@ -164,5 +194,34 @@ export const fetchFileExternalLinks = memoizeObservable(
                 return data.repository.commit.file.externalURLs
             })
         ),
-    makeRepoURI
+    makeRepoGitURI
+)
+
+interface FetchCommitMessageResult {
+    __typename?: 'Query'
+    repository: {
+        commit: {
+            message: string
+        }
+    }
+}
+
+export const fetchCommitMessage = memoizeObservable(
+    (context: RepoRevision): Observable<string> =>
+        requestGraphQL<FetchCommitMessageResult, RepoRevision>(
+            gql`
+                query CommitMessage($repoName: String!, $revision: String!) {
+                    repository(name: $repoName) {
+                        commit(rev: $revision) {
+                            message
+                        }
+                    }
+                }
+            `,
+            context
+        ).pipe(
+            map(dataOrThrowErrors),
+            map(data => data.repository.commit.message)
+        ),
+    makeRepoGitURI
 )

@@ -1,7 +1,8 @@
-import { RenderResult } from '@testing-library/react'
+import type { RenderResult } from '@testing-library/react'
 import PuzzleOutlineIcon from 'mdi-react/PuzzleOutlineIcon'
+import { beforeEach, describe, expect, it } from 'vitest'
 
-import { renderWithBrandedContext } from '@sourcegraph/shared/src/testing'
+import { renderWithBrandedContext } from '../../testing'
 
 import { PageHeader } from './PageHeader'
 

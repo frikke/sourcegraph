@@ -3,9 +3,9 @@ import React, { useMemo } from 'react'
 import classNames from 'classnames'
 
 import { dataOrThrowErrors, gql } from '@sourcegraph/http-client'
-import { Card, H2, Text } from '@sourcegraph/wildcard'
+import { Card, Text } from '@sourcegraph/wildcard'
 
-import { useConnection } from '../../components/FilteredConnection/hooks/useConnection'
+import { useShowMorePagination } from '../../components/FilteredConnection/hooks/useShowMorePagination'
 import {
     ConnectionContainer,
     ConnectionError,
@@ -15,7 +15,7 @@ import {
     ShowMoreButton,
     SummaryContainer,
 } from '../../components/FilteredConnection/ui'
-import {
+import type {
     CodeMonitorWithEvents,
     MonitorTriggerEventsResult,
     MonitorTriggerEventsVariables,
@@ -65,18 +65,21 @@ export const CODE_MONITOR_EVENTS = gql`
         actions {
             nodes {
                 ... on MonitorWebhook {
+                    id
                     __typename
                     events {
                         ...MonitorActionEvents
                     }
                 }
                 ... on MonitorEmail {
+                    id
                     __typename
                     events {
                         ...MonitorActionEvents
                     }
                 }
                 ... on MonitorSlackWebhook {
+                    id
                     __typename
                     events {
                         ...MonitorActionEvents
@@ -116,13 +119,13 @@ export const CodeMonitoringLogs: React.FunctionComponent<
     const pageSize = 20
     const runPageSize = 20
 
-    const { connection, error, loading, fetchMore, hasNextPage } = useConnection<
+    const { connection, error, loading, fetchMore, hasNextPage } = useShowMorePagination<
         MonitorTriggerEventsResult,
         MonitorTriggerEventsVariables,
         CodeMonitorWithEvents
     >({
         query: CODE_MONITOR_EVENTS,
-        variables: { first: pageSize, after: null, triggerEventsFirst: runPageSize, triggerEventsAfter: null },
+        variables: { triggerEventsFirst: runPageSize, triggerEventsAfter: null },
         getConnection: result => {
             const data = dataOrThrowErrors(result)
 
@@ -131,19 +134,16 @@ export const CodeMonitoringLogs: React.FunctionComponent<
             }
             return data.currentUser.monitors
         },
+        options: { pageSize },
     })
 
     const monitors: CodeMonitorWithEvents[] = useMemo(() => connection?.nodes ?? [], [connection])
 
     return (
         <div>
-            <H2>Code Monitoring Logs</H2>
             <Text>
-                {/* TODO: Text to change */}
-                You can use these logs to troubleshoot issues with code monitor notifications. Only the {
-                    runPageSize
-                }{' '}
-                most recent runs are shown and old runs are deleted periodically.
+                Use these logs to troubleshoot issues with code monitor notifications. Only the {runPageSize} most
+                recent runs are shown. Old runs are deleted periodically.
             </Text>
             <Card className="p-3">
                 <ConnectionContainer>
@@ -159,12 +159,13 @@ export const CodeMonitoringLogs: React.FunctionComponent<
                         <SummaryContainer centered={true}>
                             <ConnectionSummary
                                 noSummaryIfAllNodesVisible={true}
-                                first={pageSize}
                                 connection={connection}
                                 noun="monitor"
                                 pluralNoun="monitors"
                                 hasNextPage={hasNextPage}
-                                emptyElement={<div className={styles.empty}>You haven't created any monitors yet</div>}
+                                emptyElement={
+                                    <div className={styles.empty}>No code monitors have been created yet.</div>
+                                }
                             />
                             {hasNextPage && <ShowMoreButton onClick={fetchMore} />}
                         </SummaryContainer>

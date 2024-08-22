@@ -1,26 +1,27 @@
-import * as Comlink from 'comlink'
+import type * as Comlink from 'comlink'
 import { EMPTY, of } from 'rxjs'
 import { first, switchMap } from 'rxjs/operators'
 import * as vscode from 'vscode'
 
 import { finallyReleaseProxy, wrapRemoteObservable } from '@sourcegraph/shared/src/api/client/api/common'
-import { makeRepoURI } from '@sourcegraph/shared/src/util/url'
+import { makeRepoGitURI } from '@sourcegraph/shared/src/util/url'
 
-import { SearchSidebarAPI } from '../contract'
-import { SourcegraphFileSystemProvider } from '../file-system/SourcegraphFileSystemProvider'
+import type { SearchSidebarAPI } from '../contract'
+import type { SourcegraphFileSystemProvider } from '../file-system/SourcegraphFileSystemProvider'
 
 export class SourcegraphHoverProvider implements vscode.HoverProvider {
     constructor(
         private readonly fs: SourcegraphFileSystemProvider,
         private readonly sourcegraphExtensionHostAPI: Comlink.Remote<SearchSidebarAPI>
     ) {}
+
     public async provideHover(
         document: vscode.TextDocument,
         position: vscode.Position,
         token: vscode.CancellationToken
     ): Promise<vscode.Hover | undefined> {
         const uri = this.fs.sourcegraphUri(document.uri)
-        const extensionHostUri = makeRepoURI({
+        const extensionHostUri = makeRepoGitURI({
             repoName: uri.repositoryName,
             revision: uri.revision,
             filePath: uri.path,

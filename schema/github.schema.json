@@ -20,13 +20,13 @@
       "examples": ["https://github.com", "https://github-enterprise.example.com"]
     },
     "gitURLType": {
-      "description": "The type of Git URLs to use for cloning and fetching Git repositories on this GitHub instance.\n\nIf \"http\", Sourcegraph will access GitHub repositories using Git URLs of the form http(s)://github.com/myteam/myproject.git (using https: if the GitHub instance uses HTTPS).\n\nIf \"ssh\", Sourcegraph will access GitHub repositories using Git URLs of the form git@github.com:myteam/myproject.git. See the documentation for how to provide SSH private keys and known_hosts: https://docs.sourcegraph.com/admin/repo/auth#repositories-that-need-http-s-or-ssh-authentication.",
+      "description": "The type of Git URLs to use for cloning and fetching Git repositories on this GitHub instance.\n\nIf \"http\", Sourcegraph will access GitHub repositories using Git URLs of the form http(s)://github.com/myteam/myproject.git (using https: if the GitHub instance uses HTTPS).\n\nIf \"ssh\", Sourcegraph will access GitHub repositories using Git URLs of the form git@github.com:myteam/myproject.git. See the documentation for how to provide SSH private keys and known_hosts: https://sourcegraph.com/docs/admin/repo/auth.",
       "type": "string",
       "enum": ["http", "ssh"],
       "default": "http"
     },
     "token": {
-      "description": "A GitHub personal access token. Create one for GitHub.com at https://github.com/settings/tokens/new?description=Sourcegraph (for GitHub Enterprise, replace github.com with your instance's hostname). See https://docs.sourcegraph.com/admin/external_service/github#github-api-token-and-access for which scopes are required for which use cases.",
+      "description": "A GitHub personal access token. Create one for GitHub.com at https://github.com/settings/tokens/new?description=Sourcegraph (for GitHub Enterprise, replace github.com with your instance's hostname). See https://sourcegraph.com/docs/admin/code_hosts/github#github-api-access for which scopes are required for which use cases.",
       "type": "string",
       "minLength": 1
     },
@@ -73,6 +73,7 @@
     },
     "webhooks": {
       "description": "An array of configurations defining existing GitHub webhooks that send updates back to Sourcegraph.",
+      "deprecationMessage": "Deprecated in favour of first class webhooks. See https://sourcegraph.com/docs/admin/config/webhooks/incoming#deprecation-notice",
       "type": "array",
       "items": {
         "type": "object",
@@ -106,7 +107,9 @@
           { "required": ["id"] },
           { "required": ["pattern"] },
           { "required": ["forks"] },
-          { "required": ["archived"] }
+          { "required": ["archived"] },
+          { "required": ["stars"] },
+          { "required": ["size"] }
         ],
         "properties": {
           "archived": {
@@ -131,17 +134,30 @@
             "description": "Regular expression which matches against the name of a GitHub repository (\"owner/name\").",
             "type": "string",
             "format": "regex"
+          },
+          "size": {
+            "description": "If set, repositories with a size above the specified one will be excluded.",
+            "type": "string",
+            "minLength": 2,
+            "pattern": "^[<>]{1}[=]{0,1}\\s*\\d+\\s*\\w+$"
+          },
+          "stars": {
+            "description": "If set, repositories stars less than the specified number will be.",
+            "type": "string",
+            "minLength": 2,
+            "pattern": "^[<>]{1}[=]{0,1}\\s*\\d+$"
           }
         }
       },
       "examples": [
         [{ "forks": true }],
         [{ "name": "owner/name" }, { "id": "MDEwOlJlcG9zaXRvcnkxMTczMDM0Mg==" }],
-        [{ "name": "vuejs/vue" }, { "name": "php/php-src" }, { "pattern": "^topsecretorg/.*" }]
+        [{ "name": "vuejs/vue" }, { "name": "php/php-src" }, { "pattern": "^topsecretorg/.*" }],
+        [{ "size": ">= 1GB", "stars": "< 100" }]
       ]
     },
     "repositoryQuery": {
-      "description": "An array of strings specifying which GitHub or GitHub Enterprise repositories to mirror on Sourcegraph. The valid values are:\n\n- `public` mirrors all public repositories for GitHub Enterprise and is the equivalent of `none` for GitHub\n\n- `affiliated` mirrors all repositories affiliated with the configured token's user:\n\t- Private repositories with read access\n\t- Public repositories owned by the user or their orgs\n\t- Public repositories with write access\n\n- `none` mirrors no repositories (except those specified in the `repos` configuration property or added manually)\n\n- All other values are executed as a GitHub advanced repository search as described at https://github.com/search/advanced. Example: to sync all repositories from the \"sourcegraph\" organization including forks the query would be \"org:sourcegraph fork:true\".\n\nIf multiple values are provided, their results are unioned.\n\nIf you need to narrow the set of mirrored repositories further (and don't want to enumerate it with a list or query set as above), create a new bot/machine user on GitHub or GitHub Enterprise that is only affiliated with the desired repositories.",
+      "description": "An array of strings specifying which GitHub or GitHub Enterprise repositories to mirror on Sourcegraph. The valid values are:\n\n- `public` mirrors all public repositories for GitHub Enterprise and is the equivalent of `none` for GitHub\n\n- `internal` mirrors all internal repositories for GitHub Enterprise and is the equivalent of `none` for GitHub\n\n- `affiliated` mirrors all repositories affiliated with the configured token's user:\n\t- Private repositories with read access\n\t- Public repositories owned by the user or their orgs\n\t- Public repositories with write access\n\n- `none` mirrors no repositories (except those specified in the `repos` configuration property or added manually)\n\n- All other values are executed as a GitHub advanced repository search as described at https://github.com/search/advanced. Example: to sync all repositories from the \"sourcegraph\" organization including forks the query would be \"org:sourcegraph fork:true\".\n\nIf multiple values are provided, their results are unioned.\n\nIf you need to narrow the set of mirrored repositories further (and don't want to enumerate it with a list or query set as above), create a new bot/machine user on GitHub or GitHub Enterprise that is only affiliated with the desired repositories.",
       "type": "array",
       "items": {
         "type": "string",
@@ -161,35 +177,58 @@
     },
     "authorization": {
       "title": "GitHubAuthorization",
-      "description": "If non-null, enforces GitHub repository permissions. This requires that there is an item in the [site configuration json](https://docs.sourcegraph.com/admin/config/site_config#auth-providers) `auth.providers` field, of type \"github\" with the same `url` field as specified in this `GitHubConnection`.",
+      "description": "If non-null, enforces GitHub repository permissions. This requires that there is an item in the [site configuration json](https://sourcegraph.com/docs/admin/config/site_config#auth-providers) `auth.providers` field, of type \"github\" with the same `url` field as specified in this `GitHubConnection`.",
       "type": "object",
       "properties": {
         "groupsCacheTTL": {
-          "description": "Experimental: If set, configures hours cached permissions from teams and organizations should be kept for. Setting a negative value disables syncing from teams and organizations, and falls back to the default behaviour of syncing all permisisons directly from user-repository affiliations instead. [Learn more](https://docs.sourcegraph.com/admin/repo/permissions#teams-and-organizations-permissions-caching).",
+          "description": "Experimental: If set, configures hours cached permissions from teams and organizations should be kept for. Setting a negative value disables syncing from teams and organizations, and falls back to the default behaviour of syncing all permisisons directly from user-repository affiliations instead. [Learn more](https://sourcegraph.com/docs/admin/code_hosts/github#teams-and-organizations-permissions-caching).",
           "type": "number",
           "default": 72
+        },
+        "syncInternalRepoPermissions": {
+          "description": "If true, access to internal repositories will be synced as part of user permission syncs. This can lead to slower user permission syncs for organizations with many internal repositories. Defaults to false.",
+          "type": "boolean",
+          "default": false
+        },
+        "markInternalReposAsPublic": {
+          "description": "If true, internal repositories will be accessible to all users on Sourcegraph as if they were public. This overrides repository permissions but allows easier discovery and access to internal repositories, and may be desirable if all users on the Sourcegraph instance should have access to all internal repositories anyways. Defaults to false.",
+          "type": "boolean",
+          "default": false
         }
       }
     },
     "githubAppInstallationID": {
-      "description": "The installation ID of the GitHub App.",
+      "description": "DEPRECATED: The installation ID of the GitHub App.",
       "type": "string"
+    },
+    "gitHubAppDetails": {
+      "description": "If non-null, this is a GitHub App connection with some additional properties.",
+      "type": "object",
+      "properties": {
+        "baseURL": {
+          "description": "The base URL of the GitHub App.",
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "appID": {
+          "description": "The ID of the GitHub App.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "installationID": {
+          "description": "The installation ID of this connection.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "cloneAllRepositories": {
+          "description": "Clone all repositories for this App installation.",
+          "type": "boolean",
+          "default": false
+        }
+      }
     },
     "pending": {
       "description": "Whether the code host connection is in a pending state.",
-      "type": "boolean",
-      "default": false
-    },
-    "cloudGlobal": {
-      "title": "CloudGlobal",
-      "description": "When set to true, this external service will be chosen as our 'Global' GitHub service. Only valid on Sourcegraph.com. Only one service can have this flag set.",
-      "type": "boolean",
-      "default": false,
-      "deprecationMessage": "DEPRECATED: The cloud_default flag should be set in the database instead"
-    },
-    "cloudDefault": {
-      "title": "CloudDefault",
-      "description": "Only used to override the cloud_default column from a config file specified by EXTSVC_CONFIG_FILE",
       "type": "boolean",
       "default": false
     }

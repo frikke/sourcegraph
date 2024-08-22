@@ -1,15 +1,26 @@
-team/frontend-platform:
-  - '@alicjasuska'
-  - '@umpox'
-  - '@valerybugakov'
-  - '@lrhacker'
-
-team/iam:
-  - '@unknwon'
-  - '@jplahn'
-  - '@miveronese'
-  - '@ryphil'
-  - '@pietrorosa77'
-  - '@quinnkeast'
+team/source: 
   - '@pjlast'
-  - '@kopancek'
+  - '@eseliger'
+  - '@ggilmore'
+
+team/search-platform: 
+  - '@jtibshirani'
+  - '@stefanhengl'
+  - '@keegancsmith'
+
+team/graph:
+  - '@varungandhi-src'
+  - '@kritzcreek'
+  - '@keynmol'
+
+team/product-platform:
+  - '@mmanela'
+  - '@pjlast'
+  - '@eseliger'
+  - '@ggilmore'
+  - '@varungandhi-src'
+  - '@kritzcreek'
+  - '@keynmol'
+  - '@jtibshirani'
+  - '@stefanhengl'
+  - '@keegancsmith'

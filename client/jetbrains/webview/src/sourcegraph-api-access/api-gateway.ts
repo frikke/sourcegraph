@@ -1,6 +1,8 @@
+import { lastValueFrom } from 'rxjs'
+
 import { gql, requestGraphQLCommon } from '@sourcegraph/http-client'
-import { AuthenticatedUser } from '@sourcegraph/shared/src/auth'
-import { CurrentAuthStateResult, CurrentAuthStateVariables } from '@sourcegraph/shared/src/graphql-operations'
+import type { AuthenticatedUser } from '@sourcegraph/shared/src/auth'
+import type { CurrentAuthStateResult, CurrentAuthStateVariables } from '@sourcegraph/shared/src/graphql-operations'
 
 export type SiteVersionAndCurrentAuthStateResult = CurrentAuthStateResult & {
     site: {
@@ -23,9 +25,9 @@ export const siteVersionAndUserQuery = gql`
             email
             displayName
             siteAdmin
-            tags
             url
             settingsURL
+            hasVerifiedEmail
             organizations {
                 nodes {
                     id
@@ -39,7 +41,6 @@ export const siteVersionAndUserQuery = gql`
                 canSignOut
             }
             viewerCanAdminister
-            tags
         }
     }
 `
@@ -51,23 +52,27 @@ export interface SiteVersionAndCurrentUser {
 
 export async function getSiteVersionAndAuthenticatedUser(
     instanceURL: string,
-    accessToken: string | null
+    accessToken: string | null,
+    customRequestHeaders: { [name: string]: string } | null
 ): Promise<SiteVersionAndCurrentUser> {
     if (!instanceURL) {
         return { site: null, currentUser: null }
     }
 
-    const result = await requestGraphQLCommon<SiteVersionAndCurrentAuthStateResult, CurrentAuthStateVariables>({
-        request: siteVersionAndUserQuery,
-        variables: {},
-        baseUrl: instanceURL,
-        headers: {
-            Accept: 'application/json',
-            'Content-Type': 'application/json',
-            'X-Sourcegraph-Should-Trace': new URLSearchParams(window.location.search).get('trace') || 'false',
-            ...(accessToken && { Authorization: `token ${accessToken}` }),
-        },
-    }).toPromise()
+    const result = await lastValueFrom(
+        requestGraphQLCommon<SiteVersionAndCurrentAuthStateResult, CurrentAuthStateVariables>({
+            request: siteVersionAndUserQuery,
+            variables: {},
+            baseUrl: instanceURL,
+            headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+                'X-Sourcegraph-Should-Trace': new URLSearchParams(window.location.search).get('trace') || 'false',
+                ...(accessToken && { Authorization: `token ${accessToken}` }),
+                ...customRequestHeaders,
+            },
+        })
+    )
 
     return result.data ?? { site: null, currentUser: null }
 }

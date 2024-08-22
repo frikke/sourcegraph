@@ -14,6 +14,8 @@ import (
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
+type RunnerFactoryWithSchemas func(schemaNames []string, schemas []*schemas.Schema) (*Runner, error)
+
 type Runner struct {
 	logger             log.Logger
 	storeFactoryCaches map[string]*storeFactoryCache
@@ -115,7 +117,7 @@ func (r *Runner) forEachSchema(ctx context.Context, schemaNames []string, visito
 	for _, schemaName := range schemaNames {
 		wg.Add(1)
 
-		go func(schemaName string) {
+		go func() {
 			defer wg.Done()
 
 			errorCh <- visitor(ctx, schemaContext{
@@ -124,7 +126,7 @@ func (r *Runner) forEachSchema(ctx context.Context, schemaNames []string, visito
 				store:                storeMap[schemaName],
 				initialSchemaVersion: versionMap[schemaName],
 			})
-		}(schemaName)
+		}()
 	}
 
 	wg.Wait()
@@ -286,8 +288,10 @@ func (r *Runner) withLockedSchemaState(
 	return false, f(schemaVersion, byState, unlock)
 }
 
-const lockPollInterval = time.Second
-const lockPollLogRatio = 5
+const (
+	lockPollInterval = time.Second
+	lockPollLogRatio = 5
+)
 
 // pollLock will attempt to acquire a session-level advisory lock while the given context has not
 // been canceled. The caller must eventually invoke the unlock function on successful acquisition
@@ -341,15 +345,15 @@ func groupByState(schemaVersion schemaVersion, definitions []definition.Definiti
 	pendingVersionsMap := intSet(schemaVersion.pendingVersions)
 
 	states := definitionsByState{}
-	for _, definition := range definitions {
-		if _, ok := appliedVersionsMap[definition.ID]; ok {
-			states.applied = append(states.applied, definition)
+	for _, def := range definitions {
+		if _, ok := appliedVersionsMap[def.ID]; ok {
+			states.applied = append(states.applied, def)
 		}
-		if _, ok := pendingVersionsMap[definition.ID]; ok {
-			states.pending = append(states.pending, definition)
+		if _, ok := pendingVersionsMap[def.ID]; ok {
+			states.pending = append(states.pending, def)
 		}
-		if _, ok := failedVersionsMap[definition.ID]; ok {
-			states.failed = append(states.failed, definition)
+		if _, ok := failedVersionsMap[def.ID]; ok {
+			states.failed = append(states.failed, def)
 		}
 	}
 
@@ -369,12 +373,12 @@ func validateSchemaState(
 ) (retry bool, _ error) {
 	if ignoreSingleDirtyLog && len(byState.failed) == 1 {
 		appliedVersionMap := intSet(extractIDs(byState.applied))
-		for _, definition := range definitions {
+		for _, def := range definitions {
 			if _, ok := appliedVersionMap[definitions[0].ID]; ok {
 				continue
 			}
 
-			if byState.failed[0].ID == definition.ID {
+			if byState.failed[0].ID == def.ID {
 				schemaContext.logger.Warn("Attempting to re-try migration that previously failed")
 				return false, nil
 			}
@@ -435,20 +439,20 @@ func partitionPendingMigrations(
 	schemaContext schemaContext,
 	definitions []definition.Definition,
 ) (pendingDefinitions []definitionWithStatus, failedDefinitions []definition.Definition, _ error) {
-	for _, definition := range definitions {
-		if definition.IsCreateIndexConcurrently {
-			tableName := definition.IndexMetadata.TableName
-			indexName := definition.IndexMetadata.IndexName
+	for _, def := range definitions {
+		if def.IsCreateIndexConcurrently {
+			tableName := def.IndexMetadata.TableName
+			indexName := def.IndexMetadata.IndexName
 
 			if indexStatus, ok, err := schemaContext.store.IndexStatus(ctx, tableName, indexName); err != nil {
 				return nil, nil, errors.Wrapf(err, "failed to check creation status of index %q.%q", tableName, indexName)
 			} else if ok && indexStatus.Phase != nil {
-				pendingDefinitions = append(pendingDefinitions, definitionWithStatus{definition, indexStatus})
+				pendingDefinitions = append(pendingDefinitions, definitionWithStatus{def, indexStatus})
 				continue
 			}
 		}
 
-		failedDefinitions = append(failedDefinitions, definition)
+		failedDefinitions = append(failedDefinitions, def)
 	}
 
 	return pendingDefinitions, failedDefinitions, nil
@@ -479,7 +483,6 @@ func logIndexStatus(schemaContext schemaContext, tableName, indexName string, in
 			renderIndexStatus(indexStatus),
 		),
 	)
-
 }
 
 // renderIndexStatus returns a slice of interface pairs describing the given index status for use in a

@@ -9,10 +9,24 @@ import (
 	"github.com/sourcegraph/sourcegraph/internal/actor"
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/authz"
+	srp "github.com/sourcegraph/sourcegraph/internal/authz/subrepoperms"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/search/result"
+	"github.com/sourcegraph/sourcegraph/internal/types"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
 	"github.com/sourcegraph/sourcegraph/schema"
 )
+
+func TestSearchZoektDoesntPanicWithNilQuery(t *testing.T) {
+	// As soon as we reach Streamer.Search function, we can consider test successful,
+	// that's why we can just mock it.
+	mockStreamer := NewMockStreamer()
+	expectedErr := errors.New("short circuit")
+	mockStreamer.SearchFunc.SetDefaultReturn(nil, expectedErr)
+
+	_, err := searchZoekt(context.Background(), mockStreamer, types.MinimalRepo{ID: 1}, "commitID", nil, "branch", nil, nil, nil)
+	assert.ErrorIs(t, err, expectedErr)
+}
 
 func TestFilterZoektResults(t *testing.T) {
 	conf.Mock(&conf.Unified{
@@ -31,10 +45,17 @@ func TestFilterZoektResults(t *testing.T) {
 	ctx = actor.WithActor(ctx, &actor.Actor{
 		UID: 1,
 	})
-	checker, err := authz.NewSimpleChecker(repoName, []string{"/**", "-/*_test.go"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	checker := srp.NewSimpleChecker(repoName, []authz.PathWithIP{
+		{
+			Path: "/**",
+			IP:   "*",
+		},
+		{
+			Path: "-/*_test.go",
+			IP:   "*",
+		},
+	})
+
 	results := []*result.SymbolMatch{
 		{
 			Symbol: result.Symbol{},

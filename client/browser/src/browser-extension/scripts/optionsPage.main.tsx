@@ -1,34 +1,43 @@
-// We want to polyfill first.
+// Set globals first before any imports.
+import '../../config/extension.entry'
+import '../../config/options.entry'
+// Polyfill before other imports.
 import '../../shared/polyfills'
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { trimEnd, uniq } from 'lodash'
 import { createRoot } from 'react-dom/client'
-import { from, noop, Observable, of } from 'rxjs'
-import { catchError, distinctUntilChanged, filter, map, mapTo } from 'rxjs/operators'
-import { Optional } from 'utility-types'
+import { from, noop, type Observable, of } from 'rxjs'
+import { catchError, distinctUntilChanged, filter, map } from 'rxjs/operators'
+import type { Optional } from 'utility-types'
 
 import { asError, isDefined } from '@sourcegraph/common'
-import { gql, GraphQLResult } from '@sourcegraph/http-client'
-import { TelemetryService } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { gql, type GraphQLResult } from '@sourcegraph/http-client'
+import type { BillingCategory, BillingProduct } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryService } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import { setLinkComponent, AnchorLink, useObservable } from '@sourcegraph/wildcard'
 
-import { CurrentUserResult } from '../../graphql-operations'
+import type { CurrentUserResult } from '../../graphql-operations'
 import { fetchSite } from '../../shared/backend/server'
 import { WildcardThemeProvider } from '../../shared/components/WildcardThemeProvider'
 import { initSentry } from '../../shared/sentry'
+import {
+    type ConditionalTelemetryRecorder,
+    ConditionalTelemetryRecorderProvider,
+    noOpTelemetryRecorder,
+} from '../../shared/telemetry'
 import { ConditionalTelemetryService, EventLogger } from '../../shared/tracking/eventLogger'
 import { observeSourcegraphURL, getExtensionVersion, isDefaultSourcegraphUrl } from '../../shared/util/context'
 import { featureFlags } from '../../shared/util/featureFlags'
 import {
-    OptionFlagKey,
+    type OptionFlagKey,
     optionFlagDefinitions,
     observeSendTelemetry,
     observeOptionFlagsWithValues,
 } from '../../shared/util/optionFlags'
 import { assertEnvironment } from '../environmentAssertion'
-import { KnownCodeHost, knownCodeHosts } from '../knownCodeHosts'
+import { type KnownCodeHost, knownCodeHosts } from '../knownCodeHosts'
 import { OptionsPage, URL_AUTH_ERROR, URL_FETCH_ERROR } from '../options-menu/OptionsPage'
 import { ThemeWrapper } from '../ThemeWrapper'
 import { checkUrlPermissions } from '../util'
@@ -77,20 +86,17 @@ const fetchCurrentTabStatus = async (sourcegraphURL: string): Promise<TabStatus>
 }
 
 // Make GraphQL requests from background page
-const createRequestGraphQL = (sourcegraphURL: string) => <T, V = object>(options: {
-    request: string
-    variables: V
-}): Observable<GraphQLResult<T>> =>
-    from(
-        background.requestGraphQL<T, V>({ ...options, sourcegraphURL })
-    )
+const createRequestGraphQL =
+    (sourcegraphURL: string) =>
+    <T, V = object>(options: { request: string; variables: V }): Observable<GraphQLResult<T>> =>
+        from(background.requestGraphQL<T, V>({ ...options, sourcegraphURL }))
 
 const version = getExtensionVersion()
 const isFullPage = !new URLSearchParams(window.location.search).get('popup')
 
 const validateSourcegraphUrl = (url: string): Observable<string | undefined> =>
     fetchSite(options => createRequestGraphQL(url)(options)).pipe(
-        mapTo(undefined),
+        map(() => undefined),
         catchError(error => {
             const { message } = asError(error)
             // We lose Error type when communicating from the background page
@@ -141,6 +147,31 @@ function useTelemetryService(sourcegraphUrl: string | undefined): TelemetryServi
     return telemetryService
 }
 
+function useTelemetryRecorder(
+    sourcegraphUrl: string | undefined
+): ConditionalTelemetryRecorder<BillingCategory, BillingProduct> {
+    const telemetryRecorder = useMemo(() => {
+        if (!sourcegraphUrl) {
+            return noOpTelemetryRecorder
+        }
+        const telemetryRecorderProvider = new ConditionalTelemetryRecorderProvider(
+            observingSendTelemetry,
+            createRequestGraphQL(sourcegraphUrl)
+        )
+        return telemetryRecorderProvider.getRecorder()
+    }, [sourcegraphUrl])
+
+    useEffect(
+        () => () => {
+            if (telemetryRecorder !== noOpTelemetryRecorder) {
+                telemetryRecorder.unsubscribe()
+            }
+        },
+        [telemetryRecorder]
+    )
+    return telemetryRecorder
+}
+
 const fetchCurrentUser = (
     sourcegraphURL: string
 ): Observable<Pick<NonNullable<CurrentUserResult['currentUser']>, 'settingsURL' | 'siteAdmin'>> => {
@@ -173,6 +204,7 @@ const Options: React.FunctionComponent<React.PropsWithChildren<unknown>> = () =>
     const sourcegraphUrl = useObservable(observingSourcegraphUrl)
     const [previousSourcegraphUrl, setPreviousSourcegraphUrl] = useState(sourcegraphUrl)
     const telemetryService = useTelemetryService(sourcegraphUrl)
+    const telemetryRecorder = useTelemetryRecorder(sourcegraphUrl)
     const previouslyUsedUrls = useObservable(observingPreviouslyUsedUrls)
     const isActivated = useObservable(observingIsActivated)
     const optionFlagsWithValues = useObservable(observingOptionFlagsWithValues)
@@ -190,19 +222,19 @@ const Options: React.FunctionComponent<React.PropsWithChildren<unknown>> = () =>
         )
     )
     const currentUser = useObservable(
-        useMemo(() => (currentTabStatus?.status.hasRepoSyncError ? fetchCurrentUser(sourcegraphUrl!) : of(undefined)), [
-            currentTabStatus,
-            sourcegraphUrl,
-        ])
+        useMemo(
+            () => (currentTabStatus?.status.hasRepoSyncError ? fetchCurrentUser(sourcegraphUrl!) : of(undefined)),
+            [currentTabStatus, sourcegraphUrl]
+        )
     )
 
-    const showSourcegraphCloudAlert = currentTabStatus?.status.host.endsWith('sourcegraph.com')
+    const showSourcegraphComAlert = currentTabStatus?.status.host.endsWith('sourcegraph.com')
 
     let permissionAlert: Optional<KnownCodeHost, 'host' | 'icon'> | undefined
     if (
         currentTabStatus &&
         !currentTabStatus?.status.hasPermissions &&
-        !showSourcegraphCloudAlert &&
+        !showSourcegraphComAlert &&
         !PERMISSIONS_PROTOCOL_BLOCKLIST.has(currentTabStatus.status.protocol)
     ) {
         const knownCodeHost = knownCodeHosts.find(({ host }) => host === currentTabStatus.status.host)
@@ -246,9 +278,24 @@ const Options: React.FunctionComponent<React.PropsWithChildren<unknown>> = () =>
     const handleToggleActivated = useCallback(
         (isActivated: boolean): void => {
             telemetryService.log(isActivated ? 'BrowserExtensionEnabled' : 'BrowserExtensionDisabled')
+            telemetryRecorder.recordEvent('browserExtension', isActivated ? 'enabled' : 'disabled')
             storage.sync.set({ disableExtension: !isActivated }).catch(console.error)
         },
-        [telemetryService]
+        [telemetryService, telemetryRecorder]
+    )
+
+    const handleRemovePreviousSourcegraphUrl = useCallback(
+        (url: string): void => {
+            if (!url || previouslyUsedUrls?.length === 0) {
+                return
+            }
+            storage.sync
+                .set({
+                    previouslyUsedURLs: previouslyUsedUrls?.filter(previouslyUsedUrl => previouslyUsedUrl !== url),
+                })
+                .catch(console.error)
+        },
+        [previouslyUsedUrls]
     )
 
     return (
@@ -258,6 +305,7 @@ const Options: React.FunctionComponent<React.PropsWithChildren<unknown>> = () =>
                     isFullPage={isFullPage}
                     sourcegraphUrl={sourcegraphUrl || ''}
                     suggestedSourcegraphUrls={uniqURLs(previouslyUsedUrls || [])}
+                    onSuggestedSourcegraphUrlDelete={handleRemovePreviousSourcegraphUrl}
                     onChangeSourcegraphUrl={handleChangeSourcegraphUrl}
                     version={version}
                     validateSourcegraphUrl={validateSourcegraphUrl}
@@ -267,7 +315,7 @@ const Options: React.FunctionComponent<React.PropsWithChildren<unknown>> = () =>
                     onChangeOptionFlag={handleChangeOptionFlag}
                     hasRepoSyncError={currentTabStatus?.status.hasRepoSyncError}
                     currentUser={currentUser}
-                    showSourcegraphCloudAlert={showSourcegraphCloudAlert}
+                    showSourcegraphComAlert={showSourcegraphComAlert}
                     permissionAlert={permissionAlert}
                     requestPermissionsHandler={currentTabStatus?.handler}
                 />

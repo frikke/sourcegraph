@@ -1,15 +1,15 @@
 import React, { useCallback, useState } from 'react'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
 import { asError, isErrorLike } from '@sourcegraph/common'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { Button, Modal, H3, Text } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { Button, Modal, H3, Text, ErrorAlert } from '@sourcegraph/wildcard'
 
 import { LoaderButton } from '../../../../components/LoaderButton'
-import { Scalars } from '../../../../graphql-operations'
+import type { Scalars } from '../../../../graphql-operations'
 import { detachChangesets as _detachChangesets } from '../backend'
 
-export interface DetachChangesetsModalProps extends TelemetryProps {
+export interface DetachChangesetsModalProps extends TelemetryProps, TelemetryV2Props {
     onCancel: () => void
     afterCreate: () => void
     batchChangeID: Scalars['ID']
@@ -25,6 +25,7 @@ export const DetachChangesetsModal: React.FunctionComponent<React.PropsWithChild
     batchChangeID,
     changesetIDs,
     telemetryService,
+    telemetryRecorder,
     detachChangesets = _detachChangesets,
 }) => {
     const [isLoading, setIsLoading] = useState<boolean | Error>(false)
@@ -34,11 +35,12 @@ export const DetachChangesetsModal: React.FunctionComponent<React.PropsWithChild
         try {
             await detachChangesets(batchChangeID, changesetIDs)
             telemetryService.logViewEvent('BatchChangeDetailsPageDetachArchivedChangesets')
+            telemetryRecorder.recordEvent('batchChange.details.detachArchivedChangesets', 'view')
             afterCreate()
         } catch (error) {
             setIsLoading(asError(error))
         }
-    }, [changesetIDs, detachChangesets, batchChangeID, telemetryService, afterCreate])
+    }, [changesetIDs, detachChangesets, batchChangeID, telemetryService, telemetryRecorder, afterCreate])
 
     const labelId = 'detach-changesets-modal-title'
 

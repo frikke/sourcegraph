@@ -1,11 +1,21 @@
-import React, { useEffect, useRef, useState, forwardRef } from 'react'
+import React, { forwardRef, useContext } from 'react'
 
-import { mdiChevronDown, mdiChevronUp, mdiMenu } from '@mdi/js'
+import { mdiMenu } from '@mdi/js'
 import classNames from 'classnames'
-import H from 'history'
-import { LinkProps, NavLink as RouterLink } from 'react-router-dom'
+import { NavLink as RouterNavLink, type LinkProps } from 'react-router-dom'
 
-import { Button, Link, Icon, H1, ForwardReferenceComponent } from '@sourcegraph/wildcard'
+import {
+    H1,
+    Icon,
+    Link,
+    Menu,
+    MenuButton,
+    MenuLink,
+    MenuList,
+    VIEWPORT_SM,
+    useMatchMedia,
+    type ForwardReferenceComponent,
+} from '@sourcegraph/wildcard'
 
 import { PageRoutes } from '../../routes.constants'
 
@@ -20,6 +30,7 @@ interface NavBarProps {
 
 interface NavGroupProps {
     children: React.ReactNode
+    className?: string
 }
 
 interface NavItemProps {
@@ -33,60 +44,53 @@ interface NavActionsProps {
     className?: string
 }
 
-export interface NavLinkProps extends NavItemProps, Pick<LinkProps<H.LocationState>, 'to'> {
+export interface NavLinkProps extends NavItemProps, Pick<LinkProps, 'to'> {
     external?: boolean
     className?: string
     variant?: 'compact'
 }
 
-const useOnClickDetector = (
-    reference: React.RefObject<HTMLDivElement>
-): [boolean, React.Dispatch<React.SetStateAction<boolean>>] => {
-    const [onClick, setOnClick] = useState(false)
-
-    useEffect(() => {
-        function handleToggleOpen(): void {
-            if (reference.current) {
-                setOnClick(false)
-            }
-        }
-        document.addEventListener('mouseup', handleToggleOpen)
-        return () => {
-            document.removeEventListener('mouseup', handleToggleOpen)
-        }
-    }, [reference, setOnClick])
-
-    return [onClick, setOnClick]
-}
-
-export const NavBar = forwardRef(
-    ({ children, logo }, reference): JSX.Element => (
-        <nav aria-label="Main Menu" className={navBarStyles.navbar} ref={reference}>
-            <H1 className={navBarStyles.logo}>
-                <RouterLink className="d-flex align-items-center" to={PageRoutes.Search}>
-                    {logo}
-                </RouterLink>
-            </H1>
-            <hr className={navBarStyles.divider} aria-hidden={true} />
+export const NavBar = forwardRef(function NavBar({ children, logo }, reference): JSX.Element {
+    const logoUrl = window.context?.codeSearchEnabledOnInstance ? PageRoutes.Search : PageRoutes.CodyChat
+    return (
+        <nav aria-label="Main" className={navBarStyles.navbar} ref={reference}>
+            {logo && (
+                <>
+                    <H1 className={navBarStyles.logo}>
+                        <Link className="d-flex align-items-center" to={logoUrl}>
+                            {logo}
+                        </Link>
+                    </H1>
+                    <hr className={navBarStyles.divider} aria-hidden={true} />
+                </>
+            )}
             {children}
         </nav>
     )
-) as ForwardReferenceComponent<'div', NavBarProps>
+}) as ForwardReferenceComponent<'nav', NavBarProps>
 
-export const NavGroup = ({ children }: NavGroupProps): JSX.Element => {
-    const menuReference = useRef<HTMLDivElement>(null)
-    const [open, setOpen] = useOnClickDetector(menuReference)
+export const MobileNavGroupContext = React.createContext(false)
+
+export const NavGroup = forwardRef<HTMLDivElement, NavGroupProps>(({ children, className }: NavGroupProps, ref) => {
+    const isMobileSize = useMatchMedia(`(max-width: ${VIEWPORT_SM}px)`)
 
     return (
-        <div className={navBarStyles.menu} ref={menuReference}>
-            <Button className={navBarStyles.menuButton} onClick={() => setOpen(!open)} aria-label="Sections Navigation">
-                <Icon aria-hidden={true} svgPath={mdiMenu} />
-                <Icon svgPath={open ? mdiChevronUp : mdiChevronDown} aria-hidden={true} />
-            </Button>
-            <ul className={classNames(navBarStyles.list, { [navBarStyles.menuClose]: !open })}>{children}</ul>
-        </div>
+        <MobileNavGroupContext.Provider value={isMobileSize}>
+            {isMobileSize ? (
+                <Menu ref={ref} className={className}>
+                    <MenuButton aria-label="Sections Navigation">
+                        <Icon aria-hidden={true} svgPath={mdiMenu} />
+                    </MenuButton>
+                    <MenuList>{children}</MenuList>
+                </Menu>
+            ) : (
+                <div ref={ref} className={classNames(navBarStyles.menu, className)}>
+                    <ul className={navBarStyles.list}>{children}</ul>
+                </div>
+            )}
+        </MobileNavGroupContext.Provider>
     )
-}
+})
 
 export const NavActions: React.FunctionComponent<React.PropsWithChildren<NavActionsProps>> = ({ children }) => (
     <ul className={navActionStyles.actions}>{children}</ul>
@@ -108,6 +112,12 @@ export const NavItem: React.FunctionComponent<React.PropsWithChildren<NavItemPro
     className,
     icon,
 }) => {
+    const mobileNav = useContext(MobileNavGroupContext)
+
+    if (mobileNav) {
+        return <>{React.Children.map(children, child => React.cloneElement(child as React.ReactElement, { icon }))}</>
+    }
+
     if (!children) {
         throw new Error('NavItem must be include at least one child')
     }
@@ -131,6 +141,28 @@ export const NavLink: React.FunctionComponent<React.PropsWithChildren<NavLinkPro
     variant,
     className,
 }) => {
+    const mobileNav = useContext(MobileNavGroupContext)
+
+    if (mobileNav) {
+        const content = (
+            <>
+                {LinkIcon ? <Icon className="mr-2" as={LinkIcon} aria-hidden={true} /> : null}
+                {children}
+            </>
+        )
+        return (
+            <MenuLink
+                as={Link}
+                to={to as string}
+                rel={external ? 'noreferrer noopener' : undefined}
+                target={external ? '_blank' : undefined}
+                className={className}
+            >
+                {content}
+            </MenuLink>
+        )
+    }
+
     const content = (
         <span className={classNames(navItemStyles.linkContent, className)}>
             {LinkIcon ? <Icon className={navItemStyles.icon} as={LinkIcon} aria-hidden={true} /> : null}
@@ -154,8 +186,11 @@ export const NavLink: React.FunctionComponent<React.PropsWithChildren<NavLinkPro
     }
 
     return (
-        <RouterLink to={to} className={navItemStyles.link} activeClassName={navItemStyles.active}>
+        <RouterNavLink
+            to={to}
+            className={({ isActive }) => classNames(navItemStyles.link, isActive && navItemStyles.active)}
+        >
             {content}
-        </RouterLink>
+        </RouterNavLink>
     )
 }

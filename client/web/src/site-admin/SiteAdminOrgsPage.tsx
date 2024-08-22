@@ -1,18 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { mdiCog, mdiAccount, mdiDelete, mdiPlus } from '@mdi/js'
-import * as H from 'history'
-import { RouteComponentProps } from 'react-router'
 import { Subject } from 'rxjs'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
 import { asError, isErrorLike, pluralize } from '@sourcegraph/common'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { Button, Link, Alert, Icon, H2, H3, Text, Tooltip } from '@sourcegraph/wildcard'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { Button, Link, Icon, H2, Text, Tooltip, ErrorAlert } from '@sourcegraph/wildcard'
 
 import { FilteredConnection } from '../components/FilteredConnection'
 import { PageTitle } from '../components/PageTitle'
-import { OrganizationFields } from '../graphql-operations'
+import type { OrganizationFields } from '../graphql-operations'
 import { orgURL } from '../org'
 
 import { deleteOrganization, fetchAllOrganizations } from './backend'
@@ -27,7 +25,6 @@ interface OrgNodeProps {
      * Called when the org is updated by an action in this list item.
      */
     onDidUpdate?: () => void
-    history: H.History
 }
 
 const OrgNode: React.FunctionComponent<React.PropsWithChildren<OrgNodeProps>> = ({ node, onDidUpdate }) => {
@@ -95,22 +92,22 @@ const OrgNode: React.FunctionComponent<React.PropsWithChildren<OrgNodeProps>> = 
     )
 }
 
-interface Props extends RouteComponentProps<{}>, TelemetryProps {}
+interface Props extends TelemetryProps, TelemetryV2Props {}
 
 /**
  * A page displaying the orgs on this site.
  */
 export const SiteAdminOrgsPage: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
     telemetryService,
-    history,
-    location,
+    telemetryRecorder,
 }) => {
     const orgUpdates = useMemo(() => new Subject<void>(), [])
     const onDidUpdateOrg = useCallback((): void => orgUpdates.next(), [orgUpdates])
 
     useEffect(() => {
         telemetryService.logViewEvent('SiteAdminOrgs')
-    }, [telemetryService])
+        telemetryRecorder.recordEvent('admin.orgs', 'view')
+    }, [telemetryService, telemetryRecorder])
 
     return (
         <div className="site-admin-orgs-page">
@@ -126,35 +123,17 @@ export const SiteAdminOrgsPage: React.FunctionComponent<React.PropsWithChildren<
                 <Link to="/help/admin/organizations">Sourcegraph documentation</Link> for information about configuring
                 organizations.
             </Text>
-            {window.context.sourcegraphDotComMode ? (
-                <>
-                    <Alert variant="info">Only organization members can view & modify organization settings.</Alert>
-                    <H3>Enable early access</H3>
-                    <div className="d-flex justify-content-between align-items-center mb-3">
-                        <Text>
-                            Enable early access for organization code host connections and repositories on Cloud.
-                        </Text>
-                        <Button to="./organizations/early-access-orgs-code" variant="primary" outline={true} as={Link}>
-                            Enable early access
-                        </Button>
-                    </div>
-                </>
-            ) : (
-                <FilteredConnection<OrganizationFields, Omit<OrgNodeProps, 'node'>>
-                    className="list-group list-group-flush mt-3"
-                    noun="organization"
-                    pluralNoun="organizations"
-                    queryConnection={fetchAllOrganizations}
-                    nodeComponent={OrgNode}
-                    nodeComponentProps={{
-                        onDidUpdate: onDidUpdateOrg,
-                        history,
-                    }}
-                    updates={orgUpdates}
-                    history={history}
-                    location={location}
-                />
-            )}
+            <FilteredConnection<OrganizationFields, Omit<OrgNodeProps, 'node'>>
+                className="list-group list-group-flush mt-3"
+                noun="organization"
+                pluralNoun="organizations"
+                queryConnection={fetchAllOrganizations}
+                nodeComponent={OrgNode}
+                nodeComponentProps={{
+                    onDidUpdate: onDidUpdateOrg,
+                }}
+                updates={orgUpdates}
+            />
         </div>
     )
 }

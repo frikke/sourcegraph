@@ -3,19 +3,18 @@ import { trimStart } from 'lodash'
 import { createRoot } from 'react-dom/client'
 import { defer, fromEvent, of } from 'rxjs'
 import { distinctUntilChanged, filter, map, startWith } from 'rxjs/operators'
-import { Omit } from 'utility-types'
+import type { Omit } from 'utility-types'
 
-import { AdjustmentDirection, PositionAdjuster } from '@sourcegraph/codeintellify'
-import { LineOrPositionOrRange } from '@sourcegraph/common'
-import { NotificationType } from '@sourcegraph/shared/src/api/extension/extensionHostApi'
-import { PlatformContext } from '@sourcegraph/shared/src/platform/context'
-import { observeSystemIsLightTheme } from '@sourcegraph/shared/src/theme'
+import { AdjustmentDirection, type PositionAdjuster } from '@sourcegraph/codeintellify'
+import type { LineOrPositionOrRange } from '@sourcegraph/common'
+import { observeSystemIsLightTheme } from '@sourcegraph/shared/src/deprecated-theme-utils'
+import type { PlatformContext } from '@sourcegraph/shared/src/platform/context'
 import { createURLWithUTM } from '@sourcegraph/shared/src/tracking/utm'
 import {
-    FileSpec,
-    RepoSpec,
-    ResolvedRevisionSpec,
-    RevisionSpec,
+    type FileSpec,
+    type RepoSpec,
+    type ResolvedRevisionSpec,
+    type RevisionSpec,
     toAbsoluteBlobURL,
 } from '@sourcegraph/shared/src/util/url'
 
@@ -25,19 +24,21 @@ import { SourcegraphIconButton } from '../../components/SourcegraphIconButton'
 import { fetchBlobContentLines } from '../../repo/backend'
 import { getPlatformName } from '../../util/context'
 import { querySelectorAllOrSelf, querySelectorOrSelf } from '../../util/dom'
-import { CodeHost, MountGetter } from '../shared/codeHost'
-import { CodeView, toCodeViewResolver } from '../shared/codeViews'
-import { createNotificationClassNameGetter } from '../shared/getNotificationClassName'
-import { NativeTooltip } from '../shared/nativeTooltips'
+import type { CodeHost, MountGetter } from '../shared/codeHost'
+import { type CodeView, toCodeViewResolver } from '../shared/codeViews'
 import { getSelectionsFromHash, observeSelectionsFromHash } from '../shared/util/selections'
-import { ViewResolver } from '../shared/views'
+import type { ViewResolver } from '../shared/views'
 
-import { markdownBodyViewResolver } from './contentViews'
 import { diffDomFunctions, searchCodeSnippetDOMFunctions, singleFileDOMFunctions } from './domFunctions'
-import { getCommandPaletteMount } from './extensions'
 import { resolveDiffFileInfo, resolveFileInfo, resolveSnippetFileInfo } from './fileInfo'
-import { setElementTooltip } from './tooltip'
-import { getFileContainers, parseURL, getFilePath } from './util'
+import {
+    getFileContainers,
+    parseURL,
+    getSelectorFor,
+    isNewGitHubUI,
+    getEmbeddedData,
+    windowLocation__testingOnly,
+} from './util'
 
 import styles from './codeHost.module.scss'
 
@@ -107,35 +108,37 @@ const singleFileCodeView: Omit<CodeView, 'element'> = {
  * Some code snippets get leading white space trimmed. This adjusts based on
  * this. See an example here https://github.com/sourcegraph/browser-extensions/issues/188.
  */
-const getSnippetPositionAdjuster = (
-    requestGraphQL: PlatformContext['requestGraphQL']
-): PositionAdjuster<RepoSpec & RevisionSpec & FileSpec & ResolvedRevisionSpec> => ({ direction, codeView, position }) =>
-    fetchBlobContentLines({ ...position, requestGraphQL }).pipe(
-        map(lines => {
-            const codeElement = singleFileDOMFunctions.getCodeElementFromLineNumber(
-                codeView,
-                position.line,
-                position.part
-            )
-            if (!codeElement) {
-                throw new Error('(adjustPosition) could not find code element for line provided')
-            }
+const getSnippetPositionAdjuster =
+    (
+        requestGraphQL: PlatformContext['requestGraphQL']
+    ): PositionAdjuster<RepoSpec & RevisionSpec & FileSpec & ResolvedRevisionSpec> =>
+    ({ direction, codeView, position }) =>
+        fetchBlobContentLines({ ...position, requestGraphQL }).pipe(
+            map(lines => {
+                const codeElement = singleFileDOMFunctions.getCodeElementFromLineNumber(
+                    codeView,
+                    position.line,
+                    position.part
+                )
+                if (!codeElement) {
+                    throw new Error('(adjustPosition) could not find code element for line provided')
+                }
 
-            const actualLine = lines[position.line - 1]
-            const documentLine = codeElement.textContent || ''
+                const actualLine = lines[position.line - 1]
+                const documentLine = codeElement.textContent || ''
 
-            const actualLeadingWhiteSpace = actualLine.length - trimStart(actualLine).length
-            const documentLeadingWhiteSpace = documentLine.length - trimStart(documentLine).length
+                const actualLeadingWhiteSpace = actualLine.length - trimStart(actualLine).length
+                const documentLeadingWhiteSpace = documentLine.length - trimStart(documentLine).length
 
-            const modifier = direction === AdjustmentDirection.ActualToCodeView ? -1 : 1
-            const delta = Math.abs(actualLeadingWhiteSpace - documentLeadingWhiteSpace) * modifier
+                const modifier = direction === AdjustmentDirection.ActualToCodeView ? -1 : 1
+                const delta = Math.abs(actualLeadingWhiteSpace - documentLeadingWhiteSpace) * modifier
 
-            return {
-                line: position.line,
-                character: position.character + delta,
-            }
-        })
-    )
+                return {
+                    line: position.line,
+                    character: position.character + delta,
+                }
+            })
+        )
 
 const searchResultCodeViewResolver = toCodeViewResolver('.code-list-item', {
     dom: searchCodeSnippetDOMFunctions,
@@ -162,21 +165,30 @@ export const createFileLineContainerToolbarMount: NonNullable<CodeView['getToolb
     mountElement.style.verticalAlign = 'middle'
     mountElement.style.alignItems = 'center'
     mountElement.className = className
+
+    // new GitHub code view: https://docs.github.com/en/repositories/working-with-files/managing-files/navigating-files-with-the-new-code-view
+    const container = codeViewElement.querySelector('#repos-sticky-header .react-blob-header-edit-and-raw-actions')
+    if (container instanceof HTMLElement) {
+        container.prepend(mountElement)
+        return mountElement
+    }
+
+    // old GitHub code view (aka new code view feature disabled: https://docs.github.com/en/repositories/working-with-files/managing-files/navigating-files-with-the-new-code-view)
     const rawURLLink = codeViewElement.querySelector('#raw-url')
     const buttonGroup = rawURLLink?.closest('.BtnGroup')
-    if (!buttonGroup?.parentNode) {
-        throw new Error('File actions not found')
+    if (buttonGroup?.parentNode) {
+        buttonGroup.parentNode.insertBefore(mountElement, buttonGroup)
+        return mountElement
     }
-    buttonGroup.parentNode.insertBefore(mountElement, buttonGroup)
-    return mountElement
+
+    throw new Error('Failed to create file toolbar mount node: container not found.')
 }
 
 /**
  * Matches the modern single-file code view, or snippets embedded in comments.
- *
  */
-export const fileLineContainerResolver: ViewResolver<CodeView> = {
-    selector: '.js-file-line-container',
+const fileLineContainerResolver: ViewResolver<CodeView> = {
+    selector: getSelectorFor('blobContainer'),
     resolveView: (fileLineContainer: HTMLElement): CodeView | null => {
         const embeddedBlobWrapper = fileLineContainer.closest('.blob-wrapper-embedded')
         if (embeddedBlobWrapper) {
@@ -195,13 +207,9 @@ export const fileLineContainerResolver: ViewResolver<CodeView> = {
             // this is not a single-file code view
             return null
         }
-        /**
-         * The element matching the latter selector replaces the one matching the former selector
-         * on GitHub when navigating through the repo tree using the client-side navigation.
-         * GitHub Enterprise always uses the former one.
-         */
-        const repositoryContent =
-            fileLineContainer.closest('.repository-content') || fileLineContainer.closest('#repo-content-turbo-frame')
+
+        // selector depends on whether the page was rendered using the client-side navigation or not
+        const repositoryContent = fileLineContainer.closest('.repository-content, #repo-content-turbo-frame')
         if (!repositoryContent) {
             throw new Error('Could not find repository content element')
         }
@@ -285,7 +293,8 @@ export function checkIsGitHubEnterprise(): boolean {
 /**
  * Returns true if the current page is github.com.
  */
-export const checkIsGitHubDotCom = (url = window.location.href): boolean => /^https?:\/\/(www\.)?github\.com/.test(url)
+export const checkIsGitHubDotCom = (url = (windowLocation__testingOnly.value ?? window.location).href): boolean =>
+    /^https?:\/\/(www\.)?github\.com/.test(url)
 
 /**
  * Returns true if the current page is either github.com or GitHub Enterprise.
@@ -295,7 +304,11 @@ export const checkIsGitHub = (): boolean => checkIsGitHubDotCom() || checkIsGitH
 const OPEN_ON_SOURCEGRAPH_ID = 'open-on-sourcegraph'
 
 export const createOpenOnSourcegraphIfNotExists: MountGetter = (container: HTMLElement): HTMLElement | null => {
-    const pageheadActions = querySelectorOrSelf(container, '.pagehead-actions')
+    const isGlobalNavigationUpdateFeaturePreviewEnabled = !!querySelectorOrSelf(container, 'header.AppHeader')
+    const pageheadActions = querySelectorOrSelf(
+        container,
+        isGlobalNavigationUpdateFeaturePreviewEnabled ? '.AppHeader-globalBar-end' : '.pagehead-actions'
+    )
     // If ran on page that isn't under a repository namespace.
     if (!pageheadActions || pageheadActions.children.length === 0) {
         return null
@@ -306,26 +319,13 @@ export const createOpenOnSourcegraphIfNotExists: MountGetter = (container: HTMLE
         return mount
     }
     // Create new
-    mount = document.createElement('li')
+    mount = document.createElement(isGlobalNavigationUpdateFeaturePreviewEnabled ? 'div' : 'li')
     mount.id = OPEN_ON_SOURCEGRAPH_ID
     pageheadActions.prepend(mount)
     return mount
 }
 
-const nativeTooltipResolver: ViewResolver<NativeTooltip> = {
-    selector: '.js-tagsearch-popover',
-    resolveView: element => ({ element }),
-}
-
 const iconClassName = classNames(styles.icon, 'v-align-text-bottom')
-
-const notificationClassNames = {
-    [NotificationType.Log]: 'flash',
-    [NotificationType.Success]: 'flash flash-success',
-    [NotificationType.Info]: 'flash',
-    [NotificationType.Warning]: 'flash flash-warn',
-    [NotificationType.Error]: 'flash flash-error',
-}
 
 const searchEnhancement: GithubCodeHost['searchEnhancement'] = {
     searchViewResolver: {
@@ -389,9 +389,9 @@ const searchEnhancement: GithubCodeHost['searchEnhancement'] = {
 export const isPrivateRepository = async (
     repoName: string,
     fetchCache = background.fetchCache,
-    fallbackSelector = '#repository-container-header h2 span.Label'
+    fallbackSelector = '#repository-container-header span.Label'
 ): Promise<boolean> => {
-    if (window.location.hostname !== 'github.com') {
+    if ((windowLocation__testingOnly.value ?? window.location).hostname !== 'github.com') {
         return Promise.resolve(true)
     }
     try {
@@ -426,11 +426,15 @@ export interface GithubCodeHost extends CodeHost {
 
 export const isGithubCodeHost = (codeHost: CodeHost): codeHost is GithubCodeHost => codeHost.type === 'github'
 
-const isSimpleSearchPage = (): boolean => window.location.pathname === '/search'
-const isAdvancedSearchPage = (): boolean => window.location.pathname === '/search/advanced'
-const isRepoSearchPage = (): boolean => !isSimpleSearchPage() && window.location.pathname.endsWith('/search')
+const isSimpleSearchPage = (): boolean => (windowLocation__testingOnly.value ?? window.location).pathname === '/search'
+const isAdvancedSearchPage = (): boolean =>
+    (windowLocation__testingOnly.value ?? window.location).pathname === '/search/advanced'
+const isRepoSearchPage = (): boolean =>
+    !isSimpleSearchPage() && (windowLocation__testingOnly.value ?? window.location).pathname.endsWith('/search')
 const isSearchResultsPage = (): boolean =>
-    Boolean(new URLSearchParams(window.location.search).get('q')) && !isAdvancedSearchPage()
+    // TODO(#44327): Do not rely on window.location.search - it may be present not only on search pages (e.g., issues, pulls, etc.).
+    Boolean(new URLSearchParams((windowLocation__testingOnly.value ?? window.location).search).get('q')) &&
+    !isAdvancedSearchPage()
 const isSearchPage = (): boolean =>
     isSimpleSearchPage() || isAdvancedSearchPage() || isRepoSearchPage() || isSearchResultsPage()
 
@@ -447,7 +451,9 @@ type GithubResultType =
     | 'users'
 
 const getGithubResultType = (): GithubResultType | '' => {
-    const githubResultType = new URLSearchParams(window.location.search).get('type')
+    const githubResultType = new URLSearchParams((windowLocation__testingOnly.value ?? window.location).search).get(
+        'type'
+    )
 
     return githubResultType ? (githubResultType.toLowerCase() as GithubResultType) : ''
 }
@@ -458,18 +464,23 @@ const getSourcegraphResultType = (): SourcegraphResultType | '' => {
     const githubResultType = getGithubResultType()
 
     switch (githubResultType) {
-        case 'repositories':
+        case 'repositories': {
             return 'repo'
-        case 'commits':
+        }
+        case 'commits': {
             return 'commit'
-        case 'code':
+        }
+        case 'code': {
             return ''
-        default:
+        }
+        default: {
             return isSimpleSearchPage() || isAdvancedSearchPage() ? 'repo' : ''
+        }
     }
 }
 
-const getSourcegraphResultLanguage = (): string | null => new URLSearchParams(window.location.search).get('l')
+const getSourcegraphResultLanguage = (): string | null =>
+    new URLSearchParams((windowLocation__testingOnly.value ?? window.location).search).get('l')
 
 const buildSourcegraphQuery = (searchTerms: string[]): string => {
     const queryParameters = searchTerms.filter(Boolean).map(parameter => parameter.trim())
@@ -485,7 +496,7 @@ const buildSourcegraphQuery = (searchTerms: string[]): string => {
     }
 
     if (isRepoSearchPage()) {
-        const [user, repo] = window.location.pathname.split('/').filter(Boolean)
+        const [user, repo] = (windowLocation__testingOnly.value ?? window.location).pathname.split('/').filter(Boolean)
         queryParameters.push(`repo:${user}/${repo}$`)
     }
 
@@ -596,9 +607,8 @@ function enhanceSearchPage(sourcegraphURL: string): void {
 
             const pageSearchForm = document.querySelector<HTMLFormElement>('.application-main form.js-site-search-form')
             const pageSearchInput = pageSearchForm?.querySelector<HTMLInputElement>("input.form-control[name='q']")
-            const pageSearchFormSubmitButton = pageSearchForm?.parentElement?.parentElement?.querySelector<HTMLButtonElement>(
-                "button[type='submit']"
-            )
+            const pageSearchFormSubmitButton =
+                pageSearchForm?.parentElement?.parentElement?.querySelector<HTMLButtonElement>("button[type='submit']")
 
             if (pageSearchInput && pageSearchFormSubmitButton) {
                 const buttonContainer = queryByIdOrCreate('pageSearchFormSourcegraphButton', 'ml-2 d-none d-md-block')
@@ -621,9 +631,8 @@ function enhanceSearchPage(sourcegraphURL: string): void {
             )
             const searchResultsContainer = document.querySelector<HTMLDivElement>('.codesearch-results')
             const emptyResultsContainer = searchResultsContainer?.querySelector('.blankslate')
-            const searchResultsContainerHeading = searchResultsContainer?.querySelector<HTMLHeadingElement>(
-                'div > div > h3'
-            )
+            const searchResultsContainerHeading =
+                searchResultsContainer?.querySelector<HTMLHeadingElement>('div > div > h3')
 
             if (headerSearchInput && (emptyResultsContainer || searchResultsContainerHeading)) {
                 const buttonContainer: HTMLElement = queryByIdOrCreate(
@@ -675,23 +684,22 @@ export const githubCodeHost: GithubCodeHost = {
     searchEnhancement,
     enhanceSearchPage,
     codeViewResolvers: [genericCodeViewResolver, fileLineContainerResolver, searchResultCodeViewResolver],
-    contentViewResolvers: [markdownBodyViewResolver],
-    nativeTooltipResolvers: [nativeTooltipResolver],
     routeChange: mutations =>
         mutations.pipe(
             map(() => {
-                const { pathname } = window.location
+                const { pathname } = windowLocation__testingOnly.value ?? window.location
 
                 // repository file tree navigation
                 const pageType = pathname.slice(1).split('/')[2]
                 if (pageType === 'blob' || pageType === 'tree') {
-                    return pathname.endsWith(getFilePath()) ? pathname : undefined
+                    return pathname.endsWith(resolveFileInfo().blob.filePath) ? pathname : undefined
                 }
 
                 // search results page filters being applied
-                if (isSearchResultsPage()) {
-                    return document.querySelector('.codesearch-results h3')?.textContent?.trim()
-                }
+                // TODO(#44327): Uncomment or remove this depending on the outcome of the issue.
+                // if (isSearchResultsPage()) {
+                //     return document.querySelector('.codesearch-results h3')?.textContent?.trim()
+                // }
 
                 // other pages
                 return pathname
@@ -705,7 +713,7 @@ export const githubCodeHost: GithubCodeHost = {
         return {
             rawRepoName,
             revision: pageType === 'blob' || pageType === 'tree' ? resolveFileInfo().blob.revision : undefined,
-            privateRepository: await isPrivateRepository(repoName),
+            privateRepository: isNewGitHubUI() ? getEmbeddedData().repo.private : await isPrivateRepository(repoName),
         }
     },
     isLightTheme: defer(() => {
@@ -721,24 +729,6 @@ export const githubCodeHost: GithubCodeHost = {
         iconClassName,
     },
     check: checkIsGitHub,
-    getCommandPaletteMount,
-    notificationClassNames,
-    commandPaletteClassProps: {
-        buttonClassName: 'Header-link d-flex flex-items-baseline',
-        popoverClassName: classNames('Box', styles.commandPalettePopover),
-        formClassName: 'p-1',
-        inputClassName: 'form-control input-sm header-search-input jump-to-field-active',
-        listClassName: 'p-0 m-0 js-navigation-container jump-to-suggestions-results-container',
-        selectedListItemClassName: 'navigation-focus',
-        listItemClassName:
-            'd-flex flex-justify-start flex-items-center p-0 f5 navigation-item js-navigation-item js-jump-to-scoped-search',
-        actionItemClassName: classNames(
-            styles.commandPaletteActionItem,
-            'no-underline d-flex flex-auto flex-items-center jump-to-suggestions-path p-2'
-        ),
-        noResultsClassName: 'd-flex flex-auto flex-items-center jump-to-suggestions-path p-2',
-        iconClassName,
-    },
     codeViewToolbarClassProps: {
         className: styles.codeViewToolbar,
         listItemClass: classNames(styles.codeViewToolbarItem, 'BtnGroup'),
@@ -752,11 +742,8 @@ export const githubCodeHost: GithubCodeHost = {
         actionItemPressedClassName: 'active',
         closeButtonClassName: 'btn-octicon p-0 hover-overlay__close-button--github',
         badgeClassName: classNames('label', styles.hoverOverlayBadge),
-        getAlertClassName: createNotificationClassNameGetter(notificationClassNames, 'flash-full'),
         iconClassName,
     },
-    setElementTooltip,
-    linkPreviewContentClass: 'text-small text-gray p-1 mx-1 border rounded-1 bg-gray text-gray-dark',
     urlToFile: (sourcegraphURL, target, context) => {
         if (target.viewState) {
             // A view state means that a panel must be shown, and panels are currently only supported on
@@ -765,7 +752,9 @@ export const githubCodeHost: GithubCodeHost = {
         }
 
         // Make sure the location is also on this github instance, return an absolute URL otherwise.
-        const sameCodeHost = target.rawRepoName.startsWith(window.location.hostname)
+        const sameCodeHost = target.rawRepoName.startsWith(
+            (windowLocation__testingOnly.value ?? window.location).hostname
+        )
         if (!sameCodeHost) {
             return toAbsoluteBlobURL(sourcegraphURL, target)
         }
@@ -790,7 +779,7 @@ export const githubCodeHost: GithubCodeHost = {
                 const anchorPath = header.dataset.path
                 if (anchorPath === target.filePath) {
                     const anchorUrl = header.dataset.anchor
-                    const url = new URL(window.location.href)
+                    const url = new URL((windowLocation__testingOnly.value ?? window.location).href)
                     url.hash = anchorUrl
                     if (target.position) {
                         // GitHub uses L for the left side, R for both right side and the unchanged/white parts
@@ -813,8 +802,8 @@ export const githubCodeHost: GithubCodeHost = {
         return `https://${target.rawRepoName}/blob/${revision}/${target.filePath}${fragment}`
     },
     observeLineSelection: fromEvent(window, 'hashchange').pipe(
-        startWith(undefined), // capture intital value
-        map(() => parseHash(window.location.hash))
+        startWith(undefined), // capture initial value
+        map(() => parseHash((windowLocation__testingOnly.value ?? window.location).hash))
     ),
     codeViewsRequireTokenization: true,
 }

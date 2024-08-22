@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"strconv"
 	"testing"
 	"time"
 
@@ -9,26 +10,32 @@ import (
 	"github.com/keegancsmith/sqlf"
 	"github.com/lib/pq"
 
-	"github.com/sourcegraph/log/logtest"
+	"github.com/sourcegraph/log"
 
 	"github.com/sourcegraph/sourcegraph/internal/database/basestore"
 	"github.com/sourcegraph/sourcegraph/internal/database/dbtest"
 	"github.com/sourcegraph/sourcegraph/internal/database/dbutil"
+	"github.com/sourcegraph/sourcegraph/internal/executor"
 	"github.com/sourcegraph/sourcegraph/internal/observation"
+	"github.com/sourcegraph/sourcegraph/internal/workerutil"
 )
 
-func testStore(db *sql.DB, options Options) *store {
-	return newStore(basestore.NewHandleWithDB(db, sql.TxOptions{}), options, &observation.TestContext)
+func testStore[T workerutil.Record](db *sql.DB, options Options[T]) *store[T] {
+	return newStore(&observation.TestContext, basestore.NewHandleWithDB(log.NoOp(), db, sql.TxOptions{}), options)
 }
 
 type TestRecord struct {
 	ID            int
 	State         string
-	ExecutionLogs []ExecutionLogEntry
+	ExecutionLogs []executor.ExecutionLogEntry
 }
 
 func (v TestRecord) RecordID() int {
 	return v.ID
+}
+
+func (v TestRecord) RecordUID() string {
+	return strconv.Itoa(v.ID)
 }
 
 func testScanRecord(sc dbutil.Scanner) (*TestRecord, error) {
@@ -46,6 +53,10 @@ func (v TestRecordView) RecordID() int {
 	return v.ID
 }
 
+func (v TestRecordView) RecordUID() string {
+	return strconv.Itoa(v.ID)
+}
+
 func testScanRecordView(sc dbutil.Scanner) (*TestRecordView, error) {
 	var record TestRecordView
 	return &record, sc.Scan(&record.ID, &record.State, &record.NewField)
@@ -61,14 +72,17 @@ func (v TestRecordRetry) RecordID() int {
 	return v.ID
 }
 
+func (v TestRecordRetry) RecordUID() string {
+	return strconv.Itoa(v.ID)
+}
+
 func testScanRecordRetry(sc dbutil.Scanner) (*TestRecordRetry, error) {
 	var record TestRecordRetry
 	return &record, sc.Scan(&record.ID, &record.State, &record.NumResets)
 }
 
 func setupStoreTest(t *testing.T) *sql.DB {
-	logger := logtest.Scoped(t)
-	db := dbtest.NewDB(logger, t)
+	db := dbtest.NewDB(t)
 
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS workerutil_test (
@@ -100,11 +114,11 @@ func setupStoreTest(t *testing.T) *sql.DB {
 	return db
 }
 
-func defaultTestStoreOptions(clock glock.Clock) Options {
-	return Options{
+func defaultTestStoreOptions[T workerutil.Record](clock glock.Clock, scanFn func(sc dbutil.Scanner) (T, error)) Options[T] {
+	return Options[T]{
 		Name:              "test",
 		TableName:         "workerutil_test",
-		Scan:              BuildWorkerScan(testScanRecord),
+		Scan:              BuildWorkerScan(scanFn),
 		OrderByExpression: sqlf.Sprintf("workerutil_test.created_at"),
 		ColumnExpressions: []*sqlf.Query{
 			sqlf.Sprintf("workerutil_test.id"),

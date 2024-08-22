@@ -1,4 +1,4 @@
-import { useLocation } from 'react-router'
+import { useLocation } from 'react-router-dom'
 
 import helloWorldSample from '../batch-spec/edit/library/hello-world.batch.yaml'
 import { insertQueryIntoLibraryItem, insertNameIntoLibraryItem } from '../batch-spec/yaml-util'
@@ -8,9 +8,13 @@ interface UseSearchTemplateResult {
     renderTemplate?: (title: string) => string
 }
 
-const createRenderTemplate = (query: string): ((title: string) => string) => {
+export const createRenderTemplate = (
+    query: string,
+    sample: string = helloWorldSample,
+    commentExistingQuery: boolean = false
+): ((title: string) => string) => {
     let template: string
-    template = insertQueryIntoLibraryItem(helloWorldSample, query)
+    template = insertQueryIntoLibraryItem(sample, query, commentExistingQuery)
     template = template.replace(
         '# Find all repositories that contain a README.md file.',
         '# This is your query from search'

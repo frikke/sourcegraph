@@ -6,14 +6,17 @@ import (
 	"github.com/graph-gophers/graphql-go"
 	"github.com/graph-gophers/graphql-go/relay"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
+	"github.com/sourcegraph/sourcegraph/internal/gqlutil"
 	"github.com/sourcegraph/sourcegraph/internal/oobmigration"
+	"github.com/sourcegraph/sourcegraph/internal/version/upgradestore"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 // OutOfBandMigrationByID resolves a single out-of-band migration by its identifier.
 func (r *schemaResolver) OutOfBandMigrationByID(ctx context.Context, id graphql.ID) (*outOfBandMigrationResolver, error) {
 	// 🚨 SECURITY: Only site admins may view out-of-band migrations
-	if err := backend.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
+	if err := auth.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
 		return nil, err
 	}
 
@@ -31,15 +34,46 @@ func (r *schemaResolver) OutOfBandMigrationByID(ctx context.Context, id graphql.
 }
 
 // OutOfBandMigrations resolves all registered single out-of-band migrations.
-func (r *schemaResolver) OutOfBandMigrations(ctx context.Context) ([]*outOfBandMigrationResolver, error) {
+// If ExcludeDeprecatedBeforeFirstVersion is set to true, migrations deprecated before the init version of sourcegraph will be filtered out.
+func (r *schemaResolver) OutOfBandMigrations(ctx context.Context, args *struct {
+	ExcludeDeprecatedBeforeFirstVersion *bool
+}) ([]*outOfBandMigrationResolver, error) {
 	// 🚨 SECURITY: Only site admins may view out-of-band migrations
-	if err := backend.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
+	if err := auth.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
 		return nil, err
 	}
 
 	migrations, err := oobmigration.NewStoreWithDB(r.db).List(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	if args.ExcludeDeprecatedBeforeFirstVersion != nil && *args.ExcludeDeprecatedBeforeFirstVersion {
+		rawFirstVersion, ok, err := upgradestore.New(r.db).GetFirstServiceVersion(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			firstVersion, ok := oobmigration.NewVersionFromString(rawFirstVersion)
+			if !ok {
+				return nil, errors.Newf("invalid first version %q", rawFirstVersion)
+			}
+			filtered := migrations[:0]
+			for _, migration := range migrations {
+				// If the migration has no deprecated value, append it to the list.
+				if migration.Deprecated == nil {
+					filtered = append(filtered, migration)
+					continue
+				}
+
+				// If the migration is deprecated before the first version of sourcegraph, don't append it to the list.
+				if oobmigration.CompareVersions(firstVersion, *migration.Deprecated) != oobmigration.VersionOrderAfter {
+					filtered = append(filtered, migration)
+					continue
+				}
+			}
+			migrations = filtered
+		}
 	}
 
 	resolvers := make([]*outOfBandMigrationResolver, 0, len(migrations))
@@ -56,7 +90,7 @@ func (r *schemaResolver) SetMigrationDirection(ctx context.Context, args *struct
 	ApplyReverse bool
 }) (*EmptyResponse, error) {
 	// 🚨 SECURITY: Only site admins may modify out-of-band migrations
-	if err := backend.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
+	if err := auth.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
 		return nil, err
 	}
 
@@ -69,7 +103,7 @@ func (r *schemaResolver) SetMigrationDirection(ctx context.Context, args *struct
 		return nil, err
 	}
 
-	return nil, nil
+	return &EmptyResponse{}, nil
 }
 
 // MarshalOutOfBandMigrationID converts an internal out of band migration id into a GraphQL id.
@@ -104,11 +138,15 @@ func (r *outOfBandMigrationResolver) Deprecated() *string {
 	return strptr(r.m.Deprecated.String())
 }
 
-func (r *outOfBandMigrationResolver) Progress() float64      { return r.m.Progress }
-func (r *outOfBandMigrationResolver) Created() DateTime      { return DateTime{r.m.Created} }
-func (r *outOfBandMigrationResolver) LastUpdated() *DateTime { return DateTimeOrNil(r.m.LastUpdated) }
-func (r *outOfBandMigrationResolver) NonDestructive() bool   { return r.m.NonDestructive }
-func (r *outOfBandMigrationResolver) ApplyReverse() bool     { return r.m.ApplyReverse }
+func (r *outOfBandMigrationResolver) Progress() float64 { return r.m.Progress }
+func (r *outOfBandMigrationResolver) Created() gqlutil.DateTime {
+	return gqlutil.DateTime{Time: r.m.Created}
+}
+func (r *outOfBandMigrationResolver) LastUpdated() *gqlutil.DateTime {
+	return gqlutil.DateTimeOrNil(r.m.LastUpdated)
+}
+func (r *outOfBandMigrationResolver) NonDestructive() bool { return r.m.NonDestructive }
+func (r *outOfBandMigrationResolver) ApplyReverse() bool   { return r.m.ApplyReverse }
 
 func (r *outOfBandMigrationResolver) Errors() []*outOfBandMigrationErrorResolver {
 	resolvers := make([]*outOfBandMigrationErrorResolver, 0, len(r.m.Errors))
@@ -124,5 +162,7 @@ type outOfBandMigrationErrorResolver struct {
 	e oobmigration.MigrationError
 }
 
-func (r *outOfBandMigrationErrorResolver) Message() string   { return r.e.Message }
-func (r *outOfBandMigrationErrorResolver) Created() DateTime { return DateTime{r.e.Created} }
+func (r *outOfBandMigrationErrorResolver) Message() string { return r.e.Message }
+func (r *outOfBandMigrationErrorResolver) Created() gqlutil.DateTime {
+	return gqlutil.DateTime{Time: r.e.Created}
+}

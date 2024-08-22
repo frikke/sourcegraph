@@ -1,27 +1,24 @@
-import { Meta, Story } from '@storybook/react'
+import type { Meta, StoryFn } from '@storybook/react'
 import { of } from 'rxjs'
 
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 import { NOOP_TELEMETRY_SERVICE } from '@sourcegraph/shared/src/telemetry/telemetryService'
 
 import { WebStory } from '../../../../../components/WebStory'
 import { CodeInsightsBackendStoryMock } from '../../../CodeInsightsBackendStoryMock'
-import { CodeInsightsGqlBackend } from '../../../core/backend/gql-backend/code-insights-gql-backend'
+import type { CodeInsightsGqlBackend } from '../../../core/backend/gql-backend/code-insights-gql-backend'
 import { InsightsDashboardOwnerType } from '../../../core/types'
+import { useCodeInsightsLicenseState } from '../../../stores'
 
 import { InsightsDashboardCreationPage } from './InsightsDashboardCreationPage'
 
-const defaultStory: Meta = {
+const config: Meta = {
     title: 'web/insights/InsightsDashboardCreationPage',
     decorators: [story => <WebStory>{() => story()}</WebStory>],
-    parameters: {
-        chromatic: {
-            viewports: [576, 1440],
-            disableSnapshot: false,
-        },
-    },
+    parameters: {},
 }
 
-export default defaultStory
+export default config
 
 const codeInsightsBackend: Partial<CodeInsightsGqlBackend> = {
     getDashboardOwners: () =>
@@ -33,8 +30,28 @@ const codeInsightsBackend: Partial<CodeInsightsGqlBackend> = {
         ]),
 }
 
-export const InsightsDashboardCreationStory: Story = () => (
-    <CodeInsightsBackendStoryMock mocks={codeInsightsBackend}>
-        <InsightsDashboardCreationPage telemetryService={NOOP_TELEMETRY_SERVICE} />
-    </CodeInsightsBackendStoryMock>
-)
+export const InsightsDashboardCreationLicensed: StoryFn = () => {
+    useCodeInsightsLicenseState.setState({ licensed: true, insightsLimit: null })
+
+    return (
+        <CodeInsightsBackendStoryMock mocks={codeInsightsBackend}>
+            <InsightsDashboardCreationPage
+                telemetryService={NOOP_TELEMETRY_SERVICE}
+                telemetryRecorder={noOpTelemetryRecorder}
+            />
+        </CodeInsightsBackendStoryMock>
+    )
+}
+
+export const InsightsDashboardCreationUnlicensed: StoryFn = () => {
+    useCodeInsightsLicenseState.setState({ licensed: false, insightsLimit: 2 })
+
+    return (
+        <CodeInsightsBackendStoryMock mocks={codeInsightsBackend}>
+            <InsightsDashboardCreationPage
+                telemetryService={NOOP_TELEMETRY_SERVICE}
+                telemetryRecorder={noOpTelemetryRecorder}
+            />
+        </CodeInsightsBackendStoryMock>
+    )
+}

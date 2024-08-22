@@ -6,6 +6,7 @@ import (
 	"strings"
 )
 
+// New parses Sourcegraph database service environment variables to construct a Postgres DSN
 func New(prefix, currentUser string, getenv func(string) string) string {
 	if prefix == "frontend" {
 		prefix = ""
@@ -60,7 +61,7 @@ func New(prefix, currentUser string, getenv func(string) string) string {
 	// PGPORT values may be (legally) quoted, but should remain quoted
 	// when constructed as part of the DSN. Strip it here.
 	if port := dequote(env("PGPORT")); port != "" {
-		dsn.Host += ":" + port
+		dsn.Host = strings.Split(dsn.Host, ":")[0] + ":" + port
 	}
 
 	if db := env("PGDATABASE"); db != "" {

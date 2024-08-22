@@ -1,12 +1,10 @@
 import React, { useCallback, useState } from 'react'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { Form } from '@sourcegraph/branded/src/components/Form'
 import { asError, isErrorLike } from '@sourcegraph/common'
-import { Button, Checkbox, Modal, H3, Text } from '@sourcegraph/wildcard'
+import { Button, Checkbox, Modal, H3, Text, ErrorAlert, Form } from '@sourcegraph/wildcard'
 
 import { LoaderButton } from '../../../../components/LoaderButton'
-import { Scalars } from '../../../../graphql-operations'
+import type { Scalars } from '../../../../graphql-operations'
 import { publishChangesets as _publishChangesets } from '../backend'
 
 export interface PublishChangesetsModalProps {

@@ -1,32 +1,72 @@
 package graphqlbackend
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"io"
 	"io/fs"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/sourcegraph/log/logtest"
 
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/inventory"
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/database/dbmocks"
+	"github.com/sourcegraph/sourcegraph/internal/fileutil"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver"
-	"github.com/sourcegraph/sourcegraph/internal/gitserver/gitdomain"
-	"github.com/sourcegraph/sourcegraph/internal/inventory"
 	"github.com/sourcegraph/sourcegraph/internal/rcache"
 	"github.com/sourcegraph/sourcegraph/internal/search/result"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 )
+
+type FileData struct {
+	Name    string
+	Content string
+}
+
+// createInMemoryTarArchive creates a tar archive in memory containing multiple files with their given content.
+func createInMemoryTarArchive(files []FileData) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	tarWriter := tar.NewWriter(buf)
+
+	for _, file := range files {
+		header := &tar.Header{
+			Name: file.Name,
+			Size: int64(len(file.Content)),
+		}
+
+		err := tarWriter.WriteHeader(header)
+		if err != nil {
+			return nil, err
+		}
+
+		// Write the content to the tar archive.
+		_, err = io.WriteString(tarWriter, file.Content)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Close the tar writer to flush the data to the buffer.
+	err := tarWriter.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
 
 func TestSearchResultsStatsLanguages(t *testing.T) {
 	logger := logtest.Scoped(t)
 	wantCommitID := api.CommitID(strings.Repeat("a", 40))
 	rcache.SetupForTest(t)
 
-	gitserver.Mocks.NewFileReader = func(commit api.CommitID, name string) (io.ReadCloser, error) {
+	gsClient := gitserver.NewMockClient()
+	gsClient.NewFileReaderFunc.SetDefaultHook(func(_ context.Context, _ api.RepoName, commit api.CommitID, name string) (io.ReadCloser, error) {
 		if commit != wantCommitID {
 			t.Errorf("got commit %q, want %q", commit, wantCommitID)
 		}
@@ -40,29 +80,36 @@ func TestSearchResultsStatsLanguages(t *testing.T) {
 			panic("unhandled mock NewFileReader " + name)
 		}
 		return io.NopCloser(bytes.NewReader(data)), nil
-	}
+	})
 	const wantDefaultBranchRef = "refs/heads/foo"
-	gitserver.Mocks.GetDefaultBranch = func(repo api.RepoName) (refName string, commit api.CommitID, err error) {
+	gsClient.GetDefaultBranchFunc.SetDefaultHook(func(context.Context, api.RepoName, bool) (string, api.CommitID, error) {
 		// Mock default branch lookup in (*RepositoryResolver).DefaultBranch.
 		return wantDefaultBranchRef, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil
-	}
-	gitserver.Mocks.ResolveRevision = func(spec string, opt gitserver.ResolveRevisionOptions) (api.CommitID, error) {
+	})
+	gsClient.ResolveRevisionFunc.SetDefaultHook(func(_ context.Context, _ api.RepoName, spec string, _ gitserver.ResolveRevisionOptions) (api.CommitID, error) {
 		if want := "HEAD"; spec != want {
 			t.Errorf("got spec %q, want %q", spec, want)
 		}
 		return wantCommitID, nil
-	}
-	defer gitserver.ResetMocks()
+	})
 
-	gitserver.ClientMocks.GetObject = func(repo api.RepoName, objectName string) (*gitdomain.GitObject, error) {
-		oid := gitdomain.OID{} // empty is OK for this test
-		copy(oid[:], bytes.Repeat([]byte{0xaa}, 40))
-		return &gitdomain.GitObject{
-			ID:   oid,
-			Type: gitdomain.ObjectTypeTree,
-		}, nil
-	}
-	defer gitserver.ResetClientMocks()
+	gsClient.StatFunc.SetDefaultHook(func(_ context.Context, _ api.RepoName, _ api.CommitID, path string) (fs.FileInfo, error) {
+		return &fileutil.FileInfo{Name_: path, Mode_: os.ModeDir}, nil
+	})
+	gsClient.ArchiveReaderFunc.SetDefaultHook(func(_ context.Context, _ api.RepoName, archiveOptions gitserver.ArchiveOptions) (io.ReadCloser, error) {
+		files := []FileData{
+			{Name: "two.go", Content: "a\nb\n"},
+			{Name: "three.go", Content: "a\nb\nc\n"},
+		}
+
+		// Create the in-memory tar archive.
+		archiveData, err := createInMemoryTarArchive(files)
+		if err != nil {
+			t.Fatalf("Failed to create in-memory tar archive: %v", err)
+		}
+
+		return io.NopCloser(bytes.NewReader(archiveData)), nil
+	})
 
 	mkResult := func(path string, lineNumbers ...int) *result.FileMatch {
 		rn := types.MinimalRepo{
@@ -114,11 +161,11 @@ func TestSearchResultsStatsLanguages(t *testing.T) {
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			gitserver.Mocks.ReadDir = func(commit api.CommitID, name string, recurse bool) ([]fs.FileInfo, error) {
-				return test.getFiles, nil
-			}
+			gsClient.ReadDirFunc.SetDefaultHook(func(context.Context, api.RepoName, api.CommitID, string, bool) (gitserver.ReadDirIterator, error) {
+				return gitserver.NewReadDirIteratorFromSlice(test.getFiles), nil
+			})
 
-			langs, err := searchResultsStatsLanguages(context.Background(), logger, database.NewMockDB(), test.results)
+			langs, err := searchResultsStatsLanguages(context.Background(), logger, dbmocks.NewMockDB(), gsClient, test.results)
 			if err != nil {
 				t.Fatal(err)
 			}

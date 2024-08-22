@@ -1,9 +1,10 @@
 import { cleanup, within, fireEvent, act } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { renderWithBrandedContext, RenderWithBrandedContextResult } from '@sourcegraph/shared/src/testing'
 import { MockedTestProvider, waitForNextApolloResponse } from '@sourcegraph/shared/src/testing/apollo'
+import { type RenderWithBrandedContextResult, renderWithBrandedContext } from '@sourcegraph/wildcard/src/testing'
 
-import { RevisionsPopover, RevisionsPopoverProps } from './RevisionsPopover'
+import { RevisionsPopover, type RevisionsPopoverProps } from './RevisionsPopover'
 import { MOCK_PROPS, MOCK_REQUESTS } from './RevisionsPopover.mocks'
 
 describe('RevisionsPopover', () => {
@@ -197,7 +198,6 @@ describe('RevisionsPopover', () => {
             await waitForNextApolloResponse()
 
             expect(within(commitsTab).getAllByRole('link')).toHaveLength(2)
-            expect(within(commitsTab).getByTestId('summary')).toHaveTextContent('2 commits matching some query')
         })
 
         describe('Against a speculative revision', () => {

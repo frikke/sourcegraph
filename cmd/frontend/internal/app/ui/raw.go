@@ -15,16 +15,16 @@ import (
 
 	"github.com/golang/gddo/httputil"
 	"github.com/gorilla/mux"
-	"github.com/inconshreveable/log15"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/globals"
-	"github.com/sourcegraph/sourcegraph/internal/authz"
+	"github.com/sourcegraph/log"
+
+	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/database"
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver"
-	"github.com/sourcegraph/sourcegraph/internal/gitserver/gitdomain"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 // Examples:
@@ -34,7 +34,7 @@ import (
 //
 // Get a file's contents (as text/plain, images will not be rendered by browsers):
 //     http://localhost:3080/github.com/gorilla/mux/-/raw/mux.go
-//     http://localhost:3080/github.com/sourcegraph/sourcegraph/-/raw/ui/assets/img/bg-hero.png
+//     http://localhost:3080/github.com/sourcegraph/sourcegraph/-/raw/client/web/dist/img/bg-hero.png
 //
 // Get a zip archive of a repository:
 //     curl -H 'Accept: application/zip' http://localhost:3080/github.com/gorilla/mux/-/raw/ -o repo.zip
@@ -61,30 +61,34 @@ import (
 // - This route would ideally be using strict slashes, in order for us to support symlinks via HTTP redirects.
 //
 
-func serveRaw(db database.DB) handlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) (err error) {
-		var common *Common
-		for {
-			// newCommon provides various repository handling features that we want, so
-			// we use it but discard the resulting structure. It provides:
-			//
-			// - Repo redirection
-			// - Gitserver content updating
-			// - Consistent error handling (permissions, revision not found, repo not found, etc).
-			//
-			common, err = newCommon(w, r, db, globals.Branding().BrandName, noIndex, serveError)
-			if err != nil {
-				return err
-			}
-			if common == nil {
-				return nil // request was handled
-			}
-			if common.Repo == nil {
-				// Repository is cloning.
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			break
+func serveRaw(logger log.Logger, db database.DB, gitserverClient gitserver.Client, configurationServer *conf.Server) handlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) error {
+		const (
+			textPlain       = "text/plain"
+			applicationZip  = "application/zip"
+			applicationXTar = "application/x-tar"
+		)
+
+		// newCommon provides various repository handling features that we want, so
+		// we use it but discard the resulting structure. It provides:
+		//
+		// - Repo redirection
+		// - Gitserver content updating
+		// - Consistent error handling (permissions, revision not found, repo not found, etc).
+		//
+		common, err := newCommon(w, r, db, configurationServer, conf.Branding().BrandName, noIndex, serveError)
+		if err != nil {
+			return err
+		}
+		if common == nil {
+			return nil // request was handled
+		}
+		if common.Repo == nil {
+			// Repository is cloning.
+			w.WriteHeader(http.StatusNotFound)
+			w.Header().Set("Content-Type", textPlain)
+			fmt.Fprintf(w, "Repository unavailable while cloning.")
+			return nil
 		}
 
 		requestedPath := mux.Vars(r)["Path"]
@@ -105,12 +109,6 @@ func serveRaw(db database.DB) handlerFunc {
 			w.WriteHeader(http.StatusOK)
 			return nil
 		}
-
-		const (
-			textPlain       = "text/plain"
-			applicationZip  = "application/zip"
-			applicationXTar = "application/x-tar"
-		)
 
 		// Negotiate the content type.
 		contentTypeOffers := []string{textPlain, applicationZip, applicationXTar}
@@ -135,7 +133,17 @@ func serveRaw(db database.DB) handlerFunc {
 		)
 		defer func() {
 			duration := time.Since(start)
-			log15.Debug("raw endpoint", "repo", common.Repo.Name, "commit", common.CommitID, "contentType", contentType, "type", requestType, "path", requestedPath, "size", size, "duration", duration, "error", err)
+			logger.Debug(
+				"raw endpoint",
+				log.String("repo", string(common.Repo.Name)),
+				log.String("commit", string(common.CommitID)),
+				log.String("contentType", contentType),
+				log.String("type", requestType),
+				log.String("path", requestedPath),
+				log.Int64("size", size),
+				log.Duration("duration", duration),
+				log.Error(err),
+			)
 			var errorS string
 			switch {
 			case err == nil:
@@ -149,8 +157,6 @@ func serveRaw(db database.DB) handlerFunc {
 			}
 			metricRawDuration.WithLabelValues(contentType, requestType, errorS).Observe(duration.Seconds())
 		}()
-
-		gitserverClient := gitserver.NewClient(db)
 
 		switch contentType {
 		case applicationZip, applicationXTar:
@@ -189,8 +195,8 @@ func serveRaw(db database.DB) handlerFunc {
 			// caching locally is not useful. Additionally we transfer the output over the
 			// internet, so we use default compression levels on zips (instead of no
 			// compression).
-			f, err := gitserverClient.ArchiveReader(r.Context(), authz.DefaultSubRepoPermsChecker, common.Repo.Name,
-				gitserver.ArchiveOptions{Format: format, Treeish: string(common.CommitID), Pathspecs: []gitdomain.Pathspec{gitdomain.PathspecLiteral(relativePath)}})
+			f, err := gitserverClient.ArchiveReader(r.Context(), common.Repo.Name,
+				gitserver.ArchiveOptions{Format: format, Treeish: string(common.CommitID), Paths: []string{relativePath}})
 			if err != nil {
 				return err
 			}
@@ -241,7 +247,7 @@ func serveRaw(db database.DB) handlerFunc {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 
-			fi, err := gitserverClient.Stat(r.Context(), authz.DefaultSubRepoPermsChecker, common.Repo.Name, common.CommitID, requestedPath)
+			fi, err := gitserverClient.Stat(r.Context(), common.Repo.Name, common.CommitID, requestedPath)
 			if err != nil {
 				if os.IsNotExist(err) {
 					requestType = "404"
@@ -253,13 +259,21 @@ func serveRaw(db database.DB) handlerFunc {
 
 			if fi.IsDir() {
 				requestType = "dir"
-				infos, err := gitserverClient.ReadDir(r.Context(), authz.DefaultSubRepoPermsChecker, common.Repo.Name, common.CommitID, requestedPath, false)
+				it, err := gitserverClient.ReadDir(r.Context(), common.Repo.Name, common.CommitID, requestedPath, false)
 				if err != nil {
 					return err
 				}
-				size = int64(len(infos))
+				defer it.Close()
+
 				var names []string
-				for _, info := range infos {
+				for {
+					info, err := it.Next()
+					if err != nil {
+						if errors.Is(err, io.EOF) {
+							break
+						}
+						return err
+					}
 					// A previous version of this code returned relative paths so we trim the paths
 					// here too so as not to break backwards compatibility
 					name := path.Base(info.Name())
@@ -276,7 +290,7 @@ func serveRaw(db database.DB) handlerFunc {
 			// File
 			requestType = "file"
 			size = fi.Size()
-			f, err := gitserverClient.NewFileReader(r.Context(), common.Repo.Name, common.CommitID, requestedPath, authz.DefaultSubRepoPermsChecker)
+			f, err := gitserverClient.NewFileReader(r.Context(), common.Repo.Name, common.CommitID, requestedPath)
 			if err != nil {
 				return err
 			}

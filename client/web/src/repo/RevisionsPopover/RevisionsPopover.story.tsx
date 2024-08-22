@@ -1,4 +1,4 @@
-import { Meta } from '@storybook/react'
+import type { Meta } from '@storybook/react'
 
 import { WebStory } from '../../components/WebStory'
 
@@ -26,8 +26,7 @@ const Story: Meta = {
         design: {
             type: 'figma',
             name: 'Figma',
-            url:
-                'https://www.figma.com/file/NIsN34NH7lPu04olBzddTw/Design-Refresh-Systemization-source-of-truth?node-id=954%3A2161',
+            url: 'https://www.figma.com/file/NIsN34NH7lPu04olBzddTw/Design-Refresh-Systemization-source-of-truth?node-id=954%3A2161',
         },
     },
 }

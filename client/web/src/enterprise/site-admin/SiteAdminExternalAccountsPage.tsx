@@ -1,31 +1,30 @@
 import * as React from 'react'
 
-import { RouteComponentProps } from 'react-router'
-import { Observable, Subject, Subscription } from 'rxjs'
+import { Subject, Subscription, type Observable } from 'rxjs'
 import { map } from 'rxjs/operators'
 
 import { createAggregateError } from '@sourcegraph/common'
 import { gql } from '@sourcegraph/http-client'
-import { Scalars } from '@sourcegraph/shared/src/graphql-operations'
-import { Button, Link, H2, Text } from '@sourcegraph/wildcard'
+import type { Scalars } from '@sourcegraph/shared/src/graphql-operations'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Button, H2, Link, Text } from '@sourcegraph/wildcard'
 
 import { requestGraphQL } from '../../backend/graphql'
 import { FilteredConnection } from '../../components/FilteredConnection'
 import { PageTitle } from '../../components/PageTitle'
-import {
+import type {
     ExternalAccountFields,
     ExternalAccountsConnectionFields,
     ExternalAccountsResult,
     ExternalAccountsVariables,
 } from '../../graphql-operations'
-import { eventLogger } from '../../tracking/eventLogger'
 import {
     ExternalAccountNode,
-    ExternalAccountNodeProps,
     externalAccountsConnectionFragment,
+    type ExternalAccountNodeProps,
 } from '../user/settings/ExternalAccountNode'
 
-interface Props extends RouteComponentProps<{}> {}
+interface Props {}
 
 interface FilterParameters {
     user?: Scalars['ID']
@@ -42,7 +41,7 @@ export class SiteAdminExternalAccountsPage extends React.Component<Props> {
     private externalAccountUpdates = new Subject<void>()
 
     public componentDidMount(): void {
-        eventLogger.logViewEvent('SiteAdminExternalAccounts')
+        EVENT_LOGGER.logViewEvent('SiteAdminExternalAccounts')
     }
 
     public componentWillUnmount(): void {
@@ -77,8 +76,6 @@ export class SiteAdminExternalAccountsPage extends React.Component<Props> {
                     nodeComponentProps={nodeProps}
                     updates={this.externalAccountUpdates}
                     hideSearch={true}
-                    history={this.props.history}
-                    location={this.props.location}
                 />
             </div>
         )
@@ -86,7 +83,7 @@ export class SiteAdminExternalAccountsPage extends React.Component<Props> {
 
     private queryExternalAccounts = (
         args: {
-            first?: number
+            first?: number | null
         } & FilterParameters
     ): Observable<ExternalAccountsConnectionFields> =>
         requestGraphQL<ExternalAccountsResult, ExternalAccountsVariables>(
@@ -122,7 +119,7 @@ export class SiteAdminExternalAccountsPage extends React.Component<Props> {
             }
         ).pipe(
             map(({ data, errors }) => {
-                if (!data || !data.site || !data.site.externalAccounts) {
+                if (!data?.site?.externalAccounts) {
                     throw createAggregateError(errors)
                 }
                 return data.site.externalAccounts

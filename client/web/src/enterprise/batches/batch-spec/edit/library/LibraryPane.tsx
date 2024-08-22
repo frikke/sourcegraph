@@ -1,12 +1,15 @@
 import React, { useState, useCallback } from 'react'
 
 import { mdiChevronDoubleLeft, mdiChevronDoubleRight, mdiOpenInNew } from '@mdi/js'
+import { useLocation } from 'react-router-dom'
 import { animated, useSpring } from 'react-spring'
 
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
 import { Button, useLocalStorage, H3, H4, Icon, Link, Text, VIEWPORT_XL } from '@sourcegraph/wildcard'
 
-import { Scalars } from '../../../../../graphql-operations'
-import { eventLogger } from '../../../../../tracking/eventLogger'
+import type { Scalars } from '../../../../../graphql-operations'
+import { createRenderTemplate } from '../../../create/useSearchTemplate'
 import { insertNameIntoLibraryItem } from '../../yaml-util'
 
 import combySample from './comby.batch.yaml'
@@ -56,7 +59,10 @@ type LibraryPaneProps =
           isReadOnly: true
       }
 
-export const LibraryPane: React.FunctionComponent<React.PropsWithChildren<LibraryPaneProps>> = ({ name, ...props }) => {
+export const LibraryPane: React.FunctionComponent<React.PropsWithChildren<LibraryPaneProps & TelemetryV2Props>> = ({
+    name,
+    ...props
+}) => {
     // Remember the last collapsed state of the pane
     const [defaultCollapsed, setDefaultCollapsed] = useLocalStorage(LIBRARY_PANE_DEFAULT_COLLAPSED, false)
     // Start with the library collapsed by default if the batch spec is read-only, or if
@@ -104,18 +110,39 @@ export const LibraryPane: React.FunctionComponent<React.PropsWithChildren<Librar
         [animateContainer, animateContent, animateHeader, setDefaultCollapsed]
     )
 
+    const { search: searchQuery } = useLocation()
+    const updateTemplateWithQueryAndName = useCallback(
+        (template: string): string => {
+            if (searchQuery !== '') {
+                const parameters = new URLSearchParams(location.search)
+
+                const query = parameters.get('q')
+                const patternType = parameters.get('patternType')
+
+                if (query) {
+                    const searchQuery = `${query} ${patternType ? `patternType:${patternType}` : ''}`
+                    const renderTemplate = createRenderTemplate(searchQuery, template, true)
+                    return renderTemplate(name)
+                }
+            }
+            return insertNameIntoLibraryItem(template, name)
+        },
+        [name, searchQuery]
+    )
+
     const onConfirm = useCallback(() => {
         if (selectedItem && !('isReadOnly' in props && props.isReadOnly)) {
+            const codeWithName = updateTemplateWithQueryAndName(selectedItem.code)
             const templateName = selectedItem.name
-            const codeWithName = insertNameIntoLibraryItem(selectedItem.code, name)
-            eventLogger.log('batch_change_editor:template:loaded', { template: templateName })
+            EVENT_LOGGER.log('batch_change_editor:template:loaded', { template: templateName })
+            props.telemetryRecorder.recordEvent('batchChange.editor.template', 'load')
             props.onReplaceItem(codeWithName)
             setSelectedItem(undefined)
         }
-    }, [name, selectedItem, props])
+    }, [selectedItem, props, updateTemplateWithQueryAndName])
 
     return (
-        <>
+        <div role="region" aria-label="batch spec template library">
             {selectedItem ? (
                 <ReplaceSpecModal
                     libraryItemName={selectedItem.name}
@@ -134,7 +161,7 @@ export const LibraryPane: React.FunctionComponent<React.PropsWithChildren<Librar
                         <Button
                             className="p-0"
                             onClick={() => toggleCollapse(!collapsed)}
-                            aria-label={collapsed ? 'Expand' : 'Collapse'}
+                            aria-label={collapsed ? 'Expand library' : 'Collapse library'}
                         >
                             <Icon
                                 aria-hidden={true}
@@ -145,7 +172,7 @@ export const LibraryPane: React.FunctionComponent<React.PropsWithChildren<Librar
                 </div>
 
                 <animated.div style={contentStyle}>
-                    <ul className={styles.listContainer}>
+                    <ul className={styles.listContainer} aria-label="batch spec templates">
                         {LIBRARY.map(item => (
                             <li className={styles.libraryItem} key={item.name}>
                                 <Button
@@ -163,13 +190,16 @@ export const LibraryPane: React.FunctionComponent<React.PropsWithChildren<Librar
                             target="_blank"
                             rel="noopener noreferrer"
                             to="https://github.com/sourcegraph/batch-change-examples"
-                            onClick={() => eventLogger.log('batch_change_editor:view_more_examples:clicked')}
+                            onClick={() => {
+                                EVENT_LOGGER.log('batch_change_editor:view_more_examples:clicked')
+                                props.telemetryRecorder.recordEvent('batchChange.editor.viewMoreExamples', 'click')
+                            }}
                         >
                             View more examples <Icon aria-hidden={true} svgPath={mdiOpenInNew} />
                         </Link>
                     </Text>
                 </animated.div>
             </animated.div>
-        </>
+        </div>
     )
 }

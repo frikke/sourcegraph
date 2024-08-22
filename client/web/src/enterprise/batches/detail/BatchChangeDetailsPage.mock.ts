@@ -1,19 +1,18 @@
 import { subDays } from 'date-fns'
 
-import { BatchSpecSource } from '@sourcegraph/shared/src/schema'
-
 import {
-    BatchChangeFields,
+    type BatchChangeFields,
     BulkOperationState,
     BulkOperationType,
-    BatchChangeBulkOperationsResult,
+    type BatchChangeBulkOperationsResult,
     ChangesetReviewState,
     ChangesetSpecType,
     ChangesetState,
-    BatchChangeChangesetsResult,
+    type BatchChangeChangesetsResult,
     ChangesetCheckState,
     BatchSpecState,
     BatchChangeState,
+    BatchSpecSource,
 } from '../../../graphql-operations'
 
 const now = new Date()
@@ -31,6 +30,12 @@ export const MOCK_BATCH_CHANGE: BatchChangeFields = {
         archived: 5,
         total: 18,
         unpublished: 4,
+        isCompleted: false,
+        percentComplete: 25,
+        failed: 0,
+        retrying: 0,
+        scheduled: 0,
+        processing: 0,
     },
     createdAt: subDays(now, 5).toISOString(),
     creator: {
@@ -71,6 +76,33 @@ export const MOCK_BATCH_CHANGE: BatchChangeFields = {
             __typename: 'BatchChangesCodeHostConnection',
             nodes: [],
             totalCount: 0,
+        },
+        description: {
+            __typename: 'BatchChangeDescription',
+            name: 'Spec Description',
+        },
+        files: {
+            totalCount: 2,
+            pageInfo: {
+                endCursor: null,
+                hasNextPage: false,
+            },
+            nodes: [
+                {
+                    id: 'random-id',
+                    name: 'test.txt',
+                    binary: false,
+                    byteSize: 74,
+                    url: 'test/url',
+                },
+                {
+                    id: 'random-id-2',
+                    name: 'src-cli',
+                    binary: true,
+                    byteSize: 75,
+                    url: 'test/url',
+                },
+            ],
         },
     },
     batchSpecs: {
@@ -164,6 +196,7 @@ export const MOCK_BULK_OPERATIONS: BatchChangeBulkOperationsResult = {
                                     url: 'https://test.test/my/pr',
                                 },
                                 repository: {
+                                    id: 'a',
                                     name: 'sourcegraph/sourcegraph',
                                     url: '/github.com/sourcegraph/sourcegraph',
                                 },
@@ -254,6 +287,7 @@ export const BATCH_CHANGE_CHANGESETS_RESULT: BatchChangeChangesetsResult['node']
                         text: 'Some label',
                     },
                 ],
+                commitVerification: null,
                 repository: {
                     id: 'repoid',
                     name: 'github.com/sourcegraph/awesome',
@@ -297,6 +331,7 @@ export const BATCH_CHANGE_CHANGESETS_RESULT: BatchChangeChangesetsResult['node']
                     name: 'github.com/sourcegraph/awesome',
                     url: 'http://test.test/awesome',
                 },
+                commitVerification: null,
                 reviewState: null,
                 title: 'Add prettier to all projects',
                 createdAt: subDays(now, 5).toISOString(),

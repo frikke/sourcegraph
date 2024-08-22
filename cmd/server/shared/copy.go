@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
+	"log" //nolint:logging // TODO move all logging to sourcegraph/log
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -144,6 +144,6 @@ func (e *execer) RunWithFilter(errorFilter errorFilter, cmd *exec.Cmd) {
 }
 
 // Error returns the first error encountered.
-func (e execer) Error() error {
+func (e *execer) Error() error {
 	return e.err
 }

@@ -3,10 +3,10 @@ import React, { useMemo, useState } from 'react'
 import { mdiChevronDown, mdiChevronLeft } from '@mdi/js'
 import classNames from 'classnames'
 
-import { EventLogResult, fetchRecentFileViews } from '@sourcegraph/search'
+import { type EventLogResult, fetchRecentFileViews } from '@sourcegraph/shared/src/search'
 import { Icon, Link, H5, useObservable, Button } from '@sourcegraph/wildcard'
 
-import { HistorySidebarProps } from '../HistorySidebarView'
+import type { HistorySidebarProps } from '../HistorySidebarView'
 
 import styles from '../../search/SearchSidebarView.module.scss'
 
@@ -27,11 +27,10 @@ export const RecentFilesSection: React.FunctionComponent<React.PropsWithChildren
 
     // Debt: lift this shared query up to HistorySidebarView.
     const recentFilesResult = useObservable(
-        useMemo(() => fetchRecentFileViews(authenticatedUser.id, itemsToLoad, platformContext), [
-            authenticatedUser.id,
-            itemsToLoad,
-            platformContext,
-        ])
+        useMemo(
+            () => fetchRecentFileViews(authenticatedUser.id, itemsToLoad, platformContext),
+            [authenticatedUser.id, itemsToLoad, platformContext]
+        )
     )
 
     if (!recentFilesResult) {

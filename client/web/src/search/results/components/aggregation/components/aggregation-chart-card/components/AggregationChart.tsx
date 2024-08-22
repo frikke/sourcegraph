@@ -1,11 +1,11 @@
-import { ReactElement, useMemo } from 'react'
+import { type ReactElement, useMemo } from 'react'
 
 import { ParentSize } from '@visx/responsive'
 import { getTicks } from '@visx/scale'
-import { AnyD3Scale } from '@visx/scale/lib/types/Scale'
+import type { AnyD3Scale } from '@visx/scale/lib/types/Scale'
 
 import { SearchAggregationMode } from '@sourcegraph/shared/src/graphql-operations'
-import { BarChart, BarChartProps } from '@sourcegraph/wildcard'
+import { BarChart, type BarChartProps } from '@sourcegraph/wildcard'
 
 /**
  * AggregationChart sets these props internally, and we don't expose them
@@ -90,11 +90,15 @@ const getXScaleTicks = <T,>(options: GetScaleTicksOptions): T[] => {
     return filteredTicks
 }
 
-const getTruncatedTick = (maxLength: number) => (tick: string): string =>
-    tick.length >= maxLength ? `${tick.slice(0, maxLength)}...` : tick
+const getTruncatedTick =
+    (maxLength: number) =>
+    (tick: string): string =>
+        tick.length >= maxLength ? `${tick.slice(0, maxLength)}...` : tick
 
-const getTruncatedTickFromTheEnd = (maxLength: number) => (tick: string): string =>
-    tick.length >= maxLength ? `...${tick.slice(-maxLength)}` : tick
+const getTruncatedTickFromTheEnd =
+    (maxLength: number) =>
+    (tick: string): string =>
+        tick.length >= maxLength ? `...${tick.slice(-maxLength)}` : tick
 
 /**
  * Based on aggregation mode we should pick different truncation formatters for X labels.
@@ -114,10 +118,12 @@ const getTruncationFormatter = (
         // These types possible have long labels with the same pattern at the start of the string,
         // so we truncate their labels from the end
         case SearchAggregationMode.REPO:
-        case SearchAggregationMode.PATH:
+        case SearchAggregationMode.PATH: {
             return getTruncatedTickFromTheEnd(maxLength)
+        }
 
-        default:
+        default: {
             return getTruncatedTick(maxLength)
+        }
     }
 }

@@ -2,89 +2,95 @@ package api
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"net/http"
 
-	"github.com/inconshreveable/log15"
+	logger "github.com/sourcegraph/log"
 
-	"github.com/sourcegraph/go-ctags"
-
-	"github.com/sourcegraph/sourcegraph/cmd/symbols/squirrel"
-	"github.com/sourcegraph/sourcegraph/cmd/symbols/types"
+	"github.com/sourcegraph/sourcegraph/cmd/symbols/internal/types"
+	internalgrpc "github.com/sourcegraph/sourcegraph/internal/grpc"
+	"github.com/sourcegraph/sourcegraph/internal/grpc/defaults"
 	"github.com/sourcegraph/sourcegraph/internal/search"
+	proto "github.com/sourcegraph/sourcegraph/internal/symbols/v1"
+	internaltypes "github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
+type grpcService struct {
+	searchFunc   types.SearchFunc
+	readFileFunc func(context.Context, internaltypes.RepoCommitPath) ([]byte, error)
+	proto.UnimplementedSymbolsServiceServer
+	logger logger.Logger
+}
+
+func (s *grpcService) Search(ctx context.Context, r *proto.SearchRequest) (*proto.SearchResponse, error) {
+	var response proto.SearchResponse
+
+	params := r.ToInternal()
+	res, err := s.searchFunc(ctx, params)
+	if err != nil {
+		s.logger.Error("symbol search failed",
+			logger.String("arguments", fmt.Sprintf("%+v", params)),
+			logger.Error(err),
+		)
+
+		var limitErr *limitHitError
+		if errors.As(err, &limitErr) {
+			response.FromInternal(&search.SymbolsResponse{Symbols: res, LimitHit: true})
+			return &response, nil
+		}
+
+		response.FromInternal(&search.SymbolsResponse{Err: err.Error()})
+		return &response, nil
+	}
+
+	response.FromInternal(&search.SymbolsResponse{Symbols: res})
+	return &response, nil
+}
+
+func (s *grpcService) Healthz(ctx context.Context, _ *proto.HealthzRequest) (*proto.HealthzResponse, error) {
+	// Note: Kubernetes only has beta support for GRPC Healthchecks since version >= 1.23. This means
+	// that we probably need the old non-GRPC healthcheck endpoint for a while.
+	//
+	// See https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#define-a-grpc-liveness-probe
+	// for more information.
+	return &proto.HealthzResponse{}, nil
+}
+
 func NewHandler(
 	searchFunc types.SearchFunc,
-	readFileFunc squirrel.ReadFileFunc,
+	readFileFunc func(context.Context, internaltypes.RepoCommitPath) ([]byte, error),
 	handleStatus func(http.ResponseWriter, *http.Request),
-	ctagsBinary string,
 ) http.Handler {
+	rootLogger := logger.Scoped("symbolsServer")
+
+	// Initialize the gRPC server
+	grpcServer := defaults.NewServer(rootLogger)
+	proto.RegisterSymbolsServiceServer(grpcServer, &grpcService{
+		searchFunc:   searchFunc,
+		readFileFunc: readFileFunc,
+		logger:       rootLogger.Scoped("grpc"),
+	})
+
+	jsonLogger := rootLogger.Scoped("jsonrpc")
+
+	// Initialize the legacy JSON API server
 	mux := http.NewServeMux()
-	mux.HandleFunc("/search", handleSearchWith(searchFunc))
-	mux.HandleFunc("/healthz", handleHealthCheck)
-	mux.HandleFunc("/list-languages", handleListLanguages(ctagsBinary))
-	mux.HandleFunc("/localCodeIntel", squirrel.LocalCodeIntelHandler(readFileFunc))
-	mux.HandleFunc("/debugLocalCodeIntel", squirrel.DebugLocalCodeIntelHandler)
-	mux.HandleFunc("/symbolInfo", squirrel.NewSymbolInfoHandler(searchFunc, readFileFunc))
+	mux.HandleFunc("/healthz", handleHealthCheck(jsonLogger))
+
 	if handleStatus != nil {
 		mux.HandleFunc("/status", handleStatus)
 	}
-	return mux
+
+	return internalgrpc.MultiplexHandlers(grpcServer, mux)
 }
 
-const maxNumSymbolResults = 500
-
-func handleSearchWith(searchFunc types.SearchFunc) func(w http.ResponseWriter, r *http.Request) {
+func handleHealthCheck(l logger.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var args search.SymbolsParameters
-		if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
+		w.WriteHeader(http.StatusOK)
+
+		if _, err := w.Write([]byte("OK")); err != nil {
+			l.Error("failed to write healthcheck response", logger.Error(err))
 		}
-
-		if args.First < 0 || args.First > maxNumSymbolResults {
-			args.First = maxNumSymbolResults
-		}
-
-		result, err := searchFunc(r.Context(), args)
-		if err != nil {
-			// Ignore reporting errors where client disconnected
-			if r.Context().Err() == context.Canceled && errors.Is(err, context.Canceled) {
-				return
-			}
-
-			log15.Error("Symbol search failed", "args", args, "error", err)
-			if err := json.NewEncoder(w).Encode(search.SymbolsResponse{Err: err.Error()}); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
-			return
-		}
-
-		if err := json.NewEncoder(w).Encode(search.SymbolsResponse{Symbols: result}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-	}
-}
-
-func handleListLanguages(ctagsBinary string) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		mapping, err := ctags.ListLanguageMappings(r.Context(), ctagsBinary)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := json.NewEncoder(w).Encode(mapping); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-	}
-}
-
-func handleHealthCheck(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-
-	if _, err := w.Write([]byte("OK")); err != nil {
-		log15.Error("failed to write response to health check, err: %s", err)
 	}
 }

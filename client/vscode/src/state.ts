@@ -1,11 +1,11 @@
 import { cloneDeep } from 'lodash'
-import { BehaviorSubject, Observable } from 'rxjs'
+import { BehaviorSubject, type Observable } from 'rxjs'
 
-import { SearchQueryState } from '@sourcegraph/search'
-import { AuthenticatedUser } from '@sourcegraph/shared/src/auth'
-import { AggregateStreamingSearchResults } from '@sourcegraph/shared/src/search/stream'
+import type { AuthenticatedUser } from '@sourcegraph/shared/src/auth'
+import type { SearchQueryState } from '@sourcegraph/shared/src/search'
+import type { AggregateStreamingSearchResults } from '@sourcegraph/shared/src/search/stream'
 
-import { LocalStorageService, SELECTED_SEARCH_CONTEXT_SPEC_KEY } from './settings/LocalStorageService'
+import { type LocalStorageService, SELECTED_SEARCH_CONTEXT_SPEC_KEY } from './settings/LocalStorageService'
 
 /**
  * One state machine that lives in Core
@@ -20,6 +20,7 @@ export interface VSCEStateMachine {
     observeState: () => Observable<VSCEState>
     emit: (event: VSCEEvent) => void
 }
+
 export type VSCEState = SearchHomeState | SearchResultsState | RemoteBrowsingState | IdleState | ContextInvalidatedState
 
 export interface SearchHomeState {
@@ -33,6 +34,7 @@ export interface SearchResultsState {
         submittedSearchQueryState: Pick<SearchQueryState, 'queryState' | 'searchCaseSensitivity' | 'searchPatternType'>
     }
 }
+
 export interface RemoteBrowsingState {
     status: 'remote-browsing'
     context: CommonContext
@@ -51,7 +53,10 @@ export interface ContextInvalidatedState {
 /**
  * Subset of SearchQueryState that's necessary and clone-able (`postMessage`) for the VS Code extension.
  */
-export type VSCEQueryState = Pick<SearchQueryState, 'queryState' | 'searchCaseSensitivity' | 'searchPatternType'> | null
+export type VSCEQueryState = Pick<
+    SearchQueryState,
+    'queryState' | 'searchCaseSensitivity' | 'searchPatternType' | 'searchMode'
+> | null
 
 interface CommonContext {
     authenticatedUser: AuthenticatedUser | null
@@ -94,7 +99,7 @@ function createInitialState({ localStorageService }: { localStorageService: Loca
 
 // Temporary placeholder events. We will replace these with the actual events as we implement the webviews.
 
-export type VSCEEvent = SearchEvent | TabsEvent | SettingsEvent
+export type VSCEEvent = SearchEvent | TabsEvent
 
 type SearchEvent =
     | { type: 'set_query_state' }
@@ -113,10 +118,6 @@ type TabsEvent =
     | { type: 'remote_file_focused' }
     | { type: 'remote_file_unfocused' }
 
-interface SettingsEvent {
-    type: 'sourcegraph_url_change'
-}
-
 export function createVSCEStateMachine({
     localStorageService,
 }: {
@@ -130,15 +131,6 @@ export function createVSCEStateMachine({
             return state
         }
 
-        // Events with the same behavior regardless of current state
-        if (event.type === 'sourcegraph_url_change') {
-            return {
-                status: 'context-invalidated',
-                context: {
-                    ...createInitialState({ localStorageService }).context,
-                },
-            }
-        }
         if (event.type === 'set_selected_search_context_spec') {
             return {
                 ...state,
@@ -187,9 +179,9 @@ export function createVSCEStateMachine({
 
         switch (state.status) {
             case 'search-home':
-            case 'search-results':
+            case 'search-results': {
                 switch (event.type) {
-                    case 'search_panel_disposed':
+                    case 'search_panel_disposed': {
                         return {
                             ...state,
                             status: 'search-home',
@@ -199,22 +191,26 @@ export function createVSCEStateMachine({
                                 searchResults: null,
                             },
                         }
+                    }
 
-                    case 'search_panel_unfocused':
+                    case 'search_panel_unfocused': {
                         return {
                             ...state,
                             status: 'idle',
                         }
+                    }
 
-                    case 'remote_file_focused':
+                    case 'remote_file_focused': {
                         return {
                             ...state,
                             status: 'remote-browsing',
                         }
+                    }
                 }
                 return state
+            }
 
-            case 'remote-browsing':
+            case 'remote-browsing': {
                 switch (event.type) {
                     case 'search_panel_focused': {
                         if (state.context.submittedSearchQueryState) {
@@ -232,16 +228,18 @@ export function createVSCEStateMachine({
                             status: 'search-home',
                         }
                     }
-                    case 'remote_file_unfocused':
+                    case 'remote_file_unfocused': {
                         return {
                             ...state,
                             status: 'idle',
                         }
+                    }
                 }
 
                 return state
+            }
 
-            case 'idle':
+            case 'idle': {
                 switch (event.type) {
                     case 'search_panel_focused': {
                         if (state.context.submittedSearchQueryState) {
@@ -260,14 +258,16 @@ export function createVSCEStateMachine({
                         }
                     }
 
-                    case 'remote_file_focused':
+                    case 'remote_file_focused': {
                         return {
                             ...state,
                             status: 'remote-browsing',
                         }
+                    }
                 }
 
                 return state
+            }
         }
     }
 

@@ -1,40 +1,38 @@
 import React, { useCallback, useMemo, useState } from 'react'
 
 import classNames from 'classnames'
-import { RouteComponentProps, useHistory } from 'react-router'
-import { Observable, of, throwError } from 'rxjs'
+import { useNavigate } from 'react-router-dom'
+import { from, of, throwError, type Observable } from 'rxjs'
 import { catchError, map, startWith, switchMap, tap } from 'rxjs/operators'
 
-import { Form } from '@sourcegraph/branded/src/components/Form'
+import { LazyQueryInputFormControl, SyntaxHighlightedSearchQuery } from '@sourcegraph/branded'
 import { asError, createAggregateError, isErrorLike } from '@sourcegraph/common'
-import { QueryState, SearchContextProps } from '@sourcegraph/search'
-import { SyntaxHighlightedSearchQuery, LazyMonacoQueryInput } from '@sourcegraph/search-ui'
 import {
-    Scalars,
-    SearchContextInput,
-    SearchContextRepositoryRevisionsInput,
     SearchPatternType,
+    type Scalars,
+    type SearchContextFields,
+    type SearchContextInput,
+    type SearchContextRepositoryRevisionsInput,
 } from '@sourcegraph/shared/src/graphql-operations'
-import { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
-import { ISearchContext, ISearchContextRepositoryRevisionsInput } from '@sourcegraph/shared/src/schema'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
+import type { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
+import type { QueryState, SearchContextProps } from '@sourcegraph/shared/src/search'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { useIsLightTheme } from '@sourcegraph/shared/src/theme'
 import {
-    Container,
+    Alert,
     Button,
+    Code,
+    Container,
+    Form,
+    Input,
+    Link,
     RadioButton,
     TextArea,
     useEventObservable,
-    Alert,
-    ProductStatusBadge,
-    Link,
-    Code,
-    Input,
 } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../auth'
+import type { AuthenticatedUser } from '../../auth'
 import { ALLOW_NAVIGATION, AwayPrompt } from '../../components/AwayPrompt'
-import { useExperimentalFeatures } from '../../stores'
 
 import { fetchRepositoriesByNames } from './backend'
 import { DeleteSearchContextModal } from './DeleteSearchContextModal'
@@ -43,8 +41,8 @@ import {
     getSelectedNamespace,
     getSelectedNamespaceFromUser,
     SearchContextOwnerDropdown,
-    SelectedNamespace,
-    SelectedNamespaceType,
+    type SelectedNamespace,
+    type SelectedNamespaceType,
 } from './SearchContextOwnerDropdown'
 import { SearchContextRepositoriesFormArea } from './SearchContextRepositoriesFormArea'
 
@@ -111,12 +109,10 @@ function getSearchContextSpecPreview(selectedNamespace: SelectedNamespace, searc
 const LOADING = 'loading' as const
 
 export interface SearchContextFormProps
-    extends RouteComponentProps,
-        ThemeProps,
-        TelemetryProps,
+    extends TelemetryProps,
         Pick<SearchContextProps, 'deleteSearchContext'>,
-        PlatformContextProps<'requestGraphQL'> {
-    searchContext?: ISearchContext
+        PlatformContextProps<'requestGraphQL' | 'telemetryRecorder'> {
+    searchContext?: SearchContextFields
     query?: string
     authenticatedUser: AuthenticatedUser
     isSourcegraphDotCom: boolean
@@ -125,10 +121,10 @@ export interface SearchContextFormProps
         id: Scalars['ID'] | undefined,
         searchContext: SearchContextInput,
         repositories: SearchContextRepositoryRevisionsInput[]
-    ) => Observable<ISearchContext>
+    ) => Observable<SearchContextFields>
 }
 
-const searchContextVisibility = (searchContext: ISearchContext): SelectedVisibility =>
+const searchContextVisibility = (searchContext: SearchContextFields): SelectedVisibility =>
     searchContext.public ? 'public' : 'private'
 
 type RepositoriesParseResult =
@@ -138,22 +134,14 @@ type RepositoriesParseResult =
       }
     | {
           type: 'repositories'
-          repositories: ISearchContextRepositoryRevisionsInput[]
+          repositories: SearchContextRepositoryRevisionsInput[]
       }
 
 export const SearchContextForm: React.FunctionComponent<React.PropsWithChildren<SearchContextFormProps>> = props => {
-    const {
-        authenticatedUser,
-        onSubmit,
-        searchContext,
-        deleteSearchContext,
-        isSourcegraphDotCom,
-        platformContext,
-    } = props
-    const history = useHistory()
-    const editorComponent = useExperimentalFeatures(features => features.editor ?? 'codemirror6')
-    const applySuggestionsOnEnter =
-        useExperimentalFeatures(features => features.applySearchQuerySuggestionOnEnter) ?? true
+    const { authenticatedUser, onSubmit, searchContext, deleteSearchContext, isSourcegraphDotCom, platformContext } =
+        props
+    const navigate = useNavigate()
+    const isLightTheme = useIsLightTheme()
 
     const [name, setName] = useState(searchContext ? searchContext.name : '')
     const [description, setDescription] = useState(searchContext ? searchContext.description : '')
@@ -230,11 +218,11 @@ export const SearchContextForm: React.FunctionComponent<React.PropsWithChildren<
                         return of({ type: 'repositories', repositories: [] } as RepositoriesParseResult)
                     }
 
-                    return fetchRepositoriesByNames(repositoryNames).pipe(
+                    return from(fetchRepositoriesByNames(repositoryNames)).pipe(
                         map(repositories => {
                             const repositoryNameToID = new Map(repositories.map(({ id, name }) => [name, id]))
                             const errors: Error[] = []
-                            const validRepositories: ISearchContextRepositoryRevisionsInput[] = []
+                            const validRepositories: SearchContextRepositoryRevisionsInput[] = []
                             for (const { repository, revisions } of config) {
                                 const repositoryID = repositoryNameToID.get(repository)
                                 if (repositoryID) {
@@ -279,7 +267,7 @@ export const SearchContextForm: React.FunctionComponent<React.PropsWithChildren<
                             return parseRepositories().pipe(
                                 switchMap(repositoriesOrError => {
                                     if (repositoriesOrError.type === 'errors') {
-                                        return throwError(createAggregateError(repositoriesOrError.errors))
+                                        return throwError(() => createAggregateError(repositoriesOrError.errors))
                                     }
                                     return of(repositoriesOrError.repositories)
                                 }),
@@ -287,7 +275,7 @@ export const SearchContextForm: React.FunctionComponent<React.PropsWithChildren<
                             )
                         }
                         if (queryState.query.trim().length === 0) {
-                            return throwError(new Error('Search query has to be non-empty.'))
+                            return throwError(() => new Error('Search query has to be non-empty.'))
                         }
                         return of({ input: { ...partialInput, query: queryState.query }, repositories: [] })
                     }),
@@ -297,7 +285,7 @@ export const SearchContextForm: React.FunctionComponent<React.PropsWithChildren<
                             catchError(error => [asError(error)]),
                             tap(successOrError => {
                                 if (!isErrorLike(successOrError) && successOrError !== LOADING) {
-                                    history.push('/contexts?order=updated-at-desc', ALLOW_NAVIGATION)
+                                    navigate('/contexts?order=updated-at-desc', { state: ALLOW_NAVIGATION })
                                 }
                             })
                         )
@@ -312,7 +300,7 @@ export const SearchContextForm: React.FunctionComponent<React.PropsWithChildren<
                 queryState,
                 visibility,
                 selectedNamespace,
-                history,
+                navigate,
                 searchContext,
                 contextType,
             ]
@@ -320,8 +308,8 @@ export const SearchContextForm: React.FunctionComponent<React.PropsWithChildren<
     )
 
     const onCancel = useCallback(() => {
-        history.push('/contexts')
-    }, [history])
+        navigate('/contexts')
+    }, [navigate])
 
     const [showDeleteModal, setShowDeleteModal] = useState(false)
     const toggleDeleteModal = useCallback(() => setShowDeleteModal(show => !show), [setShowDeleteModal])
@@ -368,33 +356,33 @@ export const SearchContextForm: React.FunctionComponent<React.PropsWithChildren<
                     {searchContextSpecPreview}
                 </div>
                 <hr aria-hidden={true} className={classNames('my-4', styles.searchContextFormDivider)} />
-                <div>
-                    <div className="mb-2">
-                        Description <span className="text-muted">(optional)</span>
-                    </div>
-                    <TextArea
-                        className="w-100"
-                        data-testid="search-context-description-input"
-                        maxLength={MAX_DESCRIPTION_LENGTH}
-                        value={description}
-                        rows={5}
-                        onChange={event => {
-                            const value = event.target.value
-                            if (value.length <= MAX_DESCRIPTION_LENGTH) {
-                                setDescription(event.target.value)
-                            }
-                        }}
-                    />
-                    <div className="mt-1 text-muted">
-                        <small>
+                <TextArea
+                    label={
+                        <>
+                            Description <span className="text-muted">(optional)</span>
+                        </>
+                    }
+                    message={
+                        <span className="font-weight-normal">
                             <span>Markdown formatting is supported</span>
                             <span aria-hidden={true} className="px-1">
                                 &middot;
                             </span>
                             <span>{MAX_DESCRIPTION_LENGTH - description.length} characters remaining</span>
-                        </small>
-                    </div>
-                </div>
+                        </span>
+                    }
+                    className="w-100 mb-2"
+                    data-testid="search-context-description-input"
+                    maxLength={MAX_DESCRIPTION_LENGTH}
+                    value={description}
+                    rows={5}
+                    onChange={event => {
+                        const value = event.target.value
+                        if (value.length <= MAX_DESCRIPTION_LENGTH) {
+                            setDescription(event.target.value)
+                        }
+                    }}
+                />
                 <div className={classNames('mt-3', styles.searchContextFormVisibility)}>
                     <div className="mb-3">Visibility</div>
                     {visibilityRadioButtons.map((radio, index) => (
@@ -426,11 +414,7 @@ export const SearchContextForm: React.FunctionComponent<React.PropsWithChildren<
                     <div className="mb-1">Choose repositories and revisions</div>
                     <div className="text-muted mb-3">
                         For a dynamic set of repositories and revisions, such as for project or team repos, use a{' '}
-                        <Link
-                            target="_blank"
-                            rel="noopener"
-                            to="https://docs.sourcegraph.com/code_search/how-to/search_contexts#beta-query-based-search-contexts"
-                        >
+                        <Link target="_blank" rel="noopener" to="/help/code_search/how-to/search_contexts">
                             search query
                         </Link>
                         . For a static set, use the JSON configuration.
@@ -444,24 +428,16 @@ export const SearchContextForm: React.FunctionComponent<React.PropsWithChildren<
                             checked={contextType === 'dynamic'}
                             required={true}
                             onChange={() => setContextType('dynamic')}
-                            label={
-                                <>
-                                    Search query <ProductStatusBadge status="beta" className="ml-1" />
-                                </>
-                            }
+                            label={<>Search query</>}
                         />
                         <div className={styles.searchContextFormQuery} data-testid="search-context-dynamic-query">
-                            <LazyMonacoQueryInput
-                                editorComponent={editorComponent}
-                                isLightTheme={props.isLightTheme}
+                            <LazyQueryInputFormControl
                                 patternType={SearchPatternType.regexp}
                                 isSourcegraphDotCom={isSourcegraphDotCom}
                                 caseSensitive={true}
                                 queryState={queryState}
                                 onChange={setQueryState}
-                                globbing={false}
                                 preventNewLine={false}
-                                applySuggestionsOnEnter={applySuggestionsOnEnter}
                             />
                         </div>
                         <div className={classNames(styles.searchContextFormQueryLabel, 'text-muted')}>
@@ -492,9 +468,11 @@ export const SearchContextForm: React.FunctionComponent<React.PropsWithChildren<
                         <div className={styles.searchContextFormStaticConfig}>
                             <SearchContextRepositoriesFormArea
                                 {...props}
+                                isLightTheme={isLightTheme}
                                 onChange={onRepositoriesConfigChange}
                                 validateRepositories={validateRepositories}
                                 repositories={searchContext?.repositories}
+                                telemetryRecorder={platformContext.telemetryRecorder}
                             />
                         </div>
                     </div>

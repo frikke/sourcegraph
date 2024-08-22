@@ -6,12 +6,21 @@ import (
 	"database/sql"
 	"fmt"
 	"reflect"
+	"regexp/syntax"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/sourcegraph/sourcegraph/internal/conf/conftypes"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
+
+	"github.com/google/uuid"
+
 	"github.com/sourcegraph/sourcegraph/internal/api"
+	"github.com/sourcegraph/sourcegraph/internal/database/dbutil"
+	"github.com/sourcegraph/sourcegraph/internal/encryption"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc"
+	rtypes "github.com/sourcegraph/sourcegraph/internal/rbac/types"
 )
 
 // BatchChangeSource represents how a batch change can be created
@@ -77,6 +86,33 @@ type Repo struct {
 	Blocked *RepoBlock `json:",omitempty"`
 	// KeyValuePairs is the set of key-value pairs associated with the repo
 	KeyValuePairs map[string]*string `json:",omitempty"`
+	// Topics synced from GitHub or GitLab
+	Topics []string `json:",omitempty"`
+}
+
+func (r *Repo) IDName() RepoIDName {
+	return RepoIDName{
+		ID:   r.ID,
+		Name: r.Name,
+	}
+}
+
+type GitHubAppDomain string
+
+func (s GitHubAppDomain) ToGraphQL() string { return strings.ToUpper(string(s)) }
+
+const (
+	ReposGitHubAppDomain   GitHubAppDomain = "repos"
+	BatchesGitHubAppDomain GitHubAppDomain = "batches"
+)
+
+// RepoCommit is a record of a repo and a corresponding commit.
+type RepoCommit struct {
+	ID                   int64
+	RepoID               api.RepoID
+	CommitSHA            dbutil.CommitBytea
+	PerforceChangelistID int64
+	CreatedAt            time.Time
 }
 
 // SearchedRepo is a collection of metadata about repos that is used to decorate search results
@@ -101,6 +137,8 @@ type SearchedRepo struct {
 	LastFetched *time.Time
 	// A set of key-value pairs associated with the repo
 	KeyValuePairs map[string]*string
+	// Topics synced from GitHub or GitLab
+	Topics []string
 }
 
 // RepoBlock contains data about a repo that has been blocked. Blocked repos aren't returned by store methods by default.
@@ -133,6 +171,14 @@ func (r *Repo) ExternalServiceIDs() []int64 {
 	return ids
 }
 
+func (r *Repo) ToExternalServiceRepository() *ExternalServiceRepository {
+	return &ExternalServiceRepository{
+		ID:         r.ID,
+		Name:       r.Name,
+		ExternalID: r.ExternalRepo.ID,
+	}
+}
+
 // BlockedRepoError is returned by a Repo IsBlocked method.
 type BlockedRepoError struct {
 	Name   api.RepoName
@@ -154,13 +200,13 @@ func (r *Repo) IsBlocked() error {
 	return nil
 }
 
-// RepoModified is a bitfield that tracks which fields were modified while
+// RepoModifiedFields is a bitfield that tracks which fields were modified while
 // syncing a repository.
-type RepoModified uint64
+type RepoModifiedFields uint64
 
 const (
-	RepoUnmodified   RepoModified = 0
-	RepoModifiedName              = 1 << iota
+	RepoUnmodified   RepoModifiedFields = 0
+	RepoModifiedName                    = 1 << iota
 	RepoModifiedURI
 	RepoModifiedDescription
 	RepoModifiedExternalRepo
@@ -172,7 +218,7 @@ const (
 	RepoModifiedSources
 )
 
-func (m RepoModified) String() string {
+func (m RepoModifiedFields) String() string {
 	if m == RepoUnmodified {
 		return "repo unmodified"
 	}
@@ -208,9 +254,6 @@ func (m RepoModified) String() string {
 	if m&RepoModifiedSources == RepoModifiedSources {
 		modifications = append(modifications, "sources")
 	}
-	if m&RepoUnmodified == RepoUnmodified {
-		modifications = append(modifications, "unmodified")
-	}
 
 	return "repo modifications: " + strings.Join(modifications, ", ")
 }
@@ -218,7 +261,7 @@ func (m RepoModified) String() string {
 // Update updates Repo r with the fields from the given newer Repo n, returning
 // RepoUnmodified (0) if no fields were modified, and a non-zero value if one
 // or more fields were modified.
-func (r *Repo) Update(n *Repo) (modified RepoModified) {
+func (r *Repo) Update(n *Repo) (modified RepoModifiedFields) {
 	if !r.Name.Equal(n.Name) {
 		r.Name = n.Name
 		modified |= RepoModifiedName
@@ -474,19 +517,20 @@ func (rs Repos) Filter(pred func(*Repo) bool) (fs Repos) {
 	return fs
 }
 
-// MinimalRepo represents a source code repository name, its ID and number of stars.
+// RepoIDName combines a repo name and ID into a single struct
+type RepoIDName struct {
+	ID   api.RepoID
+	Name api.RepoName
+}
+
+// MinimalRepo represents a source code repository name, its ID, number of stars and service type.
 type MinimalRepo struct {
 	ID    api.RepoID
 	Name  api.RepoName
 	Stars int
-}
-
-func (r *MinimalRepo) ToRepo() *Repo {
-	return &Repo{
-		ID:    r.ID,
-		Name:  r.Name,
-		Stars: r.Stars,
-	}
+	// ExternalRepo identifies this repository by its ID on the external service where it resides (and the external
+	// service itself).
+	ExternalRepo api.ExternalRepoSpec
 }
 
 // MinimalRepos is an utility type with convenience methods for operating on lists of repo names
@@ -540,7 +584,7 @@ func ParseCloneStatusFromGraphQL(s string) CloneStatus {
 	return ParseCloneStatus(strings.ToLower(s))
 }
 
-// GitserverRepo  represents the data gitserver knows about a repo
+// GitserverRepo represents the data gitserver knows about a repo
 type GitserverRepo struct {
 	RepoID api.RepoID
 	// Usually represented by a gitserver hostname
@@ -554,50 +598,83 @@ type GitserverRepo struct {
 	LastChanged time.Time
 	// Size of the repository in bytes.
 	RepoSizeBytes int64
-	UpdatedAt     time.Time
+	// Time when corruption of repo was detected
+	CorruptedAt time.Time
+	UpdatedAt   time.Time
+	// A log of the different types of corruption that was detected on this repo. The order of the log entries are
+	// stored from most recent to least recent and capped at 10 entries. See LogCorruption on Gitserverrepo store.
+	CorruptionLogs []RepoCorruptionLog
+}
+
+// RepoCorruptionLog represents a corruption event that has been detected on a repo.
+type RepoCorruptionLog struct {
+	// When the corruption event was detected
+	Timestamp time.Time `json:"time"`
+	// Why the repo is considered to be corrupt. Can be git output stderr output or a short reason like "missing head"
+	Reason string `json:"reason"`
 }
 
 // ExternalService is a connection to an external service.
 type ExternalService struct {
-	ID              int64
-	Kind            string
-	DisplayName     string
-	Config          *extsvc.EncryptableConfig
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	DeletedAt       time.Time
-	LastSyncAt      time.Time
-	NextSyncAt      time.Time
-	NamespaceUserID int32
-	NamespaceOrgID  int32
-	Unrestricted    bool       // Whether access to repositories belong to this external service is unrestricted.
-	CloudDefault    bool       // Whether this external service is our default public service on Cloud
-	HasWebhooks     *bool      // Whether this external service has webhooks configured; calculated from Config
-	TokenExpiresAt  *time.Time // Whether the token in this external services expires, nil indicates never expires.
+	ID             int64
+	Kind           string
+	DisplayName    string
+	Config         *extsvc.EncryptableConfig
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	DeletedAt      time.Time
+	LastSyncAt     time.Time
+	NextSyncAt     time.Time
+	Unrestricted   bool       // Whether access to repositories belong to this external service is unrestricted.
+	HasWebhooks    *bool      // Whether this external service has webhooks configured; calculated from Config
+	TokenExpiresAt *time.Time // Whether the token in this external services expires, nil indicates never expires.
+	CodeHostID     *int32
+	CreatorID      *int32
+	LastUpdaterID  *int32
 }
 
 type ExternalServiceRepo struct {
 	ExternalServiceID int64      `json:"externalServiceID"`
 	RepoID            api.RepoID `json:"repoID"`
 	CloneURL          string     `json:"cloneURL"`
-	UserID            int32      `json:"userID"`
-	OrgID             int32      `json:"orgID"`
 	CreatedAt         time.Time  `json:"createdAt"`
 }
 
 // ExternalServiceSyncJob represents an sync job for an external service
 type ExternalServiceSyncJob struct {
-	ID                int64
+	ID                int64 // TODO: Why is this an int64, it's a 32 bit int in the database
 	State             string
 	FailureMessage    string
 	QueuedAt          time.Time
 	StartedAt         time.Time
 	FinishedAt        time.Time
 	ProcessAfter      time.Time
-	NumResets         int
+	NumResets         int // TODO: This is a 32 bit int in the database
 	ExternalServiceID int64
 	NumFailures       int
 	Cancel            bool
+
+	// Counters that show progress of a running job
+	ReposSynced     int32
+	RepoSyncErrors  int32
+	ReposAdded      int32
+	ReposDeleted    int32
+	ReposModified   int32
+	ReposUnmodified int32
+}
+
+// ExternalServiceNamespace represents a namespace on an external service that can have ownership over repositories
+type ExternalServiceNamespace struct {
+	ID         int    `json:"id"`
+	Name       string `json:"name"`
+	ExternalID string `json:"external_id"`
+}
+
+// ExternalServiceRepository represents a repository on an external service that may not necessarily be sync'd with sourcegraph
+type ExternalServiceRepository struct {
+	ID         api.RepoID   `json:"id"`
+	Name       api.RepoName `json:"name"`
+	ExternalID string       `json:"external_id"`
 }
 
 // URN returns a unique resource identifier of this external service,
@@ -608,9 +685,6 @@ func (e *ExternalService) URN() string {
 
 // IsDeleted returns true if the external service is deleted.
 func (e *ExternalService) IsDeleted() bool { return !e.DeletedAt.IsZero() }
-
-// IsSiteOwned returns true if the external service is owned by the site.
-func (e *ExternalService) IsSiteOwned() bool { return e.NamespaceUserID == 0 && e.NamespaceOrgID == 0 }
 
 // Update updates ExternalService e with the fields from the given newer ExternalService n,
 // returning true if modified.
@@ -679,6 +753,12 @@ func (e *ExternalService) With(opts ...func(*ExternalService)) *ExternalService 
 	clone := e.Clone()
 	clone.Apply(opts...)
 	return clone
+}
+
+// SupportsRepoExclusion returns true when given external service supports repo
+// exclusion.
+func (e *ExternalService) SupportsRepoExclusion() bool {
+	return extsvc.SupportsRepoExclusion(e.Kind)
 }
 
 // ExternalServices is a utility type with convenience methods for operating on
@@ -774,18 +854,94 @@ type User struct {
 	UpdatedAt             time.Time
 	SiteAdmin             bool
 	BuiltinAuth           bool
-	Tags                  []string
 	InvalidatedSessionsAt time.Time
 	TosAccepted           bool
-	Searchable            bool
+	SCIMControlled        bool
 }
 
-type OrgMemberAutocompleteSearchItem struct {
-	ID          int32
-	Username    string
-	DisplayName string
-	AvatarURL   string
-	InOrg       int32
+// Name returns a name for the user. If the user has a display name,
+// that is returned, otherwise their username is returned.
+func (u *User) Name() string {
+	if u.DisplayName != "" {
+		return u.DisplayName
+	}
+
+	return u.Username
+}
+
+// UserForSCIM extends user with email addresses and SCIM external ID.
+type UserForSCIM struct {
+	User
+	Emails          []string
+	SCIMExternalID  string
+	SCIMAccountData string
+	Active          bool
+}
+
+type SystemRole string
+
+const (
+	// UserSystemRole represents the role associated with all users on a Sourcegraph instance.
+	UserSystemRole SystemRole = "USER"
+
+	// SiteAdministratorSystemRole represents the role associated with Site Administrators
+	// on a sourcegraph instance.
+	SiteAdministratorSystemRole SystemRole = "SITE_ADMINISTRATOR"
+)
+
+type Role struct {
+	ID        int32
+	Name      string
+	System    bool
+	CreatedAt time.Time
+}
+
+func (r Role) IsSiteAdmin() bool {
+	return r.Name == string(SiteAdministratorSystemRole)
+}
+
+func (r Role) IsUser() bool {
+	return r.Name == string(UserSystemRole)
+}
+
+type Permission struct {
+	ID        int32
+	Namespace rtypes.PermissionNamespace
+	Action    rtypes.NamespaceAction
+	CreatedAt time.Time
+}
+
+// DisplayName returns an human-readable string for permissions.
+func (p *Permission) DisplayName() string {
+	// Based on the zanzibar representation for data relations:
+	// <namespace>:<object_id>#<relation>@<user_id | user_group>
+	return fmt.Sprintf("%s#%s", p.Namespace, p.Action)
+}
+
+type RolePermission struct {
+	RoleID       int32
+	PermissionID int32
+	CreatedAt    time.Time
+}
+
+type UserRole struct {
+	RoleID    int32
+	UserID    int32
+	CreatedAt time.Time
+}
+
+type NamespacePermission struct {
+	ID         int64
+	Namespace  rtypes.PermissionNamespace
+	ResourceID int64
+	UserID     int32
+	CreatedAt  time.Time
+}
+
+func (n *NamespacePermission) DisplayName() string {
+	// Based on the zanzibar representation for data relations:
+	// <namespace>:<object_id>#@<user_id | user_group>
+	return fmt.Sprintf("%s:%d@%d", n.Namespace, n.ResourceID, n.UserID)
 }
 
 type Org struct {
@@ -802,11 +958,6 @@ type OrgMembership struct {
 	UserID    int32
 	CreatedAt time.Time
 	UpdatedAt time.Time
-}
-
-type OrgStats struct {
-	OrgID             int32
-	CodeHostRepoCount int32
 }
 
 type PhabricatorRepo struct {
@@ -844,10 +995,119 @@ type UserDates struct {
 // NOTE: DO NOT alter this struct without making a symmetric change
 // to the updatecheck handler. This struct is marshalled and sent to
 // BigQuery, which requires the input match its schema exactly.
+type CodyUsageStatistics struct {
+	Daily   *CodyUsagePeriodLimited
+	Weekly  *CodyUsagePeriodLimited
+	Monthly *CodyUsagePeriod
+}
+
+// NOTE: DO NOT alter this struct without making a symmetric change
+// to the updatecheck handler. This struct is marshalled and sent to
+// BigQuery, which requires the input match its schema exactly.
+type CodyUsagePeriod struct {
+	StartTime                  time.Time
+	TotalCodyUsers             *CodyCountStatistics `json:"TotalCodyUsers,omitempty"`
+	TotalProductUsers          *CodyCountStatistics `json:"TotalProductUsers,omitempty"`
+	TotalVSCodeProductUsers    *CodyCountStatistics `json:"TotalVSCodeProductUsers,omitempty"`
+	TotalJetBrainsProductUsers *CodyCountStatistics `json:"TotalJetBrainsProductUsers,omitempty"`
+	TotalNeovimProductUsers    *CodyCountStatistics `json:"TotalNeovimProductUsers,omitempty"`
+	TotalEmacsProductUsers     *CodyCountStatistics `json:"TotalEmacsProductUsers,omitempty"`
+	TotalWebProductUsers       *CodyCountStatistics `json:"TotalWebProductUsers,omitempty"`
+}
+
+type CodyUsagePeriodLimited struct {
+	StartTime         time.Time
+	TotalCodyUsers    *CodyCountStatistics `json:"TotalCodyUsers,omitempty"`
+	TotalProductUsers *CodyCountStatistics `json:"TotalProductUsers,omitempty"`
+}
+
+type CodyCountStatistics struct {
+	UserCount   *int32 `json:"UserCount,omitempty"`
+	EventsCount *int32 `json:"EventsCount,omitempty"`
+}
+
+// CodyAggregatedUsage represents the total Cody-related event count and
+// unique users for the current day, week, and month, as well as the
+// count of total unique users by client for the current month.
+type CodyAggregatedUsage struct {
+	Month                      time.Time
+	Week                       time.Time
+	Day                        time.Time
+	TotalMonth                 int32
+	TotalWeek                  int32
+	TotalDay                   int32
+	UniquesMonth               int32
+	UniquesWeek                int32
+	UniquesDay                 int32
+	ProductUsersMonth          int32
+	ProductUsersWeek           int32
+	ProductUsersDay            int32
+	VSCodeProductUsersMonth    int32
+	JetBrainsProductUsersMonth int32
+	NeovimProductUsersMonth    int32
+	EmacsProductUsersMonth     int32
+	WebProductUsersMonth       int32
+}
+
+// NOTE: DO NOT alter this struct without making a symmetric change
+// to the updatecheck handler. This struct is marshalled and sent to
+// BigQuery, which requires the input match its schema exactly.
+type CodyProviders struct {
+	Completions *CodyCompletionProvider
+	Embeddings  *CodyEmbeddingsProvider
+}
+
+type CodyCompletionProvider struct {
+	ChatModel       string
+	CompletionModel string
+	FastChatModel   string
+	Provider        conftypes.CompletionsProviderName
+}
+
+type CodyEmbeddingsProvider struct {
+	Model    string
+	Provider conftypes.EmbeddingsProviderName
+}
+
+// NOTE: DO NOT alter this struct without making a symmetric change
+// to the updatecheck handler.
+// RepoMetadataAggregatedStats represents the total number of repo metadata,
+// number of repositories with any metadata, total and unique number of
+// events for repo metadata usage related events over the current day, week, month.
+type RepoMetadataAggregatedStats struct {
+	Summary *RepoMetadataAggregatedSummary
+	Daily   *RepoMetadataAggregatedEvents
+	Weekly  *RepoMetadataAggregatedEvents
+	Monthly *RepoMetadataAggregatedEvents
+}
+
+type RepoMetadataAggregatedSummary struct {
+	IsEnabled              bool
+	RepoMetadataCount      *int32
+	ReposWithMetadataCount *int32
+}
+
+type RepoMetadataAggregatedEvents struct {
+	StartTime          time.Time
+	CreateRepoMetadata *EventStats
+	UpdateRepoMetadata *EventStats
+	DeleteRepoMetadata *EventStats
+	SearchFilterUsage  *EventStats
+}
+
+type EventStats struct {
+	UsersCount  *int32
+	EventsCount *int32
+}
+
+// NOTE: DO NOT alter this struct without making a symmetric change
+// to the updatecheck handler. This struct is marshalled and sent to
+// BigQuery, which requires the input match its schema exactly.
 type SiteUsageStatistics struct {
-	DAUs []*SiteActivityPeriod
-	WAUs []*SiteActivityPeriod
-	MAUs []*SiteActivityPeriod
+	DAUs  []*SiteActivityPeriod
+	WAUs  []*SiteActivityPeriod
+	MAUs  []*SiteActivityPeriod
+	RMAUs []*SiteActivityPeriod
 }
 
 // NOTE: DO NOT alter this struct without making a symmetric change
@@ -1170,18 +1430,22 @@ type SearchEventLatencies struct {
 // SiteUsageSummary is an alternate view of SiteUsageStatistics which is
 // calculated in the database layer.
 type SiteUsageSummary struct {
-	Month                   time.Time
-	Week                    time.Time
-	Day                     time.Time
-	UniquesMonth            int32
-	UniquesWeek             int32
-	UniquesDay              int32
-	RegisteredUniquesMonth  int32
-	RegisteredUniquesWeek   int32
-	RegisteredUniquesDay    int32
-	IntegrationUniquesMonth int32
-	IntegrationUniquesWeek  int32
-	IntegrationUniquesDay   int32
+	RollingMonth                   time.Time
+	Month                          time.Time
+	Week                           time.Time
+	Day                            time.Time
+	UniquesRollingMonth            int32
+	UniquesMonth                   int32
+	UniquesWeek                    int32
+	UniquesDay                     int32
+	RegisteredUniquesRollingMonth  int32
+	RegisteredUniquesMonth         int32
+	RegisteredUniquesWeek          int32
+	RegisteredUniquesDay           int32
+	IntegrationUniquesRollingMonth int32
+	IntegrationUniquesMonth        int32
+	IntegrationUniquesWeek         int32
+	IntegrationUniquesDay          int32
 }
 
 // SearchAggregatedEvent represents the total events, unique users, and
@@ -1228,11 +1492,14 @@ type Event struct {
 // GrowthStatistics represents the total users that were created,
 // deleted, resurrected, churned and retained over the current month.
 type GrowthStatistics struct {
-	DeletedUsers     int32
-	CreatedUsers     int32
-	ResurrectedUsers int32
-	ChurnedUsers     int32
-	RetainedUsers    int32
+	DeletedUsers           int32
+	CreatedUsers           int32
+	ResurrectedUsers       int32
+	ChurnedUsers           int32
+	RetainedUsers          int32
+	PendingAccessRequests  int32
+	ApprovedAccessRequests int32
+	RejectedAccessRequests int32
 }
 
 // IDEExtensionsUsage represents the daily, weekly and monthly numbers
@@ -1294,9 +1561,6 @@ type MigratedExtensionsUsageStatistics struct {
 	SearchExportFailed               *int32
 	SearchExportFailedUniqueUsers    *int32
 
-	GoImportsSearchQueryTransformed            *int32
-	GoImportsSearchQueryTransformedUniqueUsers *int32
-
 	OpenInEditor []*MigratedExtensionsOpenInEditorUsageStatistics
 }
 
@@ -1330,17 +1594,6 @@ type CodeHostIntegrationUsageType struct {
 type CodeHostIntegrationUsageInboundTrafficToWeb struct {
 	UniquesCount int32
 	TotalCount   int32
-}
-
-// SavedSearches represents the total number of saved searches, users
-// using saved searches, and usage of saved searches.
-type SavedSearches struct {
-	TotalSavedSearches   int32
-	UniqueUsers          int32
-	NotificationsSent    int32
-	NotificationsClicked int32
-	UniqueUserPageViews  int32
-	OrgSavedSearches     int32
 }
 
 // Panel homepage represents interaction data on the
@@ -1412,6 +1665,22 @@ type ExtensionUsageStatistics struct {
 	ExtensionID        *string
 }
 
+type SearchJobsUsageStatistics struct {
+	WeeklySearchJobsPageViews            *int32
+	WeeklySearchJobsCreateClick          *int32
+	WeeklySearchJobsDownloadClicks       *int32
+	WeeklySearchJobsViewLogsClicks       *int32
+	WeeklySearchJobsUniquePageViews      *int32
+	WeeklySearchJobsUniqueDownloadClicks *int32
+	WeeklySearchJobsUniqueViewLogsClicks *int32
+	WeeklySearchJobsSearchFormShown      []SearchJobsSearchFormShownPing
+}
+
+type SearchJobsSearchFormShownPing struct {
+	ValidState string
+	TotalCount int
+}
+
 type CodeInsightsUsageStatistics struct {
 	WeeklyUsageStatisticsByInsight                 []*InsightUsageStatistics
 	WeeklyInsightsPageViews                        *int32
@@ -1447,6 +1716,9 @@ type CodeInsightsUsageStatistics struct {
 	WeeklyGroupResultsChartBarClick                []GroupResultPing
 	WeeklyGroupResultsAggregationModeClicked       []GroupResultPing
 	WeeklyGroupResultsAggregationModeDisabledHover []GroupResultPing
+	WeeklyGroupResultsSearches                     []GroupResultSearchPing
+	WeeklySeriesBackfillTime                       []InsightsBackfillTimePing
+	WeeklyDataExportClicks                         *int32
 }
 
 type GroupResultPing struct {
@@ -1457,6 +1729,12 @@ type GroupResultPing struct {
 }
 
 type GroupResultExpandedViewPing struct {
+	AggregationMode *string
+	Count           *int32
+}
+
+type GroupResultSearchPing struct {
+	Name            PingName
 	AggregationMode *string
 	Count           *int32
 }
@@ -1531,6 +1809,14 @@ type InsightsPerDashboardPing struct {
 	Median float32
 }
 
+type InsightsBackfillTimePing struct {
+	AllRepos   bool
+	P99Seconds int
+	P90Seconds int
+	P50Seconds int
+	Count      int
+}
+
 type CodeMonitoringUsageStatistics struct {
 	CodeMonitoringPageViews                       *int32
 	CreateCodeMonitorPageViews                    *int32
@@ -1561,12 +1847,14 @@ type CodeMonitoringUsageStatistics struct {
 	WebhookActionsEnabledUniqueUsers              *int32
 	MonitorsEnabled                               *int32
 	MonitorsEnabledUniqueUsers                    *int32
-	MonitorsEnabledLastRunErrored                 *int32
-	ReposMonitored                                *int32
-	TriggerRuns                                   *int32
-	TriggerRunsErrored                            *int32
-	P50TriggerRunTimeSeconds                      *float32
-	P90TriggerRunTimeSeconds                      *float32
+	// (TODO @jasonhawkharris ) Currently, MonitorsEnabledLastRunErrored is unpopulated
+	// It will require adjusting the query to select a row inside of a group
+	MonitorsEnabledLastRunErrored *int32
+	ReposMonitored                *int32
+	TriggerRuns                   *int32
+	TriggerRunsErrored            *int32
+	P50TriggerRunTimeSeconds      *float32
+	P90TriggerRunTimeSeconds      *float32
 }
 
 type NotebooksUsageStatistics struct {
@@ -1579,7 +1867,51 @@ type NotebooksUsageStatistics struct {
 	NotebookAddedQueryBlocksCount    *int32
 	NotebookAddedFileBlocksCount     *int32
 	NotebookAddedSymbolBlocksCount   *int32
-	NotebookAddedComputeBlocksCount  *int32
+}
+
+type OwnershipUsageStatistics struct {
+	// Statistics about ownership data in repositories
+	ReposCount *OwnershipUsageReposCounts `json:"repos_count,omitempty"`
+
+	// Activity of selecting owners as search results using
+	// `select:file.owners`.
+	SelectFileOwnersSearch *OwnershipUsageStatisticsActiveUsers `json:"select_file_owners_search,omitempty"`
+
+	// Activity of using a `file:has.owner` predicate in search.
+	FileHasOwnerSearch *OwnershipUsageStatisticsActiveUsers `json:"file_has_owner_search,omitempty"`
+
+	// Opening ownership panel.
+	OwnershipPanelOpened *OwnershipUsageStatisticsActiveUsers `json:"ownership_panel_opened,omitempty"`
+
+	// AssignedOwnersCount is the total number of assigned owners. For instance
+	// if an owner is assigned to a single file - that counts as one,
+	// for the whole repo - also counts as one.
+	AssignedOwnersCount *int32 `json:"assigned_owners_count"`
+}
+
+type OwnershipUsageReposCounts struct {
+	// Total number of repositories. Can be used in computing adoption
+	// ratio as denominator to number of repos with ownership.
+	Total *int32 `json:"total,omitempty"`
+
+	// Number of repos in an instance that have ownership
+	// data (of any source, either CODEOWNERS file or API).
+	WithOwnership *int32 `json:"with_ownership,omitempty"`
+
+	// Number of repos in an instance that have ownership
+	// data ingested through the API.
+	WithIngestedOwnership *int32 `json:"with_ingested_ownership,omitempty"`
+}
+
+type OwnershipUsageStatisticsActiveUsers struct {
+	// Daily-Active Users
+	DAU *int32 `json:"dau,omitempty"`
+
+	// Weekly-Active Users
+	WAU *int32 `json:"wau,omitempty"`
+
+	// Monthly-Active Users
+	MAU *int32 `json:"mau,omitempty"`
 }
 
 // Secret represents the secrets table
@@ -1630,6 +1962,15 @@ type SearchContext struct {
 	// Query is the Sourcegraph query that defines this search context
 	// e.g. repo:^github\.com/org rev:bar archive:no f:sub/dir
 	Query string
+
+	// Whether the search context is auto-defined by Sourcegraph. Auto-defined search contexts are not editable by users.
+	AutoDefined bool
+
+	// Whether the search context is the default for the user. If the user hasn't explicitly set a default or is not authenticated, the global search context is used.
+	Default bool
+
+	// Whether the user has starred the context. If the user is not authenticated, this field is always false.
+	Starred bool
 }
 
 // SearchContextRepositoryRevisions is a simple wrapper for a repository and its revisions
@@ -1639,4 +1980,222 @@ type SearchContext struct {
 type SearchContextRepositoryRevisions struct {
 	Repo      MinimalRepo
 	Revisions []string
+}
+
+type EncryptableSecret = encryption.Encryptable
+
+// NewUnencryptedSecret creates an EncryptableSecret that *may* be encrypted in
+// the future, but the current value has not yet been encrypted.
+func NewUnencryptedSecret(value string) *EncryptableSecret {
+	return encryption.NewUnencrypted(value)
+}
+
+// NewEncryptedSecret creates an EncryptableSecret that has come from an
+// encrypted source. In this case you need to provide the keyID and key in order
+// to be able to decrypt it.
+func NewEncryptedSecret(cipher, keyID string, key encryption.Key) *EncryptableSecret {
+	return encryption.NewEncrypted(cipher, keyID, key)
+}
+
+// Webhook defines the information we need to handle incoming webhooks from a
+// code host.
+type Webhook struct {
+	// The primary key, used for sorting and pagination.
+	ID int32
+	// UUID is the ID we display externally and will appear in the webhook URL.
+	UUID uuid.UUID
+	// Name is a descriptive webhook name which is shown on the UI for convenience.
+	Name         string
+	CodeHostKind string
+	CodeHostURN  extsvc.CodeHostBaseURL
+	// Secret can be in one of three states:
+	//
+	// 1. nil, no secret provided.
+	// 2. Provided but not encrypted.
+	// 3. Provided and encrypted.
+	//
+	// For 2 and 3 you interact with it in the same way and just assume that it IS
+	// encrypted. All the methods on EncryptableSecret will just pass around the raw
+	// value and encryption / decryption methods are noops.
+	Secret          *EncryptableSecret
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	CreatedByUserID int32
+	UpdatedByUserID int32
+}
+
+// OutboundRequestLogItem represents a single outbound request made by Sourcegraph.
+type OutboundRequestLogItem struct {
+	ID                 string              `json:"id"`
+	StartedAt          time.Time           `json:"startedAt"`
+	Method             string              `json:"method"` // The request method (GET, POST, etc.)
+	URL                string              `json:"url"`
+	RequestHeaders     map[string][]string `json:"requestHeaders"`
+	RequestBody        string              `json:"requestBody"`
+	StatusCode         int32               `json:"statusCode"` // The response status code
+	ResponseHeaders    map[string][]string `json:"responseHeaders"`
+	Duration           float64             `json:"duration"`
+	ErrorMessage       string              `json:"errorMessage"`
+	CreationStackFrame string              `json:"creationStackFrame"`
+	CallStackFrame     string              `json:"callStackFrame"` // Should be "CallStack" once this is final
+}
+
+type SlowRequest struct {
+	Index     string         `json:"index"`
+	Start     time.Time      `json:"start"`
+	Duration  time.Duration  `json:"duration"`
+	UserID    int32          `json:"userId"`
+	Name      string         `json:"name"`
+	Source    string         `json:"source"`
+	Variables map[string]any `json:"variables"`
+	Errors    []string       `json:"errors"`
+	Query     string         `json:"query"`
+	Filepath  string         `json:"filepath"`
+}
+
+type Team struct {
+	ID           int32
+	Name         string
+	DisplayName  string
+	ReadOnly     bool
+	ParentTeamID int32
+	CreatorID    int32
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type TeamMember struct {
+	UserID    int32
+	TeamID    int32
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type AccessRequestStatus string
+
+type AccessRequest struct {
+	ID               int32
+	Name             string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	Email            string
+	AdditionalInfo   string
+	Status           AccessRequestStatus
+	DecisionByUserID *int32
+}
+
+const (
+	AccessRequestStatusPending  AccessRequestStatus = "PENDING"
+	AccessRequestStatusApproved AccessRequestStatus = "APPROVED"
+	AccessRequestStatusRejected AccessRequestStatus = "REJECTED"
+	AccessRequestStatusCanceled AccessRequestStatus = "CANCELED"
+)
+
+type PerforceChangelist struct {
+	CommitSHA    api.CommitID
+	ChangelistID int64
+}
+
+// CodeHost represents a signle code source, usually defined by url e.g. github.com, gitlab.com, bitbucket.sgdev.org.
+type CodeHost struct {
+	ID                          int32
+	Kind                        string
+	URL                         string
+	APIRateLimitQuota           *int32
+	APIRateLimitIntervalSeconds *int32
+	GitRateLimitQuota           *int32
+	GitRateLimitIntervalSeconds *int32
+	CreatedAt                   time.Time
+	UpdatedAt                   time.Time
+}
+
+// RepoSyncDiff is the difference found by a sync between what is in the store and
+// what is returned from sources.
+type RepoSyncDiff struct {
+	Added      Repos
+	Deleted    Repos
+	Modified   ReposModified
+	Unmodified Repos
+}
+
+// Sort sorts all Diff elements by Repo.IDs.
+func (d *RepoSyncDiff) Sort() {
+	for _, ds := range []Repos{
+		d.Added,
+		d.Deleted,
+		d.Modified.Repos(),
+		d.Unmodified,
+	} {
+		sort.Sort(ds)
+	}
+}
+
+// Repos returns all repos in the Diff.
+func (d *RepoSyncDiff) Repos() Repos {
+	all := make(Repos, 0, len(d.Added)+
+		len(d.Deleted)+
+		len(d.Modified)+
+		len(d.Unmodified))
+
+	for _, rs := range []Repos{
+		d.Added,
+		d.Deleted,
+		d.Modified.Repos(),
+		d.Unmodified,
+	} {
+		all = append(all, rs...)
+	}
+
+	return all
+}
+
+func (d *RepoSyncDiff) Len() int {
+	return len(d.Deleted) + len(d.Modified) + len(d.Added) + len(d.Unmodified)
+}
+
+// RepoModified tracks the modifications applied to a single repository after a
+// sync.
+type RepoModified struct {
+	Repo     *Repo
+	Modified RepoModifiedFields
+}
+
+type ReposModified []RepoModified
+
+// Repos returns all modified repositories.
+func (rm ReposModified) Repos() Repos {
+	repos := make(Repos, len(rm))
+	for i := range rm {
+		repos[i] = rm[i].Repo
+	}
+
+	return repos
+}
+
+// ReposModified returns only the repositories that had a specific field
+// modified in the sync.
+func (rm ReposModified) ReposModified(modified RepoModifiedFields) Repos {
+	repos := Repos{}
+	for _, pair := range rm {
+		if pair.Modified&modified == modified {
+			repos = append(repos, pair.Repo)
+		}
+	}
+
+	return repos
+}
+
+// RegexpPattern is a string that carries the additional intent that it is a
+// valid regex pattern, as validated by non-error return of
+// `syntax.Parse(pattern, syntax.Perl)`. Compilation of this string should not
+// fail, but still prefer checking an error to panicking because some
+// compilation errors (e.g. complexity checks) are not errors during parsing.
+type RegexpPattern string
+
+func NewRegexpPattern(pattern string) (RegexpPattern, error) {
+	_, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return "", errors.Wrap(err, "invalid regexp pattern")
+	}
+	return RegexpPattern(pattern), nil
 }

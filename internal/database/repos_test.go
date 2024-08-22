@@ -2,22 +2,21 @@ package database
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/graph-gophers/graphql-go/relay"
 	"github.com/keegancsmith/sqlf"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/util/rand"
-
 	"github.com/sourcegraph/log/logtest"
+	"github.com/sourcegraph/zoekt"
+	"github.com/stretchr/testify/require"
 
 	"github.com/sourcegraph/sourcegraph/internal/actor"
 	"github.com/sourcegraph/sourcegraph/internal/api"
@@ -30,6 +29,7 @@ import (
 	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/internal/types/typestest"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
+	"github.com/sourcegraph/sourcegraph/lib/pointers"
 )
 
 /*
@@ -53,17 +53,32 @@ func repoNames(repos []*types.Repo) []api.RepoName {
 func createRepo(ctx context.Context, t *testing.T, db DB, repo *types.Repo) {
 	t.Helper()
 
-	op := InsertRepoOp{
-		Name:         repo.Name,
-		Private:      repo.Private,
-		ExternalRepo: repo.ExternalRepo,
-		Description:  repo.Description,
-		Fork:         repo.Fork,
-		Archived:     repo.Archived,
-	}
+	op := createInsertRepoOp(repo, 0)
 
 	if err := upsertRepo(ctx, db, op); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func createRepoWithSize(ctx context.Context, t *testing.T, db DB, repo *types.Repo, size int64) {
+	t.Helper()
+
+	op := createInsertRepoOp(repo, size)
+
+	if err := upsertRepo(ctx, db, op); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func createInsertRepoOp(repo *types.Repo, size int64) InsertRepoOp {
+	return InsertRepoOp{
+		Name:              repo.Name,
+		Private:           repo.Private,
+		ExternalRepo:      repo.ExternalRepo,
+		Description:       repo.Description,
+		Fork:              repo.Fork,
+		Archived:          repo.Archived,
+		GitserverRepoSize: size,
 	}
 }
 
@@ -104,10 +119,34 @@ func setGitserverRepoLastError(t *testing.T, db DB, name api.RepoName, msg strin
 	}
 }
 
+func logRepoCorruption(t *testing.T, db DB, name api.RepoName, logOutput string) {
+	t.Helper()
+
+	err := db.GitserverRepos().LogCorruption(context.Background(), name, logOutput, shardID)
+	if err != nil {
+		t.Fatalf("failed to log repo corruption: %s", err)
+	}
+}
+
+func setZoektIndexed(t *testing.T, db DB, name api.RepoName) {
+	t.Helper()
+	ctx := context.Background()
+	repo, err := db.Repos().GetByName(ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.ZoektRepos().UpdateIndexStatuses(ctx, zoekt.ReposMap{
+		uint32(repo.ID): {},
+	})
+	if err != nil {
+		t.Fatalf("failed to set indexed status of %q: %s", name, err)
+	}
+}
+
 func repoNamesFromRepos(repos []*types.Repo) []types.MinimalRepo {
 	rnames := make([]types.MinimalRepo, 0, len(repos))
 	for _, repo := range repos {
-		rnames = append(rnames, types.MinimalRepo{ID: repo.ID, Name: repo.Name})
+		rnames = append(rnames, types.MinimalRepo{ID: repo.ID, Name: repo.Name, ExternalRepo: repo.ExternalRepo})
 	}
 
 	return rnames
@@ -124,12 +163,13 @@ func reposFromRepoNames(names []types.MinimalRepo) []*types.Repo {
 
 // InsertRepoOp represents an operation to insert a repository.
 type InsertRepoOp struct {
-	Name         api.RepoName
-	Description  string
-	Fork         bool
-	Archived     bool
-	Private      bool
-	ExternalRepo api.ExternalRepoSpec
+	Name              api.RepoName
+	Description       string
+	Fork              bool
+	Archived          bool
+	Private           bool
+	ExternalRepo      api.ExternalRepoSpec
+	GitserverRepoSize int64
 }
 
 const upsertSQL = `
@@ -178,7 +218,7 @@ INSERT INTO repo (
     $7 AS archived,
     $8 AS private
   WHERE NOT EXISTS (SELECT 1 FROM upsert)
-)`
+) RETURNING id`
 
 // upsertRepo updates the repository if it already exists (keyed on name) and
 // inserts it if it does not.
@@ -193,7 +233,7 @@ func upsertRepo(ctx context.Context, db DB, op InsertRepoOp) error {
 	// log_statement='mod'.
 	r, err := s.GetByName(ctx, op.Name)
 	if err != nil {
-		if !errors.HasType(err, &RepoNotFoundErr{}) {
+		if !errors.HasType[*RepoNotFoundErr](err) {
 			return err
 		}
 		insert = true // missing
@@ -207,7 +247,7 @@ func upsertRepo(ctx context.Context, db DB, op InsertRepoOp) error {
 		return nil
 	}
 
-	_, err = s.Handle().ExecContext(
+	qrc := s.Handle().QueryRowContext(
 		ctx,
 		upsertSQL,
 		op.Name,
@@ -219,6 +259,19 @@ func upsertRepo(ctx context.Context, db DB, op InsertRepoOp) error {
 		op.Archived,
 		op.Private,
 	)
+	err = qrc.Err()
+
+	// Set size if specified
+	if op.GitserverRepoSize > 0 {
+		var lastInsertId int64
+		err2 := qrc.Scan(&lastInsertId)
+		if err2 != nil {
+			return err2
+		}
+		_, err = s.Handle().ExecContext(ctx, `UPDATE gitserver_repos set repo_size_bytes = $1 where repo_id = $2`,
+			op.GitserverRepoSize, lastInsertId)
+
+	}
 
 	return err
 }
@@ -235,7 +288,7 @@ func TestRepos_createRepo_dupe(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	// Add a repo.
@@ -253,7 +306,7 @@ func TestRepos_createRepo(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	// Add a repo.
@@ -282,7 +335,7 @@ func TestRepos_Get(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	now := time.Now()
@@ -344,7 +397,7 @@ func TestRepos_GetByIDs(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	want := mustCreate(ctx, t, db, &types.Repo{
@@ -376,7 +429,7 @@ func TestRepos_GetByIDs_EmptyIDs(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	repos, err := db.Repos().GetByIDs(ctx, []api.RepoID{}...)
@@ -392,7 +445,7 @@ func TestRepos_GetByIDs_EmptyIDs(t *testing.T) {
 func TestRepos_GetRepoDescriptionsByIDs(t *testing.T) {
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	created := mustCreate(ctx, t, db, &types.Repo{
@@ -428,7 +481,7 @@ func TestRepos_List(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	now := time.Now()
@@ -483,159 +536,6 @@ func TestRepos_List(t *testing.T) {
 	}
 }
 
-func TestRepos_ListMinimalRepos_userID(t *testing.T) {
-	if testing.Short() {
-		t.Skip()
-	}
-
-	t.Parallel()
-	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
-	ctx := actor.WithInternalActor(context.Background())
-
-	// Create a user
-	user, err := db.Users().Create(ctx, NewUser{
-		Email:                 "a1@example.com",
-		Username:              "u1",
-		Password:              "p",
-		EmailVerificationCode: "c",
-	})
-	require.NoError(t, err)
-
-	ctx = actor.WithActor(ctx, &actor.Actor{UID: user.ID})
-
-	confGet := func() *conf.Unified { return &conf.Unified{} }
-	externalServices := db.ExternalServices()
-	repos := db.Repos()
-
-	// Create a user-owned external service and its repository
-	userExternalService := types.ExternalService{
-		Kind:            extsvc.KindGitHub,
-		DisplayName:     "Github - User-owned",
-		Config:          extsvc.NewUnencryptedConfig(`{"url": "https://github.com", "repositoryQuery": ["none"], "token": "abc", "authorization": {}}`),
-		NamespaceUserID: user.ID,
-	}
-	err = externalServices.Create(ctx, confGet, &userExternalService)
-	require.NoError(t, err)
-
-	userRepo := &types.Repo{
-		Name: "github.com/sourcegraph/user",
-		Sources: map[string]*types.SourceInfo{
-			userExternalService.URN(): {
-				ID:       userExternalService.URN(),
-				CloneURL: "git@github.com:sourcegraph/user.git",
-			},
-		},
-	}
-	err = repos.Create(ctx, userRepo)
-	require.NoError(t, err)
-
-	// Create a site-owned external service and its repository
-	siteExternalService := types.ExternalService{
-		Kind:        extsvc.KindGitHub,
-		DisplayName: "Github - Site-owned",
-		Config:      extsvc.NewUnencryptedConfig(`{"url": "https://github.com", "repositoryQuery": ["none"], "token": "abc", "authorization": {}}`),
-	}
-	err = externalServices.Create(ctx, confGet, &siteExternalService)
-	require.NoError(t, err)
-
-	siteRepo := &types.Repo{
-		Name: "github.com/sourcegraph/site",
-		Sources: map[string]*types.SourceInfo{
-			siteExternalService.URN(): {
-				ID:       siteExternalService.URN(),
-				CloneURL: "git@github.com:sourcegraph/site.git",
-			},
-		},
-	}
-	err = repos.Create(ctx, siteRepo)
-	require.NoError(t, err)
-
-	have, err := repos.ListMinimalRepos(ctx, ReposListOptions{UserID: user.ID})
-	require.NoError(t, err)
-
-	want := []types.MinimalRepo{
-		{ID: userRepo.ID, Name: userRepo.Name},
-	}
-	assert.Equal(t, want, have)
-}
-
-func TestRepos_ListMinimalRepos_orgID(t *testing.T) {
-	if testing.Short() {
-		t.Skip()
-	}
-
-	t.Parallel()
-	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
-	ctx := actor.WithInternalActor(context.Background())
-
-	// Create an org
-	displayName := "Acme Corp"
-	org, err := db.Orgs().Create(ctx, "acme", &displayName)
-	require.NoError(t, err)
-
-	now := time.Now()
-	confGet := func() *conf.Unified { return &conf.Unified{} }
-	externalServices := db.ExternalServices()
-	repos := db.Repos()
-
-	// Create an org-owned external service and its repository
-	orgExternalService := types.ExternalService{
-		Kind:           extsvc.KindGitHub,
-		DisplayName:    "Github - Org-owned",
-		Config:         extsvc.NewUnencryptedConfig(`{"url": "https://github.com", "repositoryQuery": ["none"], "token": "abc", "authorization": {}}`),
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		NamespaceOrgID: org.ID,
-	}
-	err = externalServices.Create(ctx, confGet, &orgExternalService)
-	require.NoError(t, err)
-
-	repo := &types.Repo{
-		Name: "github.com/sourcegraph/org",
-		Sources: map[string]*types.SourceInfo{
-			orgExternalService.URN(): {
-				ID:       orgExternalService.URN(),
-				CloneURL: "git@github.com:foo/bar.git",
-			},
-		},
-	}
-	err = repos.Create(ctx, repo)
-	require.NoError(t, err)
-
-	// Create a site-owned external service and its repository
-	siteExternalService := types.ExternalService{
-		Kind:        extsvc.KindGitHub,
-		DisplayName: "Github - Site-owned",
-		Config:      extsvc.NewUnencryptedConfig(`{"url": "https://github.com", "repositoryQuery": ["none"], "token": "abc", "authorization": {}}`),
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	err = externalServices.Create(ctx, confGet, &siteExternalService)
-	require.NoError(t, err)
-
-	siteRepo := &types.Repo{
-		Name: "github.com/sourcegraph/site",
-		Sources: map[string]*types.SourceInfo{
-			siteExternalService.URN(): {
-				ID:       siteExternalService.URN(),
-				CloneURL: "git@github.com:sourcegraph/site.git",
-			},
-		},
-	}
-	err = repos.Create(ctx, siteRepo)
-	require.NoError(t, err)
-
-	have, err := repos.ListMinimalRepos(ctx, ReposListOptions{OrgID: org.ID})
-	require.NoError(t, err)
-
-	want := []types.MinimalRepo{
-		{ID: repo.ID, Name: repo.Name},
-	}
-	assert.Equal(t, want, have)
-}
-
 func TestRepos_List_fork(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
@@ -643,7 +543,7 @@ func TestRepos_List_fork(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	mine := mustCreate(ctx, t, db, &types.Repo{Name: "a/r", Fork: false})
@@ -673,7 +573,7 @@ func TestRepos_List_FailedSync(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	assertCount := func(t *testing.T, opts ReposListOptions, want int) {
@@ -697,6 +597,37 @@ func TestRepos_List_FailedSync(t *testing.T) {
 	assertCount(t, ReposListOptions{}, 1)
 }
 
+func TestRepos_List_OnlyCorrupted(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+
+	t.Parallel()
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := actor.WithInternalActor(context.Background())
+
+	assertCount := func(t *testing.T, opts ReposListOptions, want int) {
+		t.Helper()
+		count, err := db.Repos().Count(ctx, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count != want {
+			t.Fatalf("Expected %d repos, got %d", want, count)
+		}
+	}
+
+	repo := mustCreate(ctx, t, db, &types.Repo{Name: "repo1"})
+	setGitserverRepoCloneStatus(t, db, repo.Name, types.CloneStatusCloned)
+	assertCount(t, ReposListOptions{}, 1)
+	assertCount(t, ReposListOptions{OnlyCorrupted: true}, 0)
+
+	logCorruption(t, db, repo.Name, shardID, "some corruption")
+	assertCount(t, ReposListOptions{OnlyCorrupted: true}, 1)
+	assertCount(t, ReposListOptions{}, 1)
+}
+
 func TestRepos_List_cloned(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
@@ -704,7 +635,7 @@ func TestRepos_List_cloned(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	var repos []*types.Repo
@@ -749,6 +680,53 @@ func TestRepos_List_cloned(t *testing.T) {
 	}
 }
 
+func TestRepos_List_indexed(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+
+	t.Parallel()
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := actor.WithInternalActor(context.Background())
+
+	var repos []*types.Repo
+	for _, data := range []struct {
+		repo    *types.Repo
+		indexed bool
+	}{
+		{repo: &types.Repo{Name: "repo-0"}, indexed: true},
+		{repo: &types.Repo{Name: "repo-1"}, indexed: false},
+	} {
+		repo := mustCreate(ctx, t, db, data.repo)
+		if data.indexed {
+			setZoektIndexed(t, db, repo.Name)
+		}
+		repos = append(repos, repo)
+	}
+
+	tests := []struct {
+		name string
+		opt  ReposListOptions
+		want []*types.Repo
+	}{
+		{"Default", ReposListOptions{}, repos},
+		{"OnlyIndexed", ReposListOptions{OnlyIndexed: true}, repos[0:1]},
+		{"NoIndexed", ReposListOptions{NoIndexed: true}, repos[1:2]},
+		{"NoIndexed && OnlyIndexed", ReposListOptions{NoIndexed: true, OnlyIndexed: true}, nil},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repos, err := db.Repos().List(ctx, test.opt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertJSONEqual(t, test.want, repos)
+		})
+	}
+}
+
 func TestRepos_List_LastChanged(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
@@ -756,7 +734,7 @@ func TestRepos_List_LastChanged(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	repos := db.Repos()
@@ -775,6 +753,29 @@ func TestRepos_List_LastChanged(t *testing.T) {
 	setGitserverRepoCloneStatus(t, db, r2.Name, types.CloneStatusCloned)
 	setGitserverRepoLastChanged(t, db, r2.Name, now)
 
+	// we create a repo that has recently had new page rank scores committed to the database
+	r3 := mustCreate(ctx, t, db, &types.Repo{Name: "ranked"})
+	setGitserverRepoCloneStatus(t, db, r3.Name, types.CloneStatusCloned)
+	setGitserverRepoLastChanged(t, db, r3.Name, now.Add(-time.Hour))
+	{
+		if _, err := db.Handle().ExecContext(ctx, `
+			INSERT INTO codeintel_path_ranks(graph_key, repository_id, updated_at, payload)
+			VALUES ('test', $1, NOW() + '1 day'::interval, '{}'::jsonb)
+		`,
+			r3.ID,
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := db.Handle().ExecContext(ctx, `
+			INSERT INTO codeintel_ranking_progress(graph_key, max_export_id, mappers_started_at, reducer_completed_at)
+			VALUES ('test', 1000, NOW(), $1)
+		`, now,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// Our test helpers don't do updated_at, so manually doing it.
 	_, err := db.Handle().ExecContext(ctx, "update repo set updated_at = $1", now.Add(-24*time.Hour))
 	if err != nil {
@@ -782,9 +783,9 @@ func TestRepos_List_LastChanged(t *testing.T) {
 	}
 
 	// will have update_at set to now, so should be included as often as new.
-	r3 := mustCreate(ctx, t, db, &types.Repo{Name: "newMeta"})
-	setGitserverRepoCloneStatus(t, db, r3.Name, types.CloneStatusCloned)
-	setGitserverRepoLastChanged(t, db, r3.Name, now.Add(-24*time.Hour))
+	r4 := mustCreate(ctx, t, db, &types.Repo{Name: "newMeta"})
+	setGitserverRepoCloneStatus(t, db, r4.Name, types.CloneStatusCloned)
+	setGitserverRepoLastChanged(t, db, r4.Name, now.Add(-24*time.Hour))
 	_, err = db.Handle().ExecContext(ctx, "update repo set updated_at = $1 where name = 'newMeta'", now)
 	if err != nil {
 		t.Fatal(err)
@@ -792,9 +793,9 @@ func TestRepos_List_LastChanged(t *testing.T) {
 
 	// we create two search contexts, with one being updated recently only
 	// including "newSearchContext".
-	r4 := mustCreate(ctx, t, db, &types.Repo{Name: "newSearchContext"})
-	setGitserverRepoCloneStatus(t, db, r4.Name, types.CloneStatusCloned)
-	setGitserverRepoLastChanged(t, db, r4.Name, now.Add(-24*time.Hour))
+	r5 := mustCreate(ctx, t, db, &types.Repo{Name: "newSearchContext"})
+	setGitserverRepoCloneStatus(t, db, r5.Name, types.CloneStatusCloned)
+	setGitserverRepoLastChanged(t, db, r5.Name, now.Add(-24*time.Hour))
 	{
 		mkSearchContext := func(name string, opts ReposListOptions) {
 			t.Helper()
@@ -829,15 +830,15 @@ func TestRepos_List_LastChanged(t *testing.T) {
 		Want           []string
 	}{{
 		Name: "not specified",
-		Want: []string{"old", "new", "newMeta", "newSearchContext"},
+		Want: []string{"old", "new", "ranked", "newMeta", "newSearchContext"},
 	}, {
 		Name:           "old",
 		MinLastChanged: now.Add(-24 * time.Hour),
-		Want:           []string{"old", "new", "newMeta", "newSearchContext"},
+		Want:           []string{"old", "new", "ranked", "newMeta", "newSearchContext"},
 	}, {
 		Name:           "new",
 		MinLastChanged: now.Add(-time.Minute),
-		Want:           []string{"new", "newMeta", "newSearchContext"},
+		Want:           []string{"new", "ranked", "newMeta", "newSearchContext"},
 	}, {
 		Name:           "none",
 		MinLastChanged: now.Add(time.Minute),
@@ -870,7 +871,7 @@ func TestRepos_List_ids(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	mine := types.Repos{mustCreate(ctx, t, db, typestest.MakeGithubRepo())}
@@ -907,7 +908,7 @@ func TestRepos_List_pagination(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	createdRepos := []*types.Repo{
@@ -956,7 +957,7 @@ func TestRepos_List_query1(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	createdRepos := []*types.Repo{
@@ -968,6 +969,12 @@ func TestRepos_List_query1(t *testing.T) {
 	for _, repo := range createdRepos {
 		createRepo(ctx, t, db, repo)
 	}
+
+	abcDefRepo, err := db.Repos().GetByName(ctx, "abc/def")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	tests := []struct {
 		query string
 		want  []api.RepoName
@@ -976,6 +983,10 @@ func TestRepos_List_query1(t *testing.T) {
 		{"ABC/DEF", []api.RepoName{"abc/def"}},
 		{"xyz", []api.RepoName{"github.com/abc/xyz"}},
 		{"mno/p", []api.RepoName{"jkl/mno/pqr"}},
+
+		// Test if we match by ID
+		{strconv.Itoa(int(abcDefRepo.ID)), []api.RepoName{"abc/def"}},
+		{string(relay.MarshalID("Repository", abcDefRepo.ID)), []api.RepoName{"abc/def"}},
 	}
 	for _, test := range tests {
 		repos, err := db.Repos().List(ctx, ReposListOptions{Query: test.query})
@@ -996,7 +1007,7 @@ func TestRepos_List_correct_ranking(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	createdRepos := []*types.Repo{
@@ -1031,6 +1042,11 @@ func TestRepos_List_correct_ranking(t *testing.T) {
 	}
 }
 
+type repoAndSize struct {
+	repo *types.Repo
+	size int64
+}
+
 // Test sort
 func TestRepos_List_sort(t *testing.T) {
 	if testing.Short() {
@@ -1039,20 +1055,20 @@ func TestRepos_List_sort(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
-	createdRepos := []*types.Repo{
-		{Name: "c/def"},
-		{Name: "def/mno"},
-		{Name: "b/def"},
-		{Name: "abc/m"},
-		{Name: "abc/def"},
-		{Name: "def/jkl"},
-		{Name: "def/ghi"},
+	reposAndSizes := []*repoAndSize{
+		{repo: &types.Repo{Name: "c/def"}, size: 20},
+		{repo: &types.Repo{Name: "def/mno"}, size: 30},
+		{repo: &types.Repo{Name: "b/def"}, size: 40},
+		{repo: &types.Repo{Name: "abc/m"}, size: 50},
+		{repo: &types.Repo{Name: "abc/def"}, size: 60},
+		{repo: &types.Repo{Name: "def/jkl"}, size: 70},
+		{repo: &types.Repo{Name: "def/ghi"}, size: 10},
 	}
-	for _, repo := range createdRepos {
-		createRepo(ctx, t, db, repo)
+	for _, repoAndSize := range reposAndSizes {
+		createRepoWithSize(ctx, t, db, repoAndSize.repo, repoAndSize.size)
 	}
 	tests := []struct {
 		query   string
@@ -1089,6 +1105,14 @@ func TestRepos_List_sort(t *testing.T) {
 			}},
 			want: []api.RepoName{"def/ghi", "def/jkl", "abc/def", "b/def", "def/mno", "c/def"},
 		},
+		{
+			query: "",
+			orderBy: RepoListOrderBy{{
+				Field:      RepoListSize,
+				Descending: false,
+			}},
+			want: []api.RepoName{"def/ghi", "c/def", "def/mno", "b/def", "abc/m", "abc/def", "def/jkl"},
+		},
 	}
 	for _, test := range tests {
 		repos, err := db.Repos().List(ctx, ReposListOptions{Query: test.query, OrderBy: test.orderBy})
@@ -1102,7 +1126,7 @@ func TestRepos_List_sort(t *testing.T) {
 }
 
 // TestRepos_List_patterns tests the behavior of Repos.List when called with
-// IncludePatterns and ExcludePattern.
+// IncludePaths and ExcludePaths.
 func TestRepos_List_patterns(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
@@ -1110,7 +1134,7 @@ func TestRepos_List_patterns(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	createdRepos := []*types.Repo{
@@ -1173,20 +1197,20 @@ func TestRepos_List_patterns(t *testing.T) {
 
 func TestRepos_List_queryAndPatternsMutuallyExclusive(t *testing.T) {
 	ctx := actor.WithInternalActor(context.Background())
-	wantErr := "Query and IncludePatterns/ExcludePattern options are mutually exclusive"
+	wantErr := "Query and IncludePaths/ExcludePaths options are mutually exclusive"
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 
-	t.Run("Query and IncludePatterns", func(t *testing.T) {
+	t.Run("Query and IncludePaths", func(t *testing.T) {
 		_, err := db.Repos().List(ctx, ReposListOptions{Query: "x", IncludePatterns: []string{"y"}})
 		if err == nil || !strings.Contains(err.Error(), wantErr) {
 			t.Fatalf("got error %v, want it to contain %q", err, wantErr)
 		}
 	})
 
-	t.Run("Query and ExcludePattern", func(t *testing.T) {
+	t.Run("Query and ExcludePaths", func(t *testing.T) {
 		_, err := db.Repos().List(ctx, ReposListOptions{Query: "x", ExcludePattern: "y"})
 		if err == nil || !strings.Contains(err.Error(), wantErr) {
 			t.Fatalf("got error %v, want it to contain %q", err, wantErr)
@@ -1201,7 +1225,7 @@ func TestRepos_List_useOr(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	archived := mustCreate(ctx, t, db, types.Repos{typestest.MakeGitlabRepo()}.With(func(r *types.Repo) { r.Archived = true })[0])
@@ -1241,7 +1265,7 @@ func TestRepos_List_externalServiceID(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	confGet := func() *conf.Unified {
@@ -1289,6 +1313,138 @@ func TestRepos_List_externalServiceID(t *testing.T) {
 	}
 }
 
+func TestRepos_List_ExternalServiceType(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+
+	t.Parallel()
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := actor.WithInternalActor(context.Background())
+
+	confGet := func() *conf.Unified {
+		return &conf.Unified{}
+	}
+
+	services := typestest.MakeExternalServices()
+	service1 := services[0]
+	service2 := services[1]
+	require.NotEqual(t, service1.Kind, service2.Kind)
+
+	if err := db.ExternalServices().Create(ctx, confGet, service1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ExternalServices().Create(ctx, confGet, service2); err != nil {
+		t.Fatal(err)
+	}
+
+	mine := types.Repos{typestest.MakeGithubRepo(service1)}
+	if err := db.Repos().Create(ctx, mine...); err != nil {
+		t.Fatal(err)
+	}
+
+	yours := types.Repos{typestest.MakeGitlabRepo(service2)}
+	if err := db.Repos().Create(ctx, yours...); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		opt  ReposListOptions
+		want []*types.Repo
+	}{
+		{"Some", ReposListOptions{ExternalServiceType: extsvc.KindToType(service1.Kind)}, mine},
+		{"Default", ReposListOptions{}, append(mine, yours...)},
+		{"NonExistant", ReposListOptions{ExternalServiceType: "unknown"}, nil},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repos, err := db.Repos().List(ctx, test.opt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertJSONEqual(t, test.want, repos)
+		})
+	}
+}
+
+func TestRepos_List_topics(t *testing.T) {
+	t.Parallel()
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := actor.WithInternalActor(context.Background())
+	confGet := func() *conf.Unified { return &conf.Unified{} }
+
+	services := typestest.MakeExternalServices()
+	githubService := services[0]
+	gitlabService := services[1]
+	if err := db.ExternalServices().Create(ctx, confGet, githubService); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ExternalServices().Create(ctx, confGet, gitlabService); err != nil {
+		t.Fatal(err)
+	}
+
+	setTopics := func(topics ...string) func(r *types.Repo) {
+		return func(r *types.Repo) {
+			if ghr, ok := r.Metadata.(*github.Repository); ok {
+				for _, topic := range topics {
+					ghr.RepositoryTopics.Nodes = append(ghr.RepositoryTopics.Nodes, github.RepositoryTopic{
+						Topic: github.Topic{Name: topic},
+					})
+					// In production, topics are only set on read. Here we add them manually to be
+					// able to compare them with the repos returned by the db.
+					r.Topics = append(r.Topics, topic)
+				}
+			}
+		}
+	}
+
+	ids := func(id int) func(r *types.Repo) {
+		return func(r *types.Repo) {
+			r.ExternalRepo.ID = strconv.Itoa(id)
+			r.Name = api.RepoName(strconv.Itoa(id))
+		}
+	}
+
+	r1 := typestest.MakeGithubRepo().With(ids(1), setTopics("topic1", "topic2"))
+	r2 := typestest.MakeGithubRepo().With(ids(2), setTopics("topic2", "topic3"))
+	r3 := typestest.MakeGithubRepo().With(ids(3), setTopics("topic1", "topic2", "topic3"))
+	r4 := typestest.MakeGitlabRepo().With(ids(4))
+	r5 := typestest.MakeGithubRepo().With(ids(5))
+	if err := db.Repos().Create(ctx, r1, r2, r3, r4, r5); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		opt  ReposListOptions
+		want []*types.Repo
+	}{
+		{"topic1", ReposListOptions{TopicFilters: []RepoTopicFilter{{Topic: "topic1"}}}, []*types.Repo{r1, r3}},
+		{"topic2", ReposListOptions{TopicFilters: []RepoTopicFilter{{Topic: "topic2"}}}, []*types.Repo{r1, r2, r3}},
+		{"topic3", ReposListOptions{TopicFilters: []RepoTopicFilter{{Topic: "topic3"}}}, []*types.Repo{r2, r3}},
+		{"not topic1", ReposListOptions{TopicFilters: []RepoTopicFilter{{Topic: "topic1", Negated: true}}}, []*types.Repo{r2, r4, r5}},
+		{
+			"topic3 not topic1",
+			ReposListOptions{TopicFilters: []RepoTopicFilter{{Topic: "topic3"}, {Topic: "topic1", Negated: true}}},
+			[]*types.Repo{r2},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repos, err := db.Repos().List(ctx, test.opt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			require.Equal(t, test.want, repos)
+		})
+	}
+}
+
 func TestRepos_ListMinimalRepos(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
@@ -1296,7 +1452,7 @@ func TestRepos_ListMinimalRepos(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	now := time.Now()
@@ -1340,7 +1496,7 @@ func TestRepos_ListMinimalRepos_fork(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	mine := repoNamesFromRepos([]*types.Repo{mustCreate(ctx, t, db, &types.Repo{Name: "a/r", Fork: false})})
@@ -1383,7 +1539,7 @@ func TestRepos_ListMinimalRepos_cloned(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	mine := repoNamesFromRepos([]*types.Repo{mustCreate(ctx, t, db, &types.Repo{Name: "a/r"})})
@@ -1420,7 +1576,7 @@ func TestRepos_ListMinimalRepos_ids(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	mine := types.Repos{mustCreate(ctx, t, db, typestest.MakeGithubRepo())}
@@ -1457,7 +1613,7 @@ func TestRepos_ListMinimalRepos_pagination(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	createdRepos := []*types.Repo{
@@ -1506,7 +1662,7 @@ func TestRepos_ListMinimalRepos_correctFiltering(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	createdRepos := []*types.Repo{
@@ -1546,7 +1702,7 @@ func TestRepos_ListMinimalRepos_query2(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	createdRepos := []*types.Repo{
@@ -1589,7 +1745,7 @@ func TestRepos_ListMinimalRepos_sort(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	createdRepos := []*types.Repo{
@@ -1652,7 +1808,7 @@ func TestRepos_ListMinimalRepos_sort(t *testing.T) {
 }
 
 // TestRepos_ListMinimalRepos_patterns tests the behavior of Repos.List when called with
-// IncludePatterns and ExcludePattern.
+// IncludePaths and ExcludePaths.
 func TestRepos_ListMinimalRepos_patterns(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
@@ -1660,7 +1816,7 @@ func TestRepos_ListMinimalRepos_patterns(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	createdRepos := []*types.Repo{
@@ -1711,19 +1867,19 @@ func TestRepos_ListMinimalRepos_patterns(t *testing.T) {
 
 func TestRepos_ListMinimalRepos_queryAndPatternsMutuallyExclusive(t *testing.T) {
 	ctx := actor.WithInternalActor(context.Background())
-	wantErr := "Query and IncludePatterns/ExcludePattern options are mutually exclusive"
+	wantErr := "Query and IncludePaths/ExcludePaths options are mutually exclusive"
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
-	t.Run("Query and IncludePatterns", func(t *testing.T) {
+	db := NewDB(logger, dbtest.NewDB(t))
+	t.Run("Query and IncludePaths", func(t *testing.T) {
 		_, err := db.Repos().ListMinimalRepos(ctx, ReposListOptions{Query: "x", IncludePatterns: []string{"y"}})
 		if err == nil || !strings.Contains(err.Error(), wantErr) {
 			t.Fatalf("got error %v, want it to contain %q", err, wantErr)
 		}
 	})
 
-	t.Run("Query and ExcludePattern", func(t *testing.T) {
+	t.Run("Query and ExcludePaths", func(t *testing.T) {
 		_, err := db.Repos().ListMinimalRepos(ctx, ReposListOptions{Query: "x", ExcludePattern: "y"})
 		if err == nil || !strings.Contains(err.Error(), wantErr) {
 			t.Fatalf("got error %v, want it to contain %q", err, wantErr)
@@ -1731,14 +1887,14 @@ func TestRepos_ListMinimalRepos_queryAndPatternsMutuallyExclusive(t *testing.T) 
 	})
 }
 
-func TestRepos_ListMinimalRepos_UserIDAndExternalServiceIDsMutuallyExclusive(t *testing.T) {
+func TestRepos_ListMinimalRepos_SearchContextIDAndExternalServiceIDsMutuallyExclusive(t *testing.T) {
 	ctx := actor.WithInternalActor(context.Background())
-	wantErr := "options ExternalServiceIDs, UserID and OrgID are mutually exclusive"
+	wantErr := "options ExternalServiceIDs and SearchContextID are mutually exclusive"
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
-	_, err := db.Repos().ListMinimalRepos(ctx, ReposListOptions{UserID: 1, ExternalServiceIDs: []int64{2}})
+	db := NewDB(logger, dbtest.NewDB(t))
+	_, err := db.Repos().ListMinimalRepos(ctx, ReposListOptions{SearchContextID: 1, ExternalServiceIDs: []int64{2}})
 	if err == nil || !strings.Contains(err.Error(), wantErr) {
 		t.Fatalf("got error %v, want it to contain %q", err, wantErr)
 	}
@@ -1751,7 +1907,7 @@ func TestRepos_ListMinimalRepos_useOr(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	archived := mustCreate(ctx, t, db, types.Repos{typestest.MakeGitlabRepo()}.With(func(r *types.Repo) { r.Archived = true })[0])
@@ -1791,7 +1947,7 @@ func TestRepos_ListMinimalRepos_externalServiceID(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	confGet := func() *conf.Unified {
@@ -1848,7 +2004,7 @@ func TestRepos_ListMinimalRepos_externalRepoContains(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	confGet := func() *conf.Unified {
@@ -2167,61 +2323,13 @@ func TestRepos_ListMinimalRepos_externalRepoContains(t *testing.T) {
 	}
 }
 
-func TestRepos_ListRepos_UserPublicRepos(t *testing.T) {
-	if testing.Short() {
-		t.Skip()
-	}
-
-	t.Parallel()
-	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
-	ctx := actor.WithInternalActor(context.Background())
-
-	user, repo := initUserAndRepo(t, ctx, db)
-	// create a repo we don't own
-	_, otherRepo := initUserAndRepo(t, ctx, db)
-
-	// register our interest in the other user's repo
-	err := db.UserPublicRepos().SetUserRepo(ctx, UserPublicRepo{UserID: user.ID, RepoURI: otherRepo.URI, RepoID: otherRepo.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	want := []types.MinimalRepo{
-		{ID: repo.ID, Name: repo.Name},
-	}
-
-	have, err := db.Repos().ListMinimalRepos(ctx, ReposListOptions{UserID: user.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if diff := cmp.Diff(have, want); diff != "" {
-		t.Fatalf(diff)
-	}
-
-	want = []types.MinimalRepo{
-		{ID: repo.ID, Name: repo.Name},
-		{ID: otherRepo.ID, Name: otherRepo.Name},
-	}
-
-	have, err = db.Repos().ListMinimalRepos(ctx, ReposListOptions{UserID: user.ID, IncludeUserPublicRepos: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if diff := cmp.Diff(have, want); diff != "" {
-		t.Fatalf(diff)
-	}
-}
-
 func TestGetFirstRepoNamesByCloneURL(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
 	}
 
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := actor.WithInternalActor(context.Background())
 
 	confGet := func() *conf.Unified {
@@ -2251,67 +2359,6 @@ func TestGetFirstRepoNamesByCloneURL(t *testing.T) {
 	if name != "github.com/foo/bar" {
 		t.Fatalf("Want %q, got %q", "github.com/foo/bar", name)
 	}
-}
-
-func initUserAndRepo(t *testing.T, ctx context.Context, db DB) (*types.User, *types.Repo) {
-	id := rand.String(8)
-	user, err := db.Users().Create(ctx, NewUser{
-		Email:                 id + "@example.com",
-		Username:              "u" + id,
-		Password:              "p",
-		EmailVerificationCode: "c",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx = actor.WithActor(ctx, &actor.Actor{
-		UID: user.ID,
-	})
-
-	now := time.Now()
-
-	// Create an external service
-	service := types.ExternalService{
-		Kind:            extsvc.KindGitHub,
-		DisplayName:     "Github - Test",
-		Config:          extsvc.NewUnencryptedConfig(`{"url": "https://github.com", "repositoryQuery": ["none"], "token": "abc", "authorization": {}}`),
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		NamespaceUserID: user.ID,
-	}
-	confGet := func() *conf.Unified {
-		return &conf.Unified{}
-	}
-	err = db.ExternalServices().Create(ctx, confGet, &service)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	repo := &types.Repo{
-		ExternalRepo: api.ExternalRepoSpec{
-			ID:          "r" + id,
-			ServiceType: extsvc.TypeGitHub,
-			ServiceID:   "https://github.com",
-		},
-		Name:        api.RepoName("github.com/sourcegraph/" + rand.String(10)),
-		Private:     false,
-		URI:         "uri",
-		Description: "description",
-		CreatedAt:   now,
-		UpdatedAt:   now,
-		Metadata:    new(github.Repository),
-		Sources: map[string]*types.SourceInfo{
-			service.URN(): {
-				ID:       service.URN(),
-				CloneURL: "git@github.com:foo/bar.git",
-			},
-		},
-	}
-	err = db.Repos().Create(ctx, repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return user, repo
 }
 
 func TestParseIncludePattern(t *testing.T) {
@@ -2393,8 +2440,8 @@ func TestParseIncludePattern(t *testing.T) {
 		`\s`: {regexp: `\s`},
 	}
 
-	tr, _ := trace.New(context.Background(), "", "")
-	defer tr.Finish()
+	tr, _ := trace.New(context.Background(), "")
+	defer tr.End()
 
 	for pattern, want := range tests {
 		exact, like, regexp, err := parseIncludePattern(pattern)
@@ -2440,7 +2487,7 @@ func TestRepos_Count(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 	ctx = actor.WithActor(ctx, &actor.Actor{UID: 1, Internal: true})
 
@@ -2493,7 +2540,7 @@ func TestRepos_Delete(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 	ctx = actor.WithActor(ctx, &actor.Actor{UID: 1, Internal: true})
 
@@ -2522,13 +2569,101 @@ func TestRepos_Delete(t *testing.T) {
 	}
 }
 
+func TestRepos_DeleteReconcilesName(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	t.Parallel()
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+	ctx = actor.WithActor(ctx, &actor.Actor{UID: 1, Internal: true})
+	repo := mustCreate(ctx, t, db, &types.Repo{Name: "myrepo"})
+	// Artificially set deleted_at but do not modify the name, which all delete code does.
+	repo.DeletedAt = time.Date(2020, 10, 12, 12, 0, 0, 0, time.UTC)
+	q := sqlf.Sprintf("UPDATE repo SET deleted_at = %s WHERE id = %s", repo.DeletedAt, repo.ID)
+	if _, err := db.ExecContext(ctx, q.Query(sqlf.PostgresBindVar), q.Args()...); err != nil {
+		t.Fatal(err)
+	}
+	// Delete repo
+	if err := db.Repos().Delete(ctx, repo.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Check if name is updated to DELETED-...
+	repos, err := db.Repos().List(ctx, ReposListOptions{
+		IDs:            []api.RepoID{repo.ID},
+		IncludeDeleted: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("want one repo with given ID, got %v", repos)
+	}
+	if got := string(repos[0].Name); !strings.HasPrefix(got, "DELETED-") {
+		t.Errorf("deleted repo name, got %q, want \"DELETED-..\"", got)
+	}
+	if got, want := repos[0].DeletedAt, repo.DeletedAt; got != want {
+		t.Errorf("deleted_at seems unexpectedly updated, got %s want %s", got, want)
+	}
+}
+
+func TestRepos_MultipleDeletesKeepTheSameTombstoneData(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	t.Parallel()
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+	ctx = actor.WithActor(ctx, &actor.Actor{UID: 1, Internal: true})
+	repo := mustCreate(ctx, t, db, &types.Repo{Name: "myrepo"})
+	// Delete once.
+	if err := db.Repos().Delete(ctx, repo.ID); err != nil {
+		t.Fatal(err)
+	}
+	repos, err := db.Repos().List(ctx, ReposListOptions{
+		IDs:            []api.RepoID{repo.ID},
+		IncludeDeleted: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("want one repo with given ID, got %v", repos)
+	}
+	afterFirstDelete := repos[0]
+	// Delete again
+	if err := db.Repos().Delete(ctx, repo.ID); err != nil {
+		t.Fatal(err)
+	}
+	repos, err = db.Repos().List(ctx, ReposListOptions{
+		IDs:            []api.RepoID{repo.ID},
+		IncludeDeleted: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("want one repo with given ID, got %v", repos)
+	}
+	afterSecondDelete := repos[0]
+	// Check if tombstone data - deleted_at and name are the same.
+	if got, want := afterSecondDelete.Name, afterFirstDelete.Name; got != want {
+		t.Errorf("name: got %q want %q", got, want)
+	}
+	if got, want := afterSecondDelete.DeletedAt, afterFirstDelete.DeletedAt; got != want {
+		t.Errorf("deleted_at, got %v want %v", got, want)
+	}
+}
+
 func TestRepos_Upsert(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 	ctx = actor.WithActor(ctx, &actor.Actor{UID: 1, Internal: true})
 
@@ -2612,7 +2747,7 @@ func TestRepos_UpsertForkAndArchivedFields(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 	ctx = actor.WithActor(ctx, &actor.Actor{UID: 1, Internal: true})
 
@@ -2647,7 +2782,7 @@ func TestRepos_Create(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 	ctx = actor.WithActor(ctx, &actor.Actor{UID: 1, Internal: true})
 
@@ -2691,133 +2826,13 @@ func TestRepos_Create(t *testing.T) {
 	})
 }
 
-func TestListIndexableRepos(t *testing.T) {
-	if testing.Short() {
-		t.Skip()
+func TestRepoNotFoundFulfillsNotFound(t *testing.T) {
+	err := &RepoNotFoundErr{
+		ID:         api.RepoID(1),
+		Name:       api.RepoName("github.com/foo/bar"),
+		HashedName: api.RepoHashedName("github.com/foo/bar"),
 	}
-
-	t.Parallel()
-	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
-
-	reposToAdd := []types.Repo{
-		{
-			ID:    api.RepoID(1),
-			Name:  "github.com/foo/bar1",
-			Stars: 20,
-		},
-		{
-			ID:    api.RepoID(2),
-			Name:  "github.com/baz/bar2",
-			Stars: 30,
-		},
-		{
-			ID:      api.RepoID(3),
-			Name:    "github.com/foo/bar3",
-			Private: true,
-			Stars:   0, // Will still be returned because it gets added by a user.
-		},
-		{
-			ID:    api.RepoID(4),
-			Name:  "github.com/foo/bar4",
-			Stars: 1, // Not enough stars
-		},
-		{
-			ID:    api.RepoID(5),
-			Name:  "github.com/foo/bar5",
-			Stars: 400,
-			Blocked: &types.RepoBlock{
-				At:     time.Now().UTC().Unix(),
-				Reason: "Failed to index too many times.",
-			},
-		},
-	}
-
-	ctx := context.Background()
-	// Add an external service
-	_, err := db.ExecContext(
-		ctx,
-		`INSERT INTO external_services(id, kind, display_name, config, cloud_default) VALUES (1, 'github', 'github', '{}', true);`,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO users(id, username) VALUES (1, 'bob')`); err != nil {
-		t.Fatal(err)
-	}
-	for _, r := range reposToAdd {
-		blocked, err := json.Marshal(r.Blocked)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = db.ExecContext(ctx,
-			`INSERT INTO repo(id, name, stars, private, blocked) VALUES ($1, $2, $3, $4, NULLIF($5, 'null'::jsonb))`,
-			r.ID, r.Name, r.Stars, r.Private, blocked,
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if r.Private {
-			if _, err := db.ExecContext(ctx, `INSERT INTO external_service_repos VALUES (1, $1, $2, 1);`, r.ID, r.Name); err != nil {
-				t.Fatal(err)
-			}
-		}
-
-		cloned := int(r.ID) > 1
-		cloneStatus := types.CloneStatusCloned
-		if !cloned {
-			cloneStatus = types.CloneStatusNotCloned
-		}
-		if _, err := db.ExecContext(ctx, `UPDATE gitserver_repos SET clone_status = $2, shard_id = 'test' WHERE repo_id = $1;`, r.ID, cloneStatus); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	for _, tc := range []struct {
-		name string
-		opts ListIndexableReposOptions
-		want []api.RepoID
-	}{
-		{
-			name: "no opts",
-			want: []api.RepoID{2, 1}, // No private repos returned by default
-		},
-		{
-			name: "only uncloned",
-			opts: ListIndexableReposOptions{CloneStatus: types.CloneStatusNotCloned},
-			want: []api.RepoID{1},
-		},
-		{
-			name: "include private",
-			opts: ListIndexableReposOptions{IncludePrivate: true},
-			want: []api.RepoID{2, 1, 3},
-		},
-		{
-			name: "limit 1",
-			opts: ListIndexableReposOptions{LimitOffset: &LimitOffset{Limit: 1}},
-			want: []api.RepoID{2},
-		},
-	} {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			repos, err := db.Repos().ListIndexableRepos(ctx, tc.opts)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			have := make([]api.RepoID, 0, len(repos))
-			for _, r := range repos {
-				have = append(have, r.ID)
-			}
-
-			if diff := cmp.Diff(tc.want, have, cmpopts.EquateEmpty()); diff != "" {
-				t.Errorf("mismatch (-want +have):\n%s", diff)
-			}
-		})
-	}
+	require.True(t, errcode.IsNotFound(err))
 }
 
 func TestRepoStore_Metadata(t *testing.T) {
@@ -2827,7 +2842,7 @@ func TestRepoStore_Metadata(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 
 	ctx := context.Background()
 
@@ -2900,7 +2915,90 @@ func TestRepoStore_Metadata(t *testing.T) {
 		},
 	}
 
-	md, err := r.Metadata(ctx, 1, 2)
+	md, err := r.Metadata(actor.WithInternalActor(ctx), 1, 2)
 	require.NoError(t, err)
 	require.ElementsMatch(t, expected, md)
+}
+
+func TestRepos_List_KVPFilter(t *testing.T) {
+	t.Parallel()
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := actor.WithInternalActor(context.Background())
+
+	mustCreateWithKVPs := func(t *testing.T, repo *types.Repo) *types.Repo {
+		t.Helper()
+		createRepo(ctx, t, db, repo)
+		newRepo, err := db.Repos().GetByName(ctx, repo.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for key, value := range repo.KeyValuePairs {
+			err = db.RepoKVPs().Create(ctx, newRepo.ID, KeyValuePair{key, value})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		newRepo, err = db.Repos().GetByName(ctx, repo.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return newRepo
+	}
+
+	repo1 := mustCreateWithKVPs(t, &types.Repo{
+		Name: "repo1",
+		KeyValuePairs: map[string]*string{
+			"key1A": pointers.Ptr("value1A"),
+			"key1B": pointers.Ptr("value1B"),
+		},
+	})
+	repo2 := mustCreateWithKVPs(t, &types.Repo{
+		Name: "repo2",
+		KeyValuePairs: map[string]*string{
+			"key2A": pointers.Ptr("value2A"),
+			"key2B": pointers.Ptr("value2B"),
+		},
+	})
+	repo3 := mustCreateWithKVPs(t, &types.Repo{
+		Name: "repo3",
+		KeyValuePairs: map[string]*string{
+			"key3A": pointers.Ptr("value3A"),
+			"key3B": pointers.Ptr("value3B"),
+		},
+	})
+	repo4 := mustCreateWithKVPs(t, &types.Repo{
+		Name: "repo4",
+		KeyValuePairs: map[string]*string{
+			"key4A": pointers.Ptr("value4A"),
+			"key4B": pointers.Ptr("value4B"),
+		},
+	})
+
+	for _, tt := range []struct {
+		name       string
+		kvpFilters []RepoKVPFilter
+		want       []*types.Repo
+	}{
+		{"no filters", []RepoKVPFilter{}, []*types.Repo{repo1, repo2, repo3, repo4}},
+		{"all", []RepoKVPFilter{{Key: ".*", KeyOnly: true}}, []*types.Repo{repo1, repo2, repo3, repo4}},
+		{"key and value matches all", []RepoKVPFilter{{Key: ".*", Value: pointers.Ptr(types.RegexpPattern(".*"))}}, []*types.Repo{repo1, repo2, repo3, repo4}},
+		{"negated all", []RepoKVPFilter{{Key: ".*", Value: pointers.Ptr(types.RegexpPattern(".*")), Negated: true}}, nil},
+		{"none", []RepoKVPFilter{{Key: "noexist", Value: pointers.Ptr(types.RegexpPattern("noexist"))}}, nil},
+		{"all (key)", []RepoKVPFilter{{Key: "key", KeyOnly: true}}, []*types.Repo{repo1, repo2, repo3, repo4}},
+		{"all (key\\d)", []RepoKVPFilter{{Key: "key\\d", KeyOnly: true}}, []*types.Repo{repo1, repo2, repo3, repo4}},
+		{"all (A$)", []RepoKVPFilter{{Key: "(?-i)A$", KeyOnly: true}}, []*types.Repo{repo1, repo2, repo3, repo4}},
+		{"all (^key)", []RepoKVPFilter{{Key: "^key", KeyOnly: true}}, []*types.Repo{repo1, repo2, repo3, repo4}},
+		{"evens (^key[24])", []RepoKVPFilter{{Key: "^key[24]", KeyOnly: true}}, []*types.Repo{repo2, repo4}},
+		{"evens (^key[24])", []RepoKVPFilter{{Key: "^key[24]", KeyOnly: true}}, []*types.Repo{repo2, repo4}},
+		{"even values (^value[24])", []RepoKVPFilter{{Key: ".*", Value: pointers.Ptr(types.RegexpPattern("^value[24]"))}}, []*types.Repo{repo2, repo4}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := db.Repos().List(ctx, ReposListOptions{KVPFilters: tt.kvpFilters})
+			if err != nil {
+				t.Fatal(err)
+			}
+			require.Equal(t, tt.want, got)
+		})
+	}
 }

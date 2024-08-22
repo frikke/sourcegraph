@@ -2,28 +2,30 @@ import React, { useMemo, useEffect } from 'react'
 
 import classNames from 'classnames'
 import { startCase } from 'lodash'
-import { RouteComponentProps } from 'react-router'
 
 import { useQuery } from '@sourcegraph/http-client'
-import { Card, H2, Text, LoadingSpinner, AnchorLink, H4, LineChart, Series } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Card, H2, Text, LoadingSpinner, AnchorLink, H4, LineChart, type Series } from '@sourcegraph/wildcard'
 
-import { SearchStatisticsResult, SearchStatisticsVariables } from '../../../graphql-operations'
-import { eventLogger } from '../../../tracking/eventLogger'
+import type { SearchStatisticsResult, SearchStatisticsVariables } from '../../../graphql-operations'
 import { AnalyticsPageTitle } from '../components/AnalyticsPageTitle'
 import { ChartContainer } from '../components/ChartContainer'
 import { HorizontalSelect } from '../components/HorizontalSelect'
-import { TimeSavedCalculatorGroup } from '../components/TimeSavedCalculatorGroup'
+import { TimeSavedCalculatorGroup, TimeSavedCalculatorGroupProps } from '../components/TimeSavedCalculatorGroup'
 import { ToggleSelect } from '../components/ToggleSelect'
-import { ValueLegendList, ValueLegendListProps } from '../components/ValueLegendList'
+import { ValueLegendList, type ValueLegendListProps } from '../components/ValueLegendList'
 import { useChartFilters } from '../useChartFilters'
-import { StandardDatum } from '../utils'
+import type { StandardDatum } from '../utils'
 
 import { SEARCH_STATISTICS } from './queries'
 
 import styles from './index.module.scss'
 
-export const AnalyticsSearchPage: React.FunctionComponent<RouteComponentProps<{}>> = () => {
-    const { dateRange, aggregation, grouping } = useChartFilters({ name: 'Search' })
+interface Props extends TelemetryV2Props {}
+
+export const AnalyticsSearchPage: React.FC<Props> = ({ telemetryRecorder }) => {
+    const { dateRange, aggregation, grouping } = useChartFilters({ name: 'Search', telemetryRecorder })
     const { data, error, loading } = useQuery<SearchStatisticsResult, SearchStatisticsVariables>(SEARCH_STATISTICS, {
         variables: {
             dateRange: dateRange.value,
@@ -31,8 +33,9 @@ export const AnalyticsSearchPage: React.FunctionComponent<RouteComponentProps<{}
         },
     })
     useEffect(() => {
-        eventLogger.logPageView('AdminAnalyticsSearch')
-    }, [])
+        EVENT_LOGGER.logPageView('AdminAnalyticsSearch')
+        telemetryRecorder.recordEvent('admin.analytics.search', 'view')
+    }, [telemetryRecorder])
     const [stats, legends] = useMemo(() => {
         if (!data) {
             return []
@@ -85,26 +88,26 @@ export const AnalyticsSearchPage: React.FunctionComponent<RouteComponentProps<{}
 
         const legends: ValueLegendListProps['items'] = [
             {
-                value: searches.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: searches.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description: aggregation.selected === 'count' ? 'Searches' : 'Users searched',
                 color: 'var(--cyan)',
                 tooltip: 'Any search conducted via the UI, API, or browser or IDE extensions.',
             },
             {
-                value: resultClicks.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: resultClicks.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description: aggregation.selected === 'count' ? 'Result clicks' : 'Users clicked results',
                 color: 'var(--purple)',
                 tooltip:
                     'This event is triggered when a user clicks a result, which may be a file, repository, diff, or commit. Note that at times, a user is able to find the answer to their query directly in search results, therefore fewer interactions may actually speak to higher relevancy and usefulness of search results.',
             },
             {
-                value: fileViews.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: fileViews.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description: aggregation.selected === 'count' ? 'File views' : 'Users viewed files',
                 color: 'var(--orange)',
                 tooltip: 'File views can be generated from a search result, or be linked to directly.',
             },
             {
-                value: codeCopied.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: codeCopied.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description: aggregation.selected === 'count' ? 'Copy/paste events' : 'Users copy/pasted code',
                 color: 'var(--body-color)',
                 position: 'right',
@@ -114,7 +117,7 @@ export const AnalyticsSearchPage: React.FunctionComponent<RouteComponentProps<{}
                         : 'The number users who copy/pasted code from search results.',
             },
             {
-                value: fileOpens.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: fileOpens.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description: aggregation.selected === 'count' ? 'File opens' : 'Users opened files',
                 color: 'var(--body-color)',
                 position: 'right',
@@ -127,7 +130,7 @@ export const AnalyticsSearchPage: React.FunctionComponent<RouteComponentProps<{}
         return [stats, legends]
     }, [data, aggregation.selected, dateRange.value])
 
-    const calculatorProps = useMemo(() => {
+    const calculatorProps: TimeSavedCalculatorGroupProps | undefined = useMemo(() => {
         if (!data) {
             return
         }
@@ -168,8 +171,9 @@ export const AnalyticsSearchPage: React.FunctionComponent<RouteComponentProps<{}
                     value: totalCount,
                 },
             ],
+            telemetryRecorder,
         }
-    }, [data, dateRange.value])
+    }, [data, dateRange.value, telemetryRecorder])
 
     if (error) {
         throw error
@@ -218,11 +222,11 @@ export const AnalyticsSearchPage: React.FunctionComponent<RouteComponentProps<{}
                         <Text as="li">
                             Promote the{' '}
                             <AnchorLink to="/help/integration/editor" target="_blank">
-                                IDE extension
+                                editor extension
                             </AnchorLink>{' '}
                             and{' '}
                             <AnchorLink to="/help/cli" target="_blank">
-                                SRC CLI
+                                src CLI
                             </AnchorLink>{' '}
                             to your users to allow them to search where they work.
                         </Text>

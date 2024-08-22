@@ -7,6 +7,7 @@ package router
 import (
 	"github.com/gorilla/mux"
 
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/app/ui/sveltekit"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/routevar"
 )
 
@@ -24,24 +25,20 @@ const (
 	SignIn             = "sign-in"
 	SignOut            = "sign-out"
 	SignUp             = "sign-up"
+	RequestAccess      = "request-access"
 	UnlockAccount      = "unlock-account"
-	Welcome            = "welcome"
+	UnlockUserAccount  = "unlock-user-account"
 	SiteInit           = "site-init"
 	VerifyEmail        = "verify-email"
 	ResetPasswordInit  = "reset-password.init"
 	ResetPasswordCode  = "reset-password.code"
 	CheckUsernameTaken = "check-username-taken"
 
-	RegistryExtensionBundle = "registry.extension.bundle"
-
 	UsageStatsDownload = "usage-stats.download"
 
 	OneClickExportArchive = "one-click-export.archive"
 
 	LatestPing = "pings.latest"
-
-	SetupGitHubAppCloud = "setup.github.app.cloud"
-	SetupGitHubApp      = "setup.github.app"
 
 	OldToolsRedirect = "old-tools-redirect"
 	OldTreeRedirect  = "old-tree-redirect"
@@ -74,18 +71,17 @@ func newRouter() *mux.Router {
 	base.Path("/-/logout").Methods("GET").Name(Logout)
 
 	base.Path("/-/sign-up").Methods("POST").Name(SignUp)
-	base.Path("/-/welcome").Methods("GET").Name(Welcome)
+	base.Path("/-/request-access").Methods("POST").Name(RequestAccess)
 	base.Path("/-/site-init").Methods("POST").Name(SiteInit)
 	base.Path("/-/verify-email").Methods("GET").Name(VerifyEmail)
 	base.Path("/-/sign-in").Methods("POST").Name(SignIn)
 	base.Path("/-/sign-out").Methods("GET").Name(SignOut)
 	base.Path("/-/unlock-account").Methods("POST").Name(UnlockAccount)
+	base.Path("/-/unlock-user-account").Methods("POST").Name(UnlockUserAccount)
 	base.Path("/-/reset-password-init").Methods("POST").Name(ResetPasswordInit)
 	base.Path("/-/reset-password-code").Methods("POST").Name(ResetPasswordCode)
 
 	base.Path("/-/check-username-taken/{username}").Methods("GET").Name(CheckUsernameTaken)
-
-	base.Path("/-/static/extension/{RegistryExtensionReleaseFilename}").Methods("GET").Name(RegistryExtensionBundle)
 
 	base.Path("/-/editor").Methods("GET").Name(Editor)
 
@@ -103,8 +99,10 @@ func newRouter() *mux.Router {
 
 	base.Path("/site-admin/pings/latest").Methods("GET").Name(LatestPing)
 
-	base.Path("/setup/github/app/cloud").Methods("GET").Name(SetupGitHubAppCloud)
-	base.Path("/setup/github/app").Methods("GET").Name(SetupGitHubApp)
+	// Make the abov paths known to the SvelteKit app
+	// (the repo route is ignored since it's basically catch-all;
+	//  it's also handled by ui/router.go)
+	sveltekit.RegisterSvelteKit(base, nil)
 
 	repoPath := `/` + routevar.Repo
 	repo := base.PathPrefix(repoPath + "/" + routevar.RepoPathDelim + "/").Subrouter()

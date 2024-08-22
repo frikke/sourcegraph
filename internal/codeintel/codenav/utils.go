@@ -7,14 +7,14 @@ import (
 	"strings"
 
 	"github.com/sourcegraph/sourcegraph/internal/codeintel/codenav/shared"
-	"github.com/sourcegraph/sourcegraph/internal/codeintel/types"
+	uploadsshared "github.com/sourcegraph/sourcegraph/internal/codeintel/uploads/shared"
 	"github.com/sourcegraph/sourcegraph/lib/codeintel/precise"
 )
 
 func monikersToString(vs []precise.QualifiedMonikerData) string {
 	strs := make([]string, 0, len(vs))
 	for _, v := range vs {
-		strs = append(strs, fmt.Sprintf("%s:%s:%s:%s", v.Kind, v.Scheme, v.Identifier, v.Version))
+		strs = append(strs, fmt.Sprintf("%s:%s:%s:%s:%s", v.Kind, v.Scheme, v.Manager, v.Identifier, v.Version))
 	}
 
 	return strings.Join(strs, ", ")
@@ -29,7 +29,7 @@ func sliceContains(slice []string, str string) bool {
 	return false
 }
 
-func uploadIDsToString(vs []types.Dump) string {
+func uploadIDsToString(vs []uploadsshared.CompletedUpload) string {
 	ids := make([]string, 0, len(vs))
 	for _, v := range vs {
 		ids = append(ids, strconv.Itoa(v.ID))
@@ -38,41 +38,7 @@ func uploadIDsToString(vs []types.Dump) string {
 	return strings.Join(ids, ", ")
 }
 
-// isSourceLocation returns true if the given location encloses the source position within one of the visible uploads.
-func isSourceLocation(visibleUploads []visibleUpload, location shared.Location) bool {
-	for i := range visibleUploads {
-		if location.DumpID == visibleUploads[i].Upload.ID && location.Path == visibleUploads[i].TargetPath {
-			if rangeContainsPosition(location.Range, visibleUploads[i].TargetPosition) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-// rangeContainsPosition returns true if the given range encloses the given position.
-func rangeContainsPosition(r types.Range, pos types.Position) bool {
-	if pos.Line < r.Start.Line {
-		return false
-	}
-
-	if pos.Line > r.End.Line {
-		return false
-	}
-
-	if pos.Line == r.Start.Line && pos.Character < r.Start.Character {
-		return false
-	}
-
-	if pos.Line == r.End.Line && pos.Character > r.End.Character {
-		return false
-	}
-
-	return true
-}
-
-func sortRanges(ranges []types.Range) []types.Range {
+func sortRanges(ranges []shared.Range) []shared.Range {
 	sort.Slice(ranges, func(i, j int) bool {
 		iStart := ranges[i].Start
 		jStart := ranges[j].Start
@@ -118,7 +84,7 @@ func sortRanges(ranges []types.Range) []types.Range {
 	return ranges
 }
 
-func dedupeRanges(ranges []types.Range) []types.Range {
+func dedupeRanges(ranges []shared.Range) []shared.Range {
 	if len(ranges) == 0 {
 		return ranges
 	}
@@ -130,4 +96,24 @@ func dedupeRanges(ranges []types.Range) []types.Range {
 		}
 	}
 	return dedup
+}
+
+type linemap struct {
+	positions []int
+}
+
+func newLinemap(source string) linemap {
+	// first line starts at offset 0
+	l := linemap{positions: []int{0}}
+	for i, char := range source {
+		if char == '\n' {
+			l.positions = append(l.positions, i+1)
+		}
+	}
+	// as we want the offset of the line _following_ a symbol's line,
+	// we need to add one extra here for when symbols exist on the final line
+	lastNewline := l.positions[len(l.positions)-1]
+	lenToEnd := len(source[lastNewline:])
+	l.positions = append(l.positions, lastNewline+lenToEnd+1)
+	return l
 }

@@ -1,5 +1,10 @@
-.cancel-button {
-    margin-right: 0.5rem;
-    justify-content: flex-end;
-    align-self: flex-start;
+.external-service-page {
+    // hide cursor and bracket match in monaco editor
+    div[data-editor='monaco'] {
+        :global(.cursors-layer),
+        canvas,
+        :global(.cdr.bracket-match) {
+            display: none;
+        }
+    }
 }

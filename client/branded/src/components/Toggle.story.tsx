@@ -1,10 +1,10 @@
 import { useState } from 'react'
 
 import { action } from '@storybook/addon-actions'
-import { DecoratorFn, Meta, Story } from '@storybook/react'
+import type { Meta, StoryFn } from '@storybook/react'
 
-import webStyles from '@sourcegraph/web/src/SourcegraphWebApp.scss'
 import { Label } from '@sourcegraph/wildcard'
+import { BrandedStory } from '@sourcegraph/wildcard/src/stories'
 
 import { Toggle } from './Toggle'
 
@@ -21,20 +21,14 @@ const ToggleExample: typeof Toggle = ({ value, disabled, onToggle }) => (
 )
 const onToggle = action('onToggle')
 
-const decorator: DecoratorFn = story => (
-    <>
-        <div>{story()}</div>
-        <style>{webStyles}</style>
-    </>
-)
 const config: Meta = {
     title: 'branded/Toggle',
-    decorators: [decorator],
+    decorators: [story => <BrandedStory>{() => <div className="container mt-3 pb-3">{story()}</div>}</BrandedStory>],
 }
 
 export default config
 
-export const Interactive: Story = () => {
+export const Interactive: StoryFn = () => {
     const [value, setValue] = useState(false)
 
     const onToggle = (value: boolean) => setValue(value)
@@ -42,13 +36,7 @@ export const Interactive: Story = () => {
     return <ToggleExample value={value} onToggle={onToggle} />
 }
 
-Interactive.parameters = {
-    chromatic: {
-        disable: true,
-    },
-}
-
-export const Variants: Story = () => (
+export const Variants: StoryFn = () => (
     <>
         <ToggleExample value={true} onToggle={onToggle} />
         <ToggleExample value={false} onToggle={onToggle} />

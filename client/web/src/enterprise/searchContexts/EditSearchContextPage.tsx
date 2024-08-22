@@ -1,24 +1,23 @@
-import React, { useCallback, useMemo } from 'react'
+import React, { useCallback, useEffect, useMemo } from 'react'
 
 import { mdiMagnify } from '@mdi/js'
-import { RouteComponentProps } from 'react-router'
-import { Observable, of, throwError } from 'rxjs'
+import { useParams } from 'react-router-dom'
+import { type Observable, of, throwError } from 'rxjs'
 import { catchError, startWith, switchMap } from 'rxjs/operators'
 
 import { asError, isErrorLike } from '@sourcegraph/common'
-import { SearchContextProps } from '@sourcegraph/search'
-import {
+import type {
     Scalars,
     SearchContextEditInput,
+    SearchContextFields,
     SearchContextRepositoryRevisionsInput,
 } from '@sourcegraph/shared/src/graphql-operations'
-import { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
-import { ISearchContext } from '@sourcegraph/shared/src/schema'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
-import { PageHeader, LoadingSpinner, useObservable, Alert } from '@sourcegraph/wildcard'
+import type { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
+import type { SearchContextProps } from '@sourcegraph/shared/src/search'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { Alert, LoadingSpinner, PageHeader, useObservable } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../auth'
+import type { AuthenticatedUser } from '../../auth'
 import { withAuthenticatedUser } from '../../auth/withAuthenticatedUser'
 import { Page } from '../../components/Page'
 import { PageTitle } from '../../components/PageTitle'
@@ -26,30 +25,35 @@ import { PageTitle } from '../../components/PageTitle'
 import { SearchContextForm } from './SearchContextForm'
 
 export interface EditSearchContextPageProps
-    extends RouteComponentProps<{ spec: Scalars['ID'] }>,
-        ThemeProps,
-        TelemetryProps,
+    extends TelemetryProps,
         Pick<SearchContextProps, 'updateSearchContext' | 'fetchSearchContextBySpec' | 'deleteSearchContext'>,
-        PlatformContextProps<'requestGraphQL'> {
+        PlatformContextProps<'requestGraphQL' | 'telemetryRecorder'> {
     authenticatedUser: AuthenticatedUser
     isSourcegraphDotCom: boolean
 }
 
-export const AuthenticatedEditSearchContextPage: React.FunctionComponent<
-    React.PropsWithChildren<EditSearchContextPageProps>
-> = props => {
+export const AuthenticatedEditSearchContextPage: React.FunctionComponent<EditSearchContextPageProps> = props => {
     const LOADING = 'loading' as const
 
-    const { match, updateSearchContext, fetchSearchContextBySpec, platformContext } = props
+    const params = useParams()
+    const spec: string = params.spec ? `${params.specOrOrg}/${params.spec}` : params.specOrOrg!
+
+    const { updateSearchContext, fetchSearchContextBySpec, platformContext } = props
+
+    useEffect(() => {
+        platformContext.telemetryRecorder.recordEvent('searchContext.edit', 'view')
+    }, [platformContext.telemetryRecorder])
+
     const onSubmit = useCallback(
         (
             id: Scalars['ID'] | undefined,
             searchContext: SearchContextEditInput,
             repositories: SearchContextRepositoryRevisionsInput[]
-        ): Observable<ISearchContext> => {
+        ): Observable<SearchContextFields> => {
             if (!id) {
-                return throwError(new Error('Cannot update search context with undefined ID'))
+                return throwError(() => new Error('Cannot update search context with undefined ID'))
             }
+            platformContext.telemetryRecorder.recordEvent('searchContext', 'update')
             return updateSearchContext({ id, searchContext, repositories }, platformContext)
         },
         [updateSearchContext, platformContext]
@@ -58,17 +62,19 @@ export const AuthenticatedEditSearchContextPage: React.FunctionComponent<
     const searchContextOrError = useObservable(
         useMemo(
             () =>
-                fetchSearchContextBySpec(match.params.spec, platformContext).pipe(
+                fetchSearchContextBySpec(spec, platformContext).pipe(
                     switchMap(searchContext => {
                         if (!searchContext.viewerCanManage) {
-                            return throwError(new Error('You do not have sufficient permissions to edit this context.'))
+                            return throwError(
+                                () => new Error('You do not have sufficient permissions to edit this context.')
+                            )
                         }
                         return of(searchContext)
                     }),
                     startWith(LOADING),
                     catchError(error => [asError(error)])
                 ),
-            [match.params.spec, fetchSearchContextBySpec, platformContext]
+            [spec, fetchSearchContextBySpec, platformContext]
         )
     )
 

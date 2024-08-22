@@ -5,17 +5,17 @@ import React, { useMemo } from 'react'
 import { VSCodeProgressRing } from '@vscode/webview-ui-toolkit/react'
 import * as Comlink from 'comlink'
 import { createRoot } from 'react-dom/client'
-import { MemoryRouter } from 'react-router'
-import { CompatRouter } from 'react-router-dom-v5-compat'
+import { MemoryRouter } from 'react-router-dom'
 
 import { wrapRemoteObservable } from '@sourcegraph/shared/src/api/client/api/common'
 import { ShortcutProvider } from '@sourcegraph/shared/src/react-shortcuts'
+import { ThemeSetting, ThemeContext } from '@sourcegraph/shared/src/theme'
 import { AnchorLink, setLinkComponent, useObservable, WildcardThemeContext } from '@sourcegraph/wildcard'
 
-import { ExtensionCoreAPI } from '../../contract'
+import type { ExtensionCoreAPI } from '../../contract'
+import type { VsCodeApi } from '../../vsCodeApi'
 import { createEndpointsForWebToNode } from '../comlink/webviewEndpoint'
-import { createPlatformContext, WebviewPageContext, WebviewPageProps } from '../platform/context'
-import { adaptMonacoThemeToEditorTheme } from '../theming/monacoTheme'
+import { createPlatformContext, WebviewPageContext, type WebviewPageProps } from '../platform/context'
 import { adaptSourcegraphThemeToEditorTheme } from '../theming/sourcegraphTheme'
 
 import { searchPanelAPI } from './api'
@@ -24,7 +24,9 @@ import { SearchResultsView } from './SearchResultsView'
 
 import './index.module.scss'
 
-const vsCodeApi = window.acquireVsCodeApi()
+declare const acquireVsCodeApi: () => VsCodeApi
+
+const vsCodeApi = acquireVsCodeApi()
 
 const { proxy, expose } = createEndpointsForWebToNode(vsCodeApi)
 
@@ -33,7 +35,6 @@ Comlink.expose(searchPanelAPI, expose)
 export const extensionCoreAPI: Comlink.Remote<ExtensionCoreAPI> = Comlink.wrap(proxy)
 
 const themes = adaptSourcegraphThemeToEditorTheme()
-adaptMonacoThemeToEditorTheme()
 
 extensionCoreAPI.panelInitialized(document.documentElement.dataset.panelId!).catch(() => {
     // noop (TODO?)
@@ -44,16 +45,12 @@ const platformContext = createPlatformContext(extensionCoreAPI)
 setLinkComponent(AnchorLink)
 
 const Main: React.FC<React.PropsWithChildren<unknown>> = () => {
+    const theme = useObservable(themes)
     const state = useObservable(useMemo(() => wrapRemoteObservable(extensionCoreAPI.observeState()), []))
-
+    const instanceURL = useObservable(useMemo(() => wrapRemoteObservable(extensionCoreAPI.getInstanceURL()), []))
     const authenticatedUser = useObservable(
         useMemo(() => wrapRemoteObservable(extensionCoreAPI.getAuthenticatedUser()), [])
     )
-
-    const instanceURL = useObservable(useMemo(() => wrapRemoteObservable(extensionCoreAPI.getInstanceURL()), []))
-
-    const theme = useObservable(themes)
-
     const settingsCascade = useObservable(
         useMemo(() => wrapRemoteObservable(extensionCoreAPI.observeSourcegraphSettings()), [])
     )
@@ -70,6 +67,11 @@ const Main: React.FC<React.PropsWithChildren<unknown>> = () => {
         theme !== undefined &&
         settingsCascade !== undefined
 
+    const themeSetting = useMemo(
+        () => ({ themeSetting: theme === 'theme-light' ? ThemeSetting.Light : ThemeSetting.Dark }),
+        [theme]
+    )
+
     if (!initialized) {
         return <VSCodeProgressRing />
     }
@@ -77,7 +79,6 @@ const Main: React.FC<React.PropsWithChildren<unknown>> = () => {
     const webviewPageProps: WebviewPageProps = {
         extensionCoreAPI,
         platformContext,
-        theme,
         authenticatedUser,
         settingsCascade,
         instanceURL,
@@ -92,20 +93,24 @@ const Main: React.FC<React.PropsWithChildren<unknown>> = () => {
     if (state.context.submittedSearchQueryState === null) {
         return (
             <WebviewPageContext.Provider value={webviewPageProps}>
-                <SearchHomeView {...webviewPageProps} context={state.context} />
+                <ThemeContext.Provider value={themeSetting}>
+                    <SearchHomeView {...webviewPageProps} context={state.context} />
+                </ThemeContext.Provider>
             </WebviewPageContext.Provider>
         )
     }
 
     return (
         <WebviewPageContext.Provider value={webviewPageProps}>
-            <SearchResultsView
-                {...webviewPageProps}
-                context={{
-                    ...state.context,
-                    submittedSearchQueryState: state.context.submittedSearchQueryState,
-                }}
-            />
+            <ThemeContext.Provider value={themeSetting}>
+                <SearchResultsView
+                    {...webviewPageProps}
+                    context={{
+                        ...state.context,
+                        submittedSearchQueryState: state.context.submittedSearchQueryState,
+                    }}
+                />
+            </ThemeContext.Provider>
         </WebviewPageContext.Provider>
     )
 }
@@ -117,9 +122,7 @@ root.render(
         <WildcardThemeContext.Provider value={{ isBranded: true }}>
             {/* Required for shared components that depend on `location`. */}
             <MemoryRouter>
-                <CompatRouter>
-                    <Main />
-                </CompatRouter>
+                <Main />
             </MemoryRouter>
         </WildcardThemeContext.Provider>
     </ShortcutProvider>

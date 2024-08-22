@@ -1,22 +1,22 @@
 import React, { useCallback } from 'react'
 
-import { useHistory } from 'react-router'
-import { Observable } from 'rxjs'
+import { useNavigate } from 'react-router-dom'
+import type { Observable } from 'rxjs'
 import { mergeMap, startWith, tap, catchError } from 'rxjs/operators'
 
 import { asError, isErrorLike } from '@sourcegraph/common'
-import { SearchContextProps } from '@sourcegraph/search'
-import { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
-import { ISearchContext } from '@sourcegraph/shared/src/schema'
+import type { SearchContextFields } from '@sourcegraph/shared/src/graphql-operations'
+import type { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
+import type { SearchContextProps } from '@sourcegraph/shared/src/search'
 import { Button, LoadingSpinner, useEventObservable, Modal, Alert, H3, Text } from '@sourcegraph/wildcard'
 
 import { ALLOW_NAVIGATION } from '../../components/AwayPrompt'
 
 interface DeleteSearchContextModalProps
     extends Pick<SearchContextProps, 'deleteSearchContext'>,
-        PlatformContextProps<'requestGraphQL'> {
+        PlatformContextProps<'requestGraphQL' | 'telemetryRecorder'> {
     isOpen: boolean
-    searchContext: ISearchContext
+    searchContext: SearchContextFields
     toggleDeleteModal: () => void
 }
 
@@ -25,7 +25,7 @@ export const DeleteSearchContextModal: React.FunctionComponent<
 > = ({ isOpen, deleteSearchContext, toggleDeleteModal, searchContext, platformContext }) => {
     const LOADING = 'loading' as const
     const deleteLabelId = 'deleteSearchContextId'
-    const history = useHistory()
+    const navigate = useNavigate()
 
     const [onDelete, deleteCompletedOrError] = useEventObservable(
         useCallback(
@@ -34,14 +34,15 @@ export const DeleteSearchContextModal: React.FunctionComponent<
                     mergeMap(() =>
                         deleteSearchContext(searchContext.id, platformContext).pipe(
                             tap(() => {
-                                history.push('/contexts', ALLOW_NAVIGATION)
+                                platformContext.telemetryRecorder.recordEvent('searchContext', 'delete')
+                                navigate('/contexts', { state: ALLOW_NAVIGATION })
                             }),
                             startWith(LOADING),
                             catchError(error => [asError(error)])
                         )
                     )
                 ),
-            [deleteSearchContext, history, searchContext, platformContext]
+            [deleteSearchContext, navigate, searchContext, platformContext]
         )
     )
 

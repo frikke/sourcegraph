@@ -3,12 +3,13 @@ package conf
 import (
 	"context"
 	"math/rand"
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/sourcegraph/log"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/sourcegraph/sourcegraph/internal/api/internalapi"
 	"github.com/sourcegraph/sourcegraph/internal/conf/conftypes"
@@ -27,6 +28,9 @@ type client struct {
 	// should be closed when future queries to the client returns the most up to date
 	// configuration.
 	sourceUpdates <-chan chan struct{}
+
+	lastUpdateTimeMu sync.RWMutex
+	lastUpdateTime   time.Time
 }
 
 var _ conftypes.UnifiedQuerier = &client{}
@@ -46,7 +50,10 @@ func DefaultClient() *client {
 // MockClient returns a client in the same basic configuration as the DefaultClient, but is not limited to a global singleton.
 // This is useful to mock configuration in tests without race conditions modifying values when running tests in parallel.
 func MockClient() *client {
-	return &client{store: newStore()}
+	return &client{
+		store:          newStore(),
+		lastUpdateTime: time.Now(),
+	}
 }
 
 // Raw returns a copy of the raw configuration.
@@ -75,10 +82,6 @@ func Get() *Unified {
 
 func SiteConfig() schema.SiteConfiguration {
 	return Get().SiteConfiguration
-}
-
-func ServiceConnections() conftypes.ServiceConnections {
-	return Get().ServiceConnections()
 }
 
 // Raw returns a copy of the raw configuration.
@@ -116,6 +119,12 @@ func (c *client) ServiceConnections() conftypes.ServiceConnections {
 // Mock is a wrapper around client.Mock.
 func Mock(mockery *Unified) {
 	DefaultClient().Mock(mockery)
+}
+
+// MockAndNotifyWatchers sets up mock data and notifies all the watcher of the change.
+func MockAndNotifyWatchers(mockery *Unified) {
+	DefaultClient().Mock(mockery)
+	DefaultClient().notifyWatchers()
 }
 
 // Mock sets up mock data for the site configuration.
@@ -238,7 +247,7 @@ func (c *client) continuouslyUpdate(optOnlySetByTests *continuousUpdateOptions) 
 			// database in most cases, to avoid log spam when running sourcegraph/server for the
 			// first time.
 			delayBeforeUnreachableLog: 15 * time.Second,
-			logger:                    log.Scoped("conf.client", "configuration client"),
+			logger:                    log.Scoped("conf.client"),
 			sleepBetweenUpdates: func() {
 				jitter := time.Duration(rand.Int63n(5 * int64(time.Second)))
 				time.Sleep(jitter)
@@ -247,8 +256,10 @@ func (c *client) continuouslyUpdate(optOnlySetByTests *continuousUpdateOptions) 
 	}
 
 	isFrontendUnreachableError := func(err error) bool {
-		var e *net.OpError
-		return errors.As(err, &e) && e.Op == "dial"
+		// gRPC clients will return a status code of "Unavailable" if the server
+		// is unreachable. See https://grpc.github.io/grpc/core/md_doc_statuscodes.html
+		// for more information.
+		return status.Code(err) == codes.Unavailable
 	}
 
 	waitForSleep := func() <-chan struct{} {
@@ -264,7 +275,6 @@ func (c *client) continuouslyUpdate(optOnlySetByTests *continuousUpdateOptions) 
 	// error on this initial attempt.
 	_ = c.fetchAndUpdate(opts.logger)
 
-	start := time.Now()
 	for {
 		logger := opts.logger
 
@@ -286,13 +296,20 @@ func (c *client) continuouslyUpdate(optOnlySetByTests *continuousUpdateOptions) 
 			// Suppress log messages for errors caused by the frontend being unreachable until we've
 			// given the frontend enough time to initialize (in case other services start up before
 			// the frontend), to reduce log spam.
-			if time.Since(start) > opts.delayBeforeUnreachableLog || !isFrontendUnreachableError(err) {
+			c.lastUpdateTimeMu.RLock()
+			last := c.lastUpdateTime
+			c.lastUpdateTimeMu.RUnlock()
+
+			if time.Since(last) > opts.delayBeforeUnreachableLog || !isFrontendUnreachableError(err) {
 				logger.Error("received error during background config update", log.Error(err))
 			}
+
 		} else {
 			// We successfully fetched the config, we reset the timer to give
 			// frontend time if it needs to restart
-			start = time.Now()
+			c.lastUpdateTimeMu.Lock()
+			c.lastUpdateTime = time.Now()
+			c.lastUpdateTimeMu.Unlock()
 		}
 
 		// Indicate that we are done reading, if we were prompted to update by the updates
@@ -324,8 +341,13 @@ func (c *client) fetchAndUpdate(logger log.Logger) error {
 	}
 
 	if configChange.Changed {
-		logger.Info("config changed, notifying watchers",
-			log.Int("watchers", len(c.watchers)))
+		if configChange.Old == nil {
+			logger.Debug("config initialized",
+				log.Int("watchers", len(c.watchers)))
+		} else {
+			logger.Info("config changed, notifying watchers",
+				log.Int("watchers", len(c.watchers)))
+		}
 		c.notifyWatchers()
 	} else {
 		logger.Debug("no config changes detected")

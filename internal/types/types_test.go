@@ -1,19 +1,42 @@
 package types
 
 import (
-	"reflect"
+	"strconv"
 	"testing"
+
+	"github.com/sourcegraph/sourcegraph/internal/api"
 )
 
-// TestExternalServiceFields will fail if a new field is added to
-// ExternalService to ensure that we update ToAPIService
-func TestExternalServiceFields(t *testing.T) {
-	v := reflect.ValueOf(ExternalService{})
-	// If this test fails it means that fields have changed on types.ExternalService.
-	// Ensure that types.ExternalService and api.ExternalService are consistent and
-	// also that types.ExternalService.ToAPIService has been updated.
-	wantFieldCount := 15
-	if wantFieldCount != v.NumField() {
-		t.Fatalf("Expected %d fields, got %d. See comments in failing test", wantFieldCount, v.NumField())
+func TestRepos_NamesSummary(t *testing.T) {
+	var rps Repos
+
+	eid := func(id int) api.ExternalRepoSpec {
+		return api.ExternalRepoSpec{
+			ID:          strconv.Itoa(id),
+			ServiceType: "fake",
+			ServiceID:   "https://fake.com",
+		}
+	}
+
+	for i := range 5 {
+		rps = append(rps, &Repo{Name: "bar", ExternalRepo: eid(i)})
+	}
+
+	expected := "bar bar bar bar bar"
+	ns := rps.NamesSummary()
+	if ns != expected {
+		t.Errorf("expected %s, got %s", expected, ns)
+	}
+
+	rps = nil
+
+	for i := range 22 {
+		rps = append(rps, &Repo{Name: "b", ExternalRepo: eid(i)})
+	}
+
+	expected = "b b b b b b b b b b b b b b b b b b b b..."
+	ns = rps.NamesSummary()
+	if ns != expected {
+		t.Errorf("expected %s, got %s", expected, ns)
 	}
 }

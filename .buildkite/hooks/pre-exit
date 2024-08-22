@@ -6,8 +6,43 @@
 
 set -e # Not -u because $SOFT_FAIL_EXIT_CODES may not be bound
 
-if [[ "$BUILDKITE_PIPELINE_NAME" != "sourcegraph" ]]; then
+if [[ "$BUILDKITE_PIPELINE_NAME" != "sourcegraph" && "$BUILDKITE_PIPELINE_SLUG" != "aspect-experimental" ]]; then
   exit 0
+fi
+
+if [[ "$BUILDKITE_LABEL" == ":bazel::pipeline: Generate pipeline" ]]; then
+    exit 0
+fi
+
+# The bazel queue is running stateful agents, so we need to ensure we're cleaning after us.
+if [[ "$BUILDKITE_AGENT_META_DATA_QUEUE" == "bazel" || "$BUILDKITE_AGENT_META_DATA_QUEUE" == "aspect-default" ]]; then
+  # Ensure all test databases are wiped, in case a test process was interrupted.
+  # This might not be availbe on the Aspect agents so we export it for good measure
+  export PGUSER=postgres
+  for db in $(psql -c '\l' | grep "sourcegraph-" | cut -d '|' -f 1); do psql -c "drop database \"$db\""; done
+
+  # Remove any hanging containers and/or volumes to ensure the next tests are able to run.
+  if [[ $(docker ps -aq | wc -l) -gt 0 ]]; then
+    echo "~~~ :docker::broom: Removing docker containers..."
+    mapfile -t containers < <(docker ps -aq)
+    for c in "${containers[@]}"; do docker rm -f "$c"; done
+  fi
+  if [[ $(docker volume ls -q) -gt 0 ]]; then
+    docker volume rm "$(docker volume ls -q)"
+  fi
+
+  # If disk space is over %85, clean up the docker cache
+  volume="/dev/sda1"
+  threshold=85
+
+  # Get disk usage percentage for the volume
+  usage=$(df -h | grep "$volume" | awk '{print $5}' | cut -d'%' -f1)
+
+  # Compare disk usage with the threshold
+  if ((usage > threshold)); then
+    echo "~~~ Disk space on $volume is more than $threshold% full. Cleaning up docker cache."
+    docker system prune -f
+  fi
 fi
 
 if [ "$BUILDKITE_BRANCH" == "main" ]; then
@@ -26,14 +61,9 @@ if [ "$BUILDKITE_BRANCH" == "main" ]; then
       exit 0
     fi
   done
-
-  # Non-zero exit code and not a soft fail: upload the logs.
-  echo "--- Uploading build logs: this only runs if your build has already failed, check the logs above, NOT below!"
-  ./enterprise/dev/ci/scripts/upload-build-logs.sh
 fi
 
 # upload raw annotations as artifacts if they are available for easier access
 if [ -d "./annotations" ]; then
-    buildkite-agent artifact upload --job "$BUILDKITE_JOB_ID" --content-type "text/plain" "./annotations/*-annotation.md"
+  buildkite-agent artifact upload --job "$BUILDKITE_JOB_ID" --content-type "text/plain" "./annotations/*-annotation.md"
 fi
-

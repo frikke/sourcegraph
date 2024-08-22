@@ -1,5 +1,6 @@
-import { context, trace, Span, TimeInput } from '@opentelemetry/api'
+import { context, trace, type Span, type TimeInput } from '@opentelemetry/api'
 import { TRACE_PARENT_HEADER } from '@opentelemetry/core'
+import type { ReadableSpan } from '@opentelemetry/sdk-trace-base'
 
 /**
  * Parses `traceParent` - a meta property that comes from server.
@@ -36,8 +37,12 @@ export function addTimeEventsToSpan<T extends Record<string, TimeInput | undefin
     names: Extract<keyof T, string>[]
 ): void {
     for (const name of names) {
-        if (typeof timeEvents[name] !== 'undefined') {
+        if (timeEvents[name] !== undefined) {
             span.addEvent(name, timeEvents[name])
         }
     }
+}
+
+export function areOnTheSameTrace(a?: Span | ReadableSpan, b?: Span | ReadableSpan): boolean {
+    return a?.spanContext().traceId === b?.spanContext().traceId
 }

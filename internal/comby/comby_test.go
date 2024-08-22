@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -12,7 +11,10 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/hexops/autogold"
+	"github.com/hexops/autogold/v2"
+
+	"github.com/sourcegraph/log/logtest"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 func TestMatchesUnmarshalling(t *testing.T) {
@@ -53,7 +55,7 @@ func main() {
 	}
 
 	for _, test := range cases {
-		m, err := Matches(ctx, test.args)
+		m, err := Matches(ctx, logtest.Scoped(t), test.args)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -142,7 +144,7 @@ func Test_stdin(t *testing.T) {
 		return b.String()
 	}
 
-	autogold.Want("stdin", `{"uri":null,"diff":"--- /dev/null\n+++ /dev/null\n@@ -1,1 +1,1 @@\n-yes\n+no"}
+	autogold.Expect(`{"uri":null,"diff":"--- /dev/null\n+++ /dev/null\n@@ -1,1 +1,1 @@\n-yes\n+no"}
 `).
 		Equal(t, test(Args{
 			Input:           FileContent("yes\n"),
@@ -187,7 +189,7 @@ func TestReplacements(t *testing.T) {
 	}
 
 	for _, test := range cases {
-		r, err := Replacements(ctx, test.args)
+		r, err := Replacements(ctx, logtest.Scoped(t), test.args)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -244,10 +246,11 @@ func runWithoutPipes(ctx context.Context, args Args, b *bytes.Buffer) (err error
 		cmd.Stdin = bytes.NewReader(content)
 	}
 	cmd.Stdout = b
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
-	if err = StartAndWaitForCompletion(cmd); err != nil {
-		return err
+	if err := cmd.Run(); err != nil {
+		return errors.Wrapf(err, "failed with stdout %s", stderrBuf.String())
 	}
-
 	return nil
 }

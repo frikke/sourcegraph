@@ -1,6 +1,21 @@
 ---
 ignoreDisconnectedPageCheck: true
 ---
+<style>
+  .heading{
+    color:#fff;
+    display: inline-block;
+    font-size: 14px;
+    font-weight: bold;
+    letter-spacing: 0;
+    line-height: 30px;
+    margin: calc(1.5*var(--spacing)) 0 calc(.5*var(--spacing));
+    text-decoration: none;
+    text-transform: uppercase;
+    text-align: center;
+  }
+  .theme-light .heading{color: black;}
+</style>
 
 <!--
 
@@ -10,68 +25,21 @@ Keep it as a single list with at most 2 levels. (Anything else may not render co
 
 -->
 
-- [About](getting-started/index.md)
-  - [Product tour](getting-started/tour.md)
-  - [Personalization](getting-started/personalization/index.md)
-- [Code search](code_search/index.md)
-  - [Tutorials](code_search/tutorials/index.md)
-  - [How-to guides](code_search/how-to/index.md)
-  - [Explanations](code_search/explanations/index.md)
-  - [Reference](code_search/reference/index.md)
-- [Code navigation](code_navigation/index.md)
-  - [How-to guides](code_navigation/how-to/index.md)
-  - [Explanations](code_navigation/explanations/index.md)
-  - [Reference](code_navigation/references/index.md)
-- [Batch Changes](batch_changes/index.md)
-  - [Quickstart](batch_changes/quickstart.md)
-  - [Explanations](batch_changes/explanations/index.md)
-  - [Tutorials](batch_changes/tutorials/index.md)
-  - [How-to guides](batch_changes/how-tos/index.md)
-  - [References](batch_changes/references/index.md)
-- [Code Insights](code_insights/index.md)
-  - [Quickstart](code_insights/quickstart.md)
-  - [Explanations](code_insights/explanations/index.md)
-  - [How-to guides](code_insights/how-tos/index.md)
-  - [References](code_insights/references/index.md)
-- [Notebooks](notebooks/index.md)
-  - [Quickstart](notebooks/quickstart.md)
-- [Code monitoring](code_monitoring/index.md)
-  - [Quickstart](code_monitoring/quickstart.md)
-  - [Explanations](code_monitoring/explanations/index.md)
-  - [How-to guides](code_monitoring/how-tos/index.md)
-- [Integrations](integration/index.md)
-  - [Browser extension](integration/browser_extension/index.md)
-  - [Editors](integration/editor.md)
-  - [Browser search engine](integration/browser_extension/how-tos/browser_search_engine.md)
-- [Extensions](extensions/index.md)
-- [CLI](cli/index.md)
-  - [Quickstart](cli/quickstart.md)
-  - [Explanations](cli/explanations/index.md)
-  - [How-to guides](cli/how-tos/index.md)
-  - [References](cli/references/index.md)
-- [Adopting](adopt/index.md)
-- [Cloud](cloud/index.md)
-- [Administration](admin/index.md)
-  - [Deploy](admin/deploy/index.md)
-  - [Upgrade](admin/updates/index.md)
-  - [Configuration](admin/config/index.md)
-  - [Code hosts](admin/external_service/index.md)
-  - [User authentication](admin/auth/index.md)
-  - [Extension registry](admin/extensions/index.md)
-  - [Observability](admin/observability/index.md)
-  - [Analytics](admin/analytics.md)
-  - [FAQ](admin/faq.md)
-  - [Troubleshooting](admin/troubleshooting.md)
-  - [How-to guides](admin/how-to/index.md)
-  - [Pricing](admin/pricing.md)
-- [Development](dev/index.md)
+<p>⚠️ <b>You are browsing a trimmed down version of the docsite</b> which is available for the convenience of browsing automatically generated documentation.</p>
+<p>On <a href="https://docs.sourcegraph.com">docs.sourcegraph.com</a> the content is being served from the <a href="">v5.3.9104</a> branch which
+is the last point in time at which we had this content available, in order to maintain continuity until the legacy docsite is fully removed.</p>
+
+<h3 class="heading">CLI</h3>
+
+- [SRC-CLI References](cli/references/index.md)
+
+<h3 class="heading">Administration</h3>
+
+- [Observability](admin/observability/index.md)
+
+<h3 class="heading">Development</h3>
+
+- [Overview](dev/index.md)
   - [Setup](dev/setup/index.md)
-  - [How-to guides](dev/how-to/index.md)
-  - [Background information](dev/background-information/index.md)
-  - [Contributing](dev/contributing.md)
-- [Dotcom](dotcom/index.md)
-- <br/>
-- [★ Get Started](index.md)
-- [★ Search query syntax](code_search/reference/queries.md)
-- [★ Sourcegraph API](api/index.md)
-- [★ Changelog](CHANGELOG.md)
+- [How-to guides](dev/how-to/index.md)
+- [Contributing](dev/contributing.md)

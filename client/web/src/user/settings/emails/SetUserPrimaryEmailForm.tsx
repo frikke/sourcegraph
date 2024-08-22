@@ -1,24 +1,29 @@
-import React, { useState, FunctionComponent, useCallback } from 'react'
+import React, { useState, type FunctionComponent, useCallback } from 'react'
 
 import classNames from 'classnames'
+import { lastValueFrom } from 'rxjs'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { Form } from '@sourcegraph/branded/src/components/Form'
-import { asError, ErrorLike, isErrorLike } from '@sourcegraph/common'
+import { asError, type ErrorLike, isErrorLike } from '@sourcegraph/common'
 import { gql, dataOrThrowErrors } from '@sourcegraph/http-client'
-import { Select } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Select, ErrorAlert, Form } from '@sourcegraph/wildcard'
 
 import { requestGraphQL } from '../../../backend/graphql'
 import { LoaderButton } from '../../../components/LoaderButton'
-import { SetUserEmailPrimaryResult, SetUserEmailPrimaryVariables, UserEmailsResult } from '../../../graphql-operations'
-import { eventLogger } from '../../../tracking/eventLogger'
+import type {
+    SetUserEmailPrimaryResult,
+    SetUserEmailPrimaryVariables,
+    UserEmailsResult,
+    UserSettingsAreaUserFields,
+} from '../../../graphql-operations'
 
 import styles from './SetUserPrimaryEmailForm.module.scss'
 
 type UserEmail = (NonNullable<UserEmailsResult['node']> & { __typename: 'User' })['emails'][number]
 
-interface Props {
-    user: string
+interface Props extends TelemetryV2Props {
+    user: Pick<UserSettingsAreaUserFields, 'id' | 'scimControlled'>
     emails: UserEmail[]
     onDidSet: () => void
 
@@ -34,8 +39,10 @@ export const SetUserPrimaryEmailForm: FunctionComponent<React.PropsWithChildren<
     emails,
     onDidSet,
     className,
+    telemetryRecorder,
 }) => {
-    const [primaryEmail, setPrimaryEmail] = useState<string | undefined>(findPrimaryEmail(emails))
+    const currentPrimaryEmail = findPrimaryEmail(emails)
+    const [primaryEmail, setPrimaryEmail] = useState<string | undefined>(currentPrimaryEmail)
     const [statusOrError, setStatusOrError] = useState<Status>()
 
     // options should include all verified emails + a primary one
@@ -54,19 +61,22 @@ export const SetUserPrimaryEmailForm: FunctionComponent<React.PropsWithChildren<
 
             try {
                 dataOrThrowErrors(
-                    await requestGraphQL<SetUserEmailPrimaryResult, SetUserEmailPrimaryVariables>(
-                        gql`
-                            mutation SetUserEmailPrimary($user: ID!, $email: String!) {
-                                setUserEmailPrimary(user: $user, email: $email) {
-                                    alwaysNil
+                    await lastValueFrom(
+                        requestGraphQL<SetUserEmailPrimaryResult, SetUserEmailPrimaryVariables>(
+                            gql`
+                                mutation SetUserEmailPrimary($user: ID!, $email: String!) {
+                                    setUserEmailPrimary(user: $user, email: $email) {
+                                        alwaysNil
+                                    }
                                 }
-                            }
-                        `,
-                        { user, email: primaryEmail }
-                    ).toPromise()
+                            `,
+                            { user: user.id, email: primaryEmail }
+                        )
+                    )
                 )
 
-                eventLogger.log('UserEmailAddressSetAsPrimary')
+                EVENT_LOGGER.log('UserEmailAddressSetAsPrimary')
+                telemetryRecorder.recordEvent('settings.email', 'setAsPrimary')
                 setStatusOrError(undefined)
 
                 if (onDidSet) {
@@ -76,7 +86,7 @@ export const SetUserPrimaryEmailForm: FunctionComponent<React.PropsWithChildren<
                 setStatusOrError(asError(error))
             }
         },
-        [user, primaryEmail, onDidSet]
+        [user, primaryEmail, onDidSet, telemetryRecorder]
     )
 
     return (
@@ -93,8 +103,14 @@ export const SetUserPrimaryEmailForm: FunctionComponent<React.PropsWithChildren<
                             value={primaryEmail}
                             onChange={onPrimaryEmailSelect}
                             required={true}
-                            disabled={options.length === 1 || statusOrError === 'loading'}
+                            disabled={
+                                (options.length === 1 && !!currentPrimaryEmail) ||
+                                statusOrError === 'loading' ||
+                                user.scimControlled
+                            }
                         >
+                            {/* If no primary email is selected yet, we add an empty option to indicate nothing was selected. */}
+                            {!currentPrimaryEmail && <option key="" />}
                             {options.map(email => (
                                 <option key={email} value={email}>
                                     {email}
@@ -107,7 +123,14 @@ export const SetUserPrimaryEmailForm: FunctionComponent<React.PropsWithChildren<
                             loading={statusOrError === 'loading'}
                             label="Save"
                             type="submit"
-                            disabled={options.length === 1 || statusOrError === 'loading'}
+                            disabled={
+                                // In case no email is marked primary yet, and none
+                                // has been selected from the dropdown yet.
+                                !primaryEmail ||
+                                (options.length === 1 && !!currentPrimaryEmail) ||
+                                statusOrError === 'loading' ||
+                                user.scimControlled
+                            }
                             variant="primary"
                         />
                     </div>

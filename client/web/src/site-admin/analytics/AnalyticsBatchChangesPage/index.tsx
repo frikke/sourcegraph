@@ -1,25 +1,29 @@
 import React, { useMemo, useEffect } from 'react'
 
 import { startCase } from 'lodash'
-import { RouteComponentProps } from 'react-router'
 
 import { useQuery } from '@sourcegraph/http-client'
-import { Card, LoadingSpinner, H2, Text, LineChart, Series } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Card, LoadingSpinner, H2, Text, LineChart, type Series } from '@sourcegraph/wildcard'
 
-import { BatchChangesStatisticsResult, BatchChangesStatisticsVariables } from '../../../graphql-operations'
-import { eventLogger } from '../../../tracking/eventLogger'
+import type { BatchChangesStatisticsResult, BatchChangesStatisticsVariables } from '../../../graphql-operations'
 import { AnalyticsPageTitle } from '../components/AnalyticsPageTitle'
 import { ChartContainer } from '../components/ChartContainer'
 import { HorizontalSelect } from '../components/HorizontalSelect'
-import { TimeSavedCalculator } from '../components/TimeSavedCalculatorGroup'
-import { ValueLegendList, ValueLegendListProps } from '../components/ValueLegendList'
+import { TimeSavedCalculator, type TimeSavedCalculatorProps } from '../components/TimeSavedCalculatorGroup'
+import { ValueLegendList, type ValueLegendListProps } from '../components/ValueLegendList'
 import { useChartFilters } from '../useChartFilters'
-import { StandardDatum } from '../utils'
+import type { StandardDatum } from '../utils'
 
 import { BATCHCHANGES_STATISTICS } from './queries'
 
-export const AnalyticsBatchChangesPage: React.FunctionComponent<RouteComponentProps<{}>> = () => {
-    const { dateRange, grouping } = useChartFilters({ name: 'BatchChanges' })
+export const DEFAULT_MINS_SAVED_PER_CHANGESET = 15
+
+interface Props extends TelemetryV2Props {}
+
+export const AnalyticsBatchChangesPage: React.FunctionComponent<Props> = ({ telemetryRecorder }) => {
+    const { dateRange, grouping } = useChartFilters({ name: 'BatchChanges', telemetryRecorder })
     const { data, error, loading } = useQuery<BatchChangesStatisticsResult, BatchChangesStatisticsVariables>(
         BATCHCHANGES_STATISTICS,
         {
@@ -30,8 +34,9 @@ export const AnalyticsBatchChangesPage: React.FunctionComponent<RouteComponentPr
         }
     )
     useEffect(() => {
-        eventLogger.logPageView('AdminAnalyticsBatchChanges')
-    }, [])
+        EVENT_LOGGER.logPageView('AdminAnalyticsBatchChanges')
+        telemetryRecorder.recordEvent('admin.analytics.batchChanges', 'view')
+    }, [telemetryRecorder])
     const [stats, legends, calculatorProps] = useMemo(() => {
         if (!data) {
             return []
@@ -83,19 +88,21 @@ export const AnalyticsBatchChangesPage: React.FunctionComponent<RouteComponentPr
             },
         ]
 
-        const calculatorProps = {
+        const calculatorProps: TimeSavedCalculatorProps = {
             page: 'BatchChanges',
             dateRange: dateRange.value,
             label: 'Changesets merged',
             color: 'var(--cyan)',
             value: changesetsMerged.summary.totalCount,
-            minPerItem: 15,
+            defaultMinPerItem: DEFAULT_MINS_SAVED_PER_CHANGESET,
             description:
                 'Batch Changes automates opening changesets across many repositories and codehosts. It also significantly reduces the time required to manage cross-repository changes via tracking and management functions that are superior to custom solutions, spreadsheets and manually reaching out to developers.',
+            temporarySettingsKey: 'batches.minSavedPerChangeset',
+            telemetryRecorder,
         }
 
         return [stats, legends, calculatorProps]
-    }, [data, dateRange.value])
+    }, [data, dateRange.value, telemetryRecorder])
 
     if (error) {
         throw error

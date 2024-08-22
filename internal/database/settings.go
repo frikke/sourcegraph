@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/keegancsmith/sqlf"
-	"github.com/sourcegraph/jsonx"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
@@ -47,12 +46,7 @@ func (s *settingsStore) Transact(ctx context.Context) (SettingsStore, error) {
 }
 
 func (o *settingsStore) CreateIfUpToDate(ctx context.Context, subject api.SettingsSubject, lastID *int32, authorUserID *int32, contents string) (latestSetting *api.Settings, err error) {
-	// Validate JSON syntax before saving.
-	if _, errs := jsonx.Parse(contents, jsonx.ParseOptions{Comments: true, TrailingCommas: true}); len(errs) > 0 {
-		return nil, errors.Errorf("invalid settings JSON: %v", errs)
-	}
-
-	// Validate setting schema
+	// Validate settings for syntax and by the JSON Schema.
 	if problems := conf.ValidateSettings(contents); len(problems) > 0 {
 		return nil, errors.Errorf("invalid settings: %s", strings.Join(problems, ","))
 	}
@@ -155,11 +149,8 @@ func (o *settingsStore) GetLatestSchemaSettings(ctx context.Context, subject api
 // 🚨 SECURITY: This method does NOT verify the user is an admin. The caller is
 // responsible for ensuring this or that the response never makes it to a user.
 func (o *settingsStore) ListAll(ctx context.Context, impreciseSubstring string) (_ []*api.Settings, err error) {
-	tr, ctx := trace.New(ctx, "database.Settings.ListAll", "")
-	defer func() {
-		tr.SetError(err)
-		tr.Finish()
-	}()
+	tr, ctx := trace.New(ctx, "database.Settings.ListAll")
+	defer tr.EndWithErr(&err)
 
 	q := sqlf.Sprintf(`
 		WITH q AS (

@@ -1,37 +1,31 @@
-import { FC, useCallback, useEffect, useMemo } from 'react'
+import { type FC, useCallback, useEffect, useMemo } from 'react'
 
-import classNames from 'classnames'
-
-import { asError } from '@sourcegraph/common'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { useLocalStorage, Link, PageHeader, useObservable } from '@sourcegraph/wildcard'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { useLocalStorage, Link, PageHeader, useObservable, FORM_ERROR } from '@sourcegraph/wildcard'
 
 import { PageTitle } from '../../../../../../components/PageTitle'
 import { CodeInsightsIcon } from '../../../../../../insights/Icons'
-import {
-    CodeInsightCreationMode,
-    CodeInsightsCreationActions,
-    CodeInsightsPage,
-    FORM_ERROR,
-} from '../../../../components'
-import { MinimalLangStatsInsightData } from '../../../../core'
+import { CodeInsightCreationMode, CodeInsightsCreationActions, CodeInsightsPage } from '../../../../components'
+import type { MinimalLangStatsInsightData } from '../../../../core'
 import { useUiFeatures } from '../../../../hooks'
 import { CodeInsightTrackType } from '../../../../pings'
+import { V2InsightType } from '../../../../pings/types'
 
 import {
     LangStatsInsightCreationContent,
-    LangStatsInsightCreationContentProps,
+    type LangStatsInsightCreationContentProps,
 } from './components/LangStatsInsightCreationContent'
-import { LangStatsCreationFormFields } from './types'
+import type { LangStatsCreationFormFields } from './types'
 import { getSanitizedLangStatsInsight } from './utils/insight-sanitizer'
-
-import styles from './LangStatsInsightCreationPage.module.scss'
 
 export interface InsightCreateEvent {
     insight: MinimalLangStatsInsightData
 }
 
-export interface LangStatsInsightCreationPageProps extends TelemetryProps {
+export interface LangStatsInsightCreationPageProps extends TelemetryProps, TelemetryV2Props {
+    backUrl: string
+
     /**
      * Whenever the user submit form and clicks on save/submit button
      *
@@ -52,7 +46,8 @@ export interface LangStatsInsightCreationPageProps extends TelemetryProps {
 }
 
 export const LangStatsInsightCreationPage: FC<LangStatsInsightCreationPageProps> = props => {
-    const { telemetryService, onInsightCreateRequest, onCancel, onSuccessfulCreation } = props
+    const { backUrl, telemetryService, telemetryRecorder, onInsightCreateRequest, onCancel, onSuccessfulCreation } =
+        props
 
     const { licensed, insight } = useUiFeatures()
     const creationPermission = useObservable(useMemo(() => insight.getCreationPermissions(), [insight]))
@@ -68,49 +63,52 @@ export const LangStatsInsightCreationPage: FC<LangStatsInsightCreationPageProps>
 
     useEffect(() => {
         telemetryService.logViewEvent('CodeInsightsCodeStatsCreationPage')
-    }, [telemetryService])
+        telemetryRecorder.recordEvent('insights.create.codeStats', 'view')
+    }, [telemetryService, telemetryRecorder])
 
     const handleSubmit = useCallback<LangStatsInsightCreationContentProps['onSubmit']>(
         async values => {
-            try {
-                const insight = getSanitizedLangStatsInsight(values)
+            const insight = getSanitizedLangStatsInsight(values)
 
-                await onInsightCreateRequest({ insight })
+            await onInsightCreateRequest({ insight })
 
-                // Clear initial values if user successfully created search insight
-                setInitialFormValues(undefined)
-                telemetryService.log('CodeInsightsCodeStatsCreationPageSubmitClick')
-                telemetryService.log(
-                    'InsightAddition',
-                    { insightType: CodeInsightTrackType.LangStatsInsight },
-                    { insightType: CodeInsightTrackType.LangStatsInsight }
-                )
+            // Clear initial values if user successfully created search insight
+            setInitialFormValues(undefined)
+            telemetryRecorder.recordEvent('insights.create.codeStats', 'submit', {
+                metadata: { type: V2InsightType[CodeInsightTrackType.LangStatsInsight] },
+            })
+            telemetryService.log('CodeInsightsCodeStatsCreationPageSubmitClick')
+            telemetryService.log(
+                'InsightAddition',
+                { insightType: CodeInsightTrackType.LangStatsInsight },
+                { insightType: CodeInsightTrackType.LangStatsInsight }
+            )
 
-                onSuccessfulCreation()
-            } catch (error) {
-                return { [FORM_ERROR]: asError(error) }
-            }
-
-            return
+            onSuccessfulCreation()
         },
-        [onInsightCreateRequest, onSuccessfulCreation, setInitialFormValues, telemetryService]
+        [onInsightCreateRequest, onSuccessfulCreation, setInitialFormValues, telemetryService, telemetryRecorder]
     )
 
     const handleCancel = useCallback(() => {
         // Clear initial values if user successfully created search insight
         setInitialFormValues(undefined)
         telemetryService.log('CodeInsightsCodeStatsCreationPageCancelClick')
+        telemetryRecorder.recordEvent('insights.create.codeStats', 'cancel')
 
         onCancel()
-    }, [setInitialFormValues, telemetryService, onCancel])
+    }, [setInitialFormValues, telemetryService, telemetryRecorder, onCancel])
 
     return (
-        <CodeInsightsPage className={classNames(styles.creationPage, 'col-10')}>
-            <PageTitle title="Create insight - Code Insights" />
+        <CodeInsightsPage>
+            <PageTitle title="Create language usage insight - Code Insights" />
 
             <PageHeader
                 className="mb-5"
-                path={[{ icon: CodeInsightsIcon }, { text: 'Set up new language usage insight' }]}
+                path={[
+                    { icon: CodeInsightsIcon, to: '/insights', ariaLabel: 'Code insights dashboard page' },
+                    { text: 'Create', to: backUrl },
+                    { text: 'Language usage insight' },
+                ]}
                 description={
                     <span className="text-muted">
                         Shows language usage in your repository based on number of lines of code.{' '}

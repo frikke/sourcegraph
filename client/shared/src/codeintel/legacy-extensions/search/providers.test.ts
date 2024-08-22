@@ -1,16 +1,16 @@
-/* eslint-disable etc/no-deprecated */
 import * as assert from 'assert'
 
 import * as sinon from 'sinon'
+import { afterEach, beforeEach, describe, it } from 'vitest'
 
 import { createStubTextDocument } from '@sourcegraph/extension-api-stubs'
 
 import * as scip from '../../scip'
 import * as sourcegraph from '../api'
 import { cStyleComment } from '../language-specs/comments'
-import { LanguageSpec, Result } from '../language-specs/language-spec'
-import { Providers, SourcegraphProviders } from '../providers'
-import { API, SearchResult } from '../util/api'
+import type { LanguageSpec, Result } from '../language-specs/language-spec'
+import type { Providers, SourcegraphProviders } from '../providers'
+import { API, type SearchResult } from '../util/api'
 import { observableFromAsyncIterator } from '../util/ix'
 
 import { createProviders } from './providers'
@@ -138,9 +138,6 @@ describe('search providers', () => {
 
         const stubResolveRepo = sinon.stub(api, 'resolveRepo')
         stubResolveRepo.callsFake(repo => Promise.resolve({ name: repo, isFork, isArchived, id }))
-
-        const stubHasLocalCodeIntelField = sinon.stub(api, 'hasLocalCodeIntelField')
-        stubHasLocalCodeIntelField.callsFake(() => Promise.resolve(true))
 
         const stubFindSymbol = sinon.stub(api, 'findLocalSymbol')
         stubFindSymbol.callsFake(() => Promise.resolve(undefined))

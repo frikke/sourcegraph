@@ -1,13 +1,13 @@
-import { DecoratorFn, Meta, Story } from '@storybook/react'
+import type { Decorator, Meta, StoryFn } from '@storybook/react'
 import { of } from 'rxjs'
 import { MATCH_ANY_PARAMETERS, WildcardMockLink } from 'wildcard-mock-link'
 
 import { getDocumentNode } from '@sourcegraph/http-client'
-import { BatchSpecSource } from '@sourcegraph/shared/src/schema'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 import { MockedTestProvider } from '@sourcegraph/shared/src/testing/apollo'
 
 import { WebStory } from '../../../../../components/WebStory'
-import { BatchSpecWorkspaceResolutionState } from '../../../../../graphql-operations'
+import { BatchSpecSource, BatchSpecWorkspaceResolutionState } from '../../../../../graphql-operations'
 import { GET_BATCH_CHANGE_TO_EDIT, WORKSPACE_RESOLUTION_STATUS } from '../../../create/backend'
 import {
     mockBatchChange,
@@ -20,12 +20,12 @@ import { BatchSpecContextProvider } from '../../BatchSpecContext'
 import {
     BATCH_SPEC_WORKSPACE_BY_ID,
     FETCH_BATCH_SPEC_EXECUTION,
-    queryWorkspacesList as _queryWorkspacesList,
+    type queryWorkspacesList as _queryWorkspacesList,
 } from '../backend'
 
 import { ExecutionWorkspaces } from './ExecutionWorkspaces'
 
-const decorator: DecoratorFn = story => (
+const decorator: Decorator = story => (
     <div className="p-3 d-flex" style={{ height: '95vh', width: '100%' }}>
         {story()}
     </div>
@@ -74,33 +74,36 @@ const MOCKS = new WildcardMockLink([
 ])
 
 const queryWorkspacesList: typeof _queryWorkspacesList = () =>
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     of(mockWorkspaces(50).node.workspaceResolution!.workspaces)
 
 const queryEmptyFileDiffs = () => of({ totalCount: 0, pageInfo: { endCursor: null, hasNextPage: false }, nodes: [] })
 
-export const List: Story = () => (
+export const List: StoryFn = () => (
     <WebStory>
         {props => (
             <MockedTestProvider link={MOCKS}>
                 <BatchSpecContextProvider batchChange={mockBatchChange()} batchSpec={mockFullBatchSpec()}>
-                    <ExecutionWorkspaces queryWorkspacesList={queryWorkspacesList} {...props} />
+                    <ExecutionWorkspaces
+                        queryWorkspacesList={queryWorkspacesList}
+                        {...props}
+                        telemetryRecorder={noOpTelemetryRecorder}
+                    />
                 </BatchSpecContextProvider>
             </MockedTestProvider>
         )}
     </WebStory>
 )
 
-export const WorkspaceSelected: Story = () => (
-    <WebStory>
+export const WorkspaceSelected: StoryFn = () => (
+    <WebStory path="/:workspaceID" initialEntries={['/workspace2']}>
         {props => (
             <MockedTestProvider link={MOCKS}>
                 <BatchSpecContextProvider batchChange={mockBatchChange()} batchSpec={mockFullBatchSpec()}>
                     <ExecutionWorkspaces
                         {...props}
-                        selectedWorkspaceID="workspace2"
                         queryWorkspacesList={queryWorkspacesList}
                         queryChangesetSpecFileDiffs={queryEmptyFileDiffs}
+                        telemetryRecorder={noOpTelemetryRecorder}
                     />
                 </BatchSpecContextProvider>
             </MockedTestProvider>
@@ -110,8 +113,8 @@ export const WorkspaceSelected: Story = () => (
 
 WorkspaceSelected.storyName = 'with workspace selected'
 
-export const LocallyExecutedSpec: Story = () => (
-    <WebStory>
+export const LocallyExecutedSpec: StoryFn = () => (
+    <WebStory path="/:workspaceID" initialEntries={['/"spec1234"']}>
         {props => (
             <MockedTestProvider link={MOCKS}>
                 <BatchSpecContextProvider
@@ -121,8 +124,8 @@ export const LocallyExecutedSpec: Story = () => (
                     <div className="container">
                         <ExecutionWorkspaces
                             {...props}
-                            selectedWorkspaceID="spec1234"
                             queryChangesetSpecFileDiffs={queryEmptyFileDiffs}
+                            telemetryRecorder={noOpTelemetryRecorder}
                         />
                     </div>
                 </BatchSpecContextProvider>

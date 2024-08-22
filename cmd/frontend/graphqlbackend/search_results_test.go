@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	mockrequire "github.com/derision-test/go-mockgen/testutil/require"
+	mockrequire "github.com/derision-test/go-mockgen/v2/testutil/require"
 	"github.com/google/go-cmp/cmp"
 	"github.com/sourcegraph/log/logtest"
 	"github.com/sourcegraph/zoekt"
@@ -18,12 +18,17 @@ import (
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/authz"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/database/dbmocks"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc"
+	"github.com/sourcegraph/sourcegraph/internal/gitserver"
 	"github.com/sourcegraph/sourcegraph/internal/search"
 	searchbackend "github.com/sourcegraph/sourcegraph/internal/search/backend"
 	"github.com/sourcegraph/sourcegraph/internal/search/client"
+	"github.com/sourcegraph/sourcegraph/internal/search/job"
 	"github.com/sourcegraph/sourcegraph/internal/search/result"
 	"github.com/sourcegraph/sourcegraph/internal/search/streaming"
+	"github.com/sourcegraph/sourcegraph/internal/settings"
+	"github.com/sourcegraph/sourcegraph/internal/telemetry/telemetrytest"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/schema"
 )
@@ -36,10 +41,10 @@ func TestSearchResults(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	db := database.NewMockDB()
+	db := dbmocks.NewMockDB()
 
 	getResults := func(t *testing.T, query, version string) []string {
-		r, err := newSchemaResolver(db).Search(ctx, &SearchArgs{Query: query, Version: version})
+		r, err := newSchemaResolver(db, gitserver.NewTestClient(t), nil).Search(ctx, &SearchArgs{Query: query, Version: version})
 		require.Nil(t, err)
 
 		results, err := r.Results(ctx)
@@ -82,10 +87,10 @@ func TestSearchResults(t *testing.T) {
 	searchVersions := []string{"V1", "V2"}
 
 	t.Run("repo: only", func(t *testing.T) {
-		MockDecodedViewerFinalSettings = &schema.Settings{}
-		defer func() { MockDecodedViewerFinalSettings = nil }()
+		settings.MockCurrentUserFinal = &schema.Settings{}
+		defer func() { settings.MockCurrentUserFinal = nil }()
 
-		repos := database.NewMockRepoStore()
+		repos := dbmocks.NewMockRepoStore()
 		repos.ListMinimalReposFunc.SetDefaultHook(func(ctx context.Context, opt database.ReposListOptions) ([]types.MinimalRepo, error) {
 			require.Equal(t, []string{"r", "p"}, opt.IncludePatterns)
 			return []types.MinimalRepo{{ID: 1, Name: "repo"}}, nil
@@ -117,12 +122,11 @@ func TestSearchResolver_DynamicFilters(t *testing.T) {
 	}
 
 	tests := []testCase{
-
 		{
 			descr:         "single repo match",
 			searchResults: []result.Match{repoMatch},
 			expectedDynamicFilterStrsRegexp: map[string]int{
-				`repo:^testRepo$`: 1,
+				`type:repo`: 1,
 			},
 		},
 
@@ -132,6 +136,7 @@ func TestSearchResolver_DynamicFilters(t *testing.T) {
 			expectedDynamicFilterStrsRegexp: map[string]int{
 				`repo:^testRepo$`: 1,
 				`lang:markdown`:   1,
+				`type:path`:       1,
 			},
 		},
 
@@ -141,22 +146,25 @@ func TestSearchResolver_DynamicFilters(t *testing.T) {
 			expectedDynamicFilterStrsRegexp: map[string]int{
 				`repo:^testRepo$@develop3.0`: 1,
 				`lang:markdown`:              1,
+				`type:path`:                  1,
 			},
 		},
 		{
 			descr:         "file match from a language with two file extensions, using first extension",
-			searchResults: []result.Match{fileMatch("/testFile.ts")},
+			searchResults: []result.Match{fileMatch("/testFile.yml")},
 			expectedDynamicFilterStrsRegexp: map[string]int{
 				`repo:^testRepo$`: 1,
-				`lang:typescript`: 1,
+				`lang:yaml`:       1,
+				`type:path`:       1,
 			},
 		},
 		{
 			descr:         "file match from a language with two file extensions, using second extension",
-			searchResults: []result.Match{fileMatch("/testFile.tsx")},
+			searchResults: []result.Match{fileMatch("/testFile.yaml")},
 			expectedDynamicFilterStrsRegexp: map[string]int{
 				`repo:^testRepo$`: 1,
-				`lang:typescript`: 1,
+				`lang:yaml`:       1,
+				`type:path`:       1,
 			},
 		},
 		{
@@ -166,6 +174,7 @@ func TestSearchResolver_DynamicFilters(t *testing.T) {
 				`repo:^testRepo$`:          1,
 				`-file:(^|/)node_modules/`: 1,
 				`lang:markdown`:            1,
+				`type:path`:                1,
 			},
 		},
 		{
@@ -175,6 +184,7 @@ func TestSearchResolver_DynamicFilters(t *testing.T) {
 				`repo:^testRepo$`:          1,
 				`-file:(^|/)node_modules/`: 1,
 				`lang:markdown`:            1,
+				`type:path`:                1,
 			},
 		},
 		{
@@ -184,9 +194,10 @@ func TestSearchResolver_DynamicFilters(t *testing.T) {
 				fileMatch("/foo.go"),
 			},
 			expectedDynamicFilterStrsRegexp: map[string]int{
-				`repo:^testRepo$`:  2,
-				`-file:_test\.go$`: 1,
-				`lang:go`:          2,
+				`repo:^testRepo$`:   2,
+				`-file:_test\.\w+$`: 1,
+				`lang:go`:           2,
+				`type:path`:         2,
 			},
 		},
 
@@ -198,6 +209,7 @@ func TestSearchResolver_DynamicFilters(t *testing.T) {
 			expectedDynamicFilterStrsRegexp: map[string]int{
 				`repo:^testRepo$`: 1,
 				`lang:rust`:       1,
+				`type:path`:       1,
 			},
 		},
 
@@ -213,6 +225,7 @@ func TestSearchResolver_DynamicFilters(t *testing.T) {
 				`-file:\.min\.js$`: 1,
 				`-file:\.js\.map$`: 2,
 				`lang:javascript`:  1,
+				`type:path`:        3,
 			},
 		},
 
@@ -228,30 +241,27 @@ func TestSearchResolver_DynamicFilters(t *testing.T) {
 			expectedDynamicFilterStrsRegexp: map[string]int{
 				`repo:^testRepo$`:    1,
 				`lang:"ignore list"`: 1,
+				`type:path`:          1,
 			},
 		},
 	}
 
-	MockDecodedViewerFinalSettings = &schema.Settings{}
-	defer func() { MockDecodedViewerFinalSettings = nil }()
+	settings.MockCurrentUserFinal = &schema.Settings{}
+	defer func() { settings.MockCurrentUserFinal = nil }()
 
 	var expectedDynamicFilterStrs map[string]int
 	for _, test := range tests {
 		t.Run(test.descr, func(t *testing.T) {
-			for _, globbing := range []bool{true, false} {
-				globbing := globbing // avoid a reference to the loop variable
-				MockDecodedViewerFinalSettings.SearchGlobbing = &globbing
-				actualDynamicFilters := (&SearchResultsResolver{db: database.NewMockDB(), Matches: test.searchResults}).DynamicFilters(context.Background())
-				actualDynamicFilterStrs := make(map[string]int)
+			actualDynamicFilters := (&SearchResultsResolver{db: dbmocks.NewMockDB(), Matches: test.searchResults}).DynamicFilters(context.Background())
+			actualDynamicFilterStrs := make(map[string]int)
 
-				for _, filter := range actualDynamicFilters {
-					actualDynamicFilterStrs[filter.Value()] = int(filter.Count())
-				}
+			for _, filter := range actualDynamicFilters {
+				actualDynamicFilterStrs[filter.Value()] = int(filter.Count())
+			}
 
-				expectedDynamicFilterStrs = test.expectedDynamicFilterStrsRegexp
-				if diff := cmp.Diff(expectedDynamicFilterStrs, actualDynamicFilterStrs); diff != "" {
-					t.Errorf("mismatch (-want, +got):\n%s", diff)
-				}
+			expectedDynamicFilterStrs = test.expectedDynamicFilterStrsRegexp
+			if diff := cmp.Diff(expectedDynamicFilterStrs, actualDynamicFilterStrs); diff != "" {
+				t.Errorf("mismatch (-want, +got):\n%s", diff)
 			}
 		})
 	}
@@ -281,9 +291,9 @@ func TestSearchResultsHydration(t *testing.T) {
 		Fork:         false,
 	}
 
-	db := database.NewMockDB()
+	db := dbmocks.NewMockDB()
 
-	repos := database.NewMockRepoStore()
+	repos := dbmocks.NewMockRepoStore()
 	repos.GetFunc.SetDefaultReturn(hydratedRepo, nil)
 	repos.ListMinimalReposFunc.SetDefaultHook(func(ctx context.Context, opt database.ReposListOptions) ([]types.MinimalRepo, error) {
 		if opt.OnlyPrivate {
@@ -312,9 +322,9 @@ func TestSearchResultsHydration(t *testing.T) {
 		Checksum:     []byte{0, 1, 2},
 	}}
 
-	z := &searchbackend.FakeSearcher{
-		Repos:  []*zoekt.RepoListEntry{zoektRepo},
-		Result: &zoekt.SearchResult{Files: zoektFileMatches},
+	z := &searchbackend.FakeStreamer{
+		Repos:   []*zoekt.RepoListEntry{zoektRepo},
+		Results: []*zoekt.SearchResult{{Files: zoektFileMatches}},
 	}
 
 	// Act in a user context
@@ -323,7 +333,11 @@ func TestSearchResultsHydration(t *testing.T) {
 
 	query := `foobar index:only count:350`
 	literalPatternType := "literal"
-	cli := client.NewSearchClient(logtest.Scoped(t), db, z, nil)
+	cli := client.Mocked(job.RuntimeClients{
+		Logger: logtest.Scoped(t),
+		DB:     db,
+		Zoekt:  z,
+	})
 	searchInputs, err := cli.Plan(
 		ctx,
 		"V2",
@@ -331,8 +345,7 @@ func TestSearchResultsHydration(t *testing.T) {
 		query,
 		search.Precise,
 		search.Batch,
-		&schema.Settings{},
-		false,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -436,7 +449,7 @@ func TestSearchResultsResolver_ApproximateResultCount(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sr := &SearchResultsResolver{
-				db:          database.NewMockDB(),
+				db:          dbmocks.NewMockDB(),
 				Stats:       tt.fields.searchResultsCommon,
 				Matches:     tt.fields.results,
 				SearchAlert: tt.fields.alert,
@@ -509,7 +522,7 @@ func TestCompareSearchResults(t *testing.T) {
 }
 
 func TestEvaluateAnd(t *testing.T) {
-	db := database.NewMockDB()
+	db := dbmocks.NewMockDB()
 
 	tests := []struct {
 		name         string
@@ -539,14 +552,14 @@ func TestEvaluateAnd(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			zoektFileMatches := generateZoektMatches(tt.zoektMatches)
-			z := &searchbackend.FakeSearcher{
-				Repos:  zoektRepos,
-				Result: &zoekt.SearchResult{Files: zoektFileMatches, Stats: zoekt.Stats{FilesSkipped: tt.filesSkipped}},
+			z := &searchbackend.FakeStreamer{
+				Repos:   zoektRepos,
+				Results: []*zoekt.SearchResult{{Files: zoektFileMatches, Stats: zoekt.Stats{FilesSkipped: tt.filesSkipped}}},
 			}
 
 			ctx := context.Background()
 
-			repos := database.NewMockRepoStore()
+			repos := dbmocks.NewMockRepoStore()
 			repos.ListMinimalReposFunc.SetDefaultHook(func(ctx context.Context, opt database.ReposListOptions) ([]types.MinimalRepo, error) {
 				if len(opt.IncludePatterns) > 0 || len(opt.ExcludePattern) > 0 {
 					return nil, nil
@@ -561,7 +574,11 @@ func TestEvaluateAnd(t *testing.T) {
 			db.ReposFunc.SetDefaultReturn(repos)
 
 			literalPatternType := "literal"
-			cli := client.NewSearchClient(logtest.Scoped(t), db, z, nil)
+			cli := client.Mocked(job.RuntimeClients{
+				Logger: logtest.Scoped(t),
+				DB:     db,
+				Zoekt:  z,
+			})
 			searchInputs, err := cli.Plan(
 				context.Background(),
 				"V2",
@@ -569,8 +586,7 @@ func TestEvaluateAnd(t *testing.T) {
 				tt.query,
 				search.Precise,
 				search.Batch,
-				&schema.Settings{},
-				false,
+				nil,
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -634,17 +650,20 @@ func TestSubRepoFiltering(t *testing.T) {
 					}
 					return authz.Read, nil
 				})
+				checker.EnabledForRepoIDFunc.SetDefaultHook(func(context.Context, api.RepoID) (bool, error) {
+					return true, nil
+				})
 				return checker
 			},
 		},
 	}
 
 	zoektFileMatches := generateZoektMatches(3)
-	mockZoekt := &searchbackend.FakeSearcher{
+	mockZoekt := &searchbackend.FakeStreamer{
 		Repos: []*zoekt.RepoListEntry{},
-		Result: &zoekt.SearchResult{
+		Results: []*zoekt.SearchResult{{
 			Files: zoektFileMatches,
-		},
+		}},
 	}
 
 	for _, tt := range tts {
@@ -655,18 +674,28 @@ func TestSubRepoFiltering(t *testing.T) {
 				authz.DefaultSubRepoPermsChecker = tt.checker()
 			}
 
-			repos := database.NewMockRepoStore()
+			repos := dbmocks.NewMockRepoStore()
 			repos.ListMinimalReposFunc.SetDefaultReturn([]types.MinimalRepo{}, nil)
 			repos.CountFunc.SetDefaultReturn(0, nil)
 
-			db := database.NewMockDB()
+			gss := dbmocks.NewMockGlobalStateStore()
+			gss.GetFunc.SetDefaultReturn(database.GlobalState{SiteID: "a"}, nil)
+
+			db := dbmocks.NewMockDB()
+			db.GlobalStateFunc.SetDefaultReturn(gss)
 			db.ReposFunc.SetDefaultReturn(repos)
 			db.EventLogsFunc.SetDefaultHook(func() database.EventLogStore {
-				return database.NewMockEventLogStore()
+				return dbmocks.NewMockEventLogStore()
 			})
+			db.TelemetryEventsExportQueueFunc.SetDefaultReturn(
+				telemetrytest.NewMockEventsExportQueueStore())
 
 			literalPatternType := "literal"
-			cli := client.NewSearchClient(logtest.Scoped(t), db, mockZoekt, nil)
+			cli := client.Mocked(job.RuntimeClients{
+				Logger: logtest.Scoped(t),
+				DB:     db,
+				Zoekt:  mockZoekt,
+			})
 			searchInputs, err := cli.Plan(
 				context.Background(),
 				"V2",
@@ -674,8 +703,7 @@ func TestSubRepoFiltering(t *testing.T) {
 				tt.searchQuery,
 				search.Precise,
 				search.Batch,
-				&schema.Settings{},
-				false,
+				nil,
 			)
 			if err != nil {
 				t.Fatal(err)

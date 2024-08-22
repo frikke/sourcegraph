@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -163,12 +164,12 @@ func Squash(database db.Database, commit string, inContainer, runInTimescaleDBCo
 func selectNewRootMigration(database db.Database, ds *definition.Definitions, commit string) (definition.Definition, bool, error) {
 	migrationsDir := filepath.Join("migrations", database.Name)
 
-	output, err := run.GitCmd("ls-tree", "-r", "--name-only", commit, migrationsDir)
+	gitCmdOutput, err := run.GitCmd("ls-tree", "-r", "--name-only", commit, migrationsDir)
 	if err != nil {
 		return definition.Definition{}, false, err
 	}
 
-	versionsAtCommit := parseVersions(strings.Split(output, "\n"), migrationsDir)
+	versionsAtCommit := parseVersions(strings.Split(gitCmdOutput, "\n"), migrationsDir)
 
 	filteredDefinitions, err := ds.Filter(versionsAtCommit)
 	if err != nil {
@@ -264,7 +265,7 @@ func setupDatabaseForSquash(database db.Database, runInContainer, runInTimescale
 
 // runTargetedUpMigrations runs up migration targeting the given versions on the given database instance.
 func runTargetedUpMigrations(database db.Database, targetVersions []int, postgresDSN string) (err error) {
-	logger := log.Scoped("runTargetedUpMigrations", "")
+	logger := log.Scoped("runTargetedUpMigrations")
 
 	pending := std.Out.Pending(output.Line("", output.StylePending, "Migrating PostgreSQL schema..."))
 	defer func() {
@@ -277,8 +278,8 @@ func runTargetedUpMigrations(database db.Database, targetVersions []int, postgre
 
 	var dbs []*sql.DB
 	defer func() {
-		for _, db := range dbs {
-			_ = db.Close()
+		for _, dbHandle := range dbs {
+			_ = dbHandle.Close()
 		}
 	}()
 
@@ -293,10 +294,10 @@ func runTargetedUpMigrations(database db.Database, targetVersions []int, postgre
 		// in-use.
 		dbs = append(dbs, db)
 
-		return connections.NewStoreShim(store.NewWithDB(db, migrationsTable, store.NewOperations(&observation.TestContext)))
+		return connections.NewStoreShim(store.NewWithDB(&observation.TestContext, db, migrationsTable))
 	}
 
-	r, err := connections.RunnerFromDSNs(logger.IncreaseLevel("runner", "", log.LevelNone), dsns, "sg", storeFactory)
+	r, err := connections.RunnerFromDSNs(std.Out.Output, logger.IncreaseLevel("runner", "", log.LevelNone), dsns, "sg", storeFactory)
 	if err != nil {
 		return err
 	}
@@ -326,13 +327,13 @@ func setupLocalDatabase(databaseName string) (_ func(error) error, err error) {
 
 	createLocalDatabase := func() error {
 		cmd := exec.Command("createdb", databaseName)
-		_, err := run.InRoot(cmd)
+		_, err := run.InRoot(cmd, run.InRootArgs{})
 		return err
 	}
 
 	dropLocalDatabase := func() error {
 		cmd := exec.Command("dropdb", databaseName)
-		_, err := run.InRoot(cmd)
+		_, err := run.InRoot(cmd, run.InRootArgs{})
 		return err
 	}
 
@@ -423,7 +424,9 @@ func generateSquashedUpMigration(database db.Database, postgresDSN string, skipD
 
 	pgDump := func(args ...string) (string, error) {
 		cmd := exec.Command("pg_dump", append([]string{postgresDSN}, args...)...)
-		return run.InRoot(cmd)
+		var b bytes.Buffer
+		err := run.SplitOutputInRoot(cmd, &b, os.Stderr)
+		return b.String(), err
 	}
 
 	excludeTables := []string{
@@ -435,6 +438,7 @@ func generateSquashedUpMigration(database db.Database, postgresDSN string, skipD
 	args := []string{
 		"--schema-only",
 		"--no-owner",
+		"--verbose",
 	}
 	for _, tableName := range excludeTables {
 		args = append(args, "--exclude-table", tableName)
@@ -530,8 +534,8 @@ func removeAncestorsOf(database db.Database, ds *definition.Definitions, targetV
 	allDefinitions := ds.All()
 
 	allIDs := make([]int, 0, len(allDefinitions))
-	for _, definition := range allDefinitions {
-		allIDs = append(allIDs, definition.ID)
+	for _, def := range allDefinitions {
+		allIDs = append(allIDs, def.ID)
 	}
 
 	properDescendants, err := ds.Down(allIDs, []int{targetVersion})
@@ -540,16 +544,16 @@ func removeAncestorsOf(database db.Database, ds *definition.Definitions, targetV
 	}
 
 	keep := make(map[int]struct{}, len(properDescendants))
-	for _, definition := range properDescendants {
-		keep[definition.ID] = struct{}{}
+	for _, def := range properDescendants {
+		keep[def.ID] = struct{}{}
 	}
 
 	// Gather the set of filtered that are NOT a proper descendant of the given target version.
 	// This will leave us with the ancestors of the target version (including itself).
 	filteredIDs := make([]int, 0, len(allDefinitions))
-	for _, definition := range allDefinitions {
-		if _, ok := keep[definition.ID]; !ok {
-			filteredIDs = append(filteredIDs, definition.ID)
+	for _, def := range allDefinitions {
+		if _, ok := keep[def.ID]; !ok {
+			filteredIDs = append(filteredIDs, def.ID)
 		}
 	}
 

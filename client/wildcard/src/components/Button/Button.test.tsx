@@ -1,4 +1,6 @@
-import { renderWithBrandedContext } from '@sourcegraph/shared/src/testing'
+import { describe, expect, it } from 'vitest'
+
+import { renderWithBrandedContext } from '../../testing'
 
 import { Button } from './Button'
 import { BUTTON_VARIANTS, BUTTON_SIZES } from './constants'

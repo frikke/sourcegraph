@@ -1,29 +1,28 @@
-import { DecoratorFn, Meta, Story } from '@storybook/react'
+import type { Decorator, Meta, StoryFn } from '@storybook/react'
 import { subDays } from 'date-fns'
-import { NEVER, Observable, of } from 'rxjs'
+import { NEVER, type Observable, of } from 'rxjs'
 import sinon from 'sinon'
 
-import { IOrg, IRepository, ISearchContext } from '@sourcegraph/shared/src/schema'
+import type { SearchContextFields } from '@sourcegraph/shared/src/graphql-operations'
 import { NOOP_PLATFORM_CONTEXT } from '@sourcegraph/shared/src/testing/searchTestHelpers'
 
-import { AuthenticatedUser } from '../../auth'
+import type { AuthenticatedUser } from '../../auth'
 import { WebStory } from '../../components/WebStory'
+import type { OrgAreaOrganizationFields, RepositoryFields } from '../../graphql-operations'
 
 import { SearchContextForm } from './SearchContextForm'
 
-const decorator: DecoratorFn = story => <div className="p-3 container">{story()}</div>
+const decorator: Decorator = story => <div className="p-3 container">{story()}</div>
 
 const config: Meta = {
     title: 'web/enterprise/searchContexts/SearchContextForm',
     decorators: [decorator],
-    parameters: {
-        chromatic: { viewports: [1200], disableSnapshot: false },
-    },
+    parameters: {},
 }
 
 export default config
 
-const onSubmit = (): Observable<ISearchContext> =>
+const onSubmit = (): Observable<SearchContextFields> =>
     of({
         __typename: 'SearchContext',
         id: '1',
@@ -37,9 +36,11 @@ const onSubmit = (): Observable<ISearchContext> =>
         query: '',
         updatedAt: subDays(new Date(), 1).toISOString(),
         viewerCanManage: true,
+        viewerHasAsDefault: false,
+        viewerHasStarred: false,
     })
 
-const searchContextToEdit: ISearchContext = {
+const searchContextToEdit: SearchContextFields = {
     __typename: 'SearchContext',
     id: '1',
     spec: 'public-ctx',
@@ -53,17 +54,18 @@ const searchContextToEdit: ISearchContext = {
         {
             __typename: 'SearchContextRepositoryRevisions',
             revisions: ['HEAD'],
-            repository: { name: 'github.com/example/example' } as IRepository,
+            repository: { name: 'github.com/example/example' } as RepositoryFields,
         },
     ],
     updatedAt: subDays(new Date(), 1).toISOString(),
     viewerCanManage: true,
+    viewerHasAsDefault: false,
+    viewerHasStarred: false,
 }
 
 const authUser: AuthenticatedUser = {
     __typename: 'User',
     id: '0',
-    email: 'alice@sourcegraph.com',
     username: 'alice',
     avatarURL: null,
     session: { canSignOut: true },
@@ -75,19 +77,20 @@ const authUser: AuthenticatedUser = {
         nodes: [
             { id: '0', settingsURL: '#', name: 'ACME', displayName: 'Acme Corp' },
             { id: '1', settingsURL: '#', name: 'BETA', displayName: 'Beta Inc' },
-        ] as IOrg[],
+        ] as OrgAreaOrganizationFields[],
     },
-    tags: [],
     viewerCanAdminister: true,
+    hasVerifiedEmail: true,
     databaseID: 0,
     tosAccepted: true,
-    searchable: true,
-    emails: [],
+    emails: [{ email: 'alice@sourcegraph.com', isPrimary: true, verified: true }],
+    latestSettings: null,
+    permissions: { nodes: [] },
 }
 
 const deleteSearchContext = sinon.fake(() => NEVER)
 
-export const EmptyCreate: Story = () => (
+export const EmptyCreate: StoryFn = () => (
     <WebStory>
         {webProps => (
             <SearchContextForm
@@ -104,7 +107,7 @@ export const EmptyCreate: Story = () => (
 
 EmptyCreate.storyName = 'empty create'
 
-export const EditExisting: Story = () => (
+export const EditExisting: StoryFn = () => (
     <WebStory>
         {webProps => (
             <SearchContextForm

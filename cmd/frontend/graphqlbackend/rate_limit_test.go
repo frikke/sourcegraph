@@ -1,18 +1,16 @@
 package graphqlbackend
 
 import (
+	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/throttled/throttled/v2"
 	"github.com/throttled/throttled/v2/store/memstore"
 
 	"github.com/sourcegraph/log/logtest"
 
 	"github.com/sourcegraph/sourcegraph/internal/trace"
-	"github.com/sourcegraph/sourcegraph/schema"
 )
 
 func TestEstimateQueryCost(t *testing.T) {
@@ -32,8 +30,9 @@ query{
 }
 `,
 			want: QueryCost{
-				FieldCount: 2,
-				MaxDepth:   1,
+				FieldCount:       2,
+				UniqueFieldCount: 2,
+				MaxDepth:         1,
 			},
 		},
 		{
@@ -48,8 +47,9 @@ query SiteProductVersion {
             }
 `,
 			want: QueryCost{
-				FieldCount: 4,
-				MaxDepth:   2,
+				FieldCount:       4,
+				UniqueFieldCount: 4,
+				MaxDepth:         2,
 			},
 		},
 		{
@@ -66,35 +66,9 @@ query{
 }
 `,
 			want: QueryCost{
-				FieldCount: 22,
-				MaxDepth:   3,
-			},
-		},
-		{
-			name: "Query with variables",
-			query: `
-query Extensions($first: Int!, $prioritizeExtensionIDs: [String!]!) {
-                    extensionRegistry {
-                        extensions(first: $first, prioritizeExtensionIDs: $prioritizeExtensionIDs) {
-                            nodes {
-                                id
-                                extensionID
-                                url
-                                manifest {
-                                    raw
-                                }
-                                viewerCanAdminister
-                            }
-                        }
-                    }
-                }
-`,
-			variables: map[string]any{
-				"first": 10,
-			},
-			want: QueryCost{
-				FieldCount: 62,
-				MaxDepth:   5,
+				FieldCount:       22,
+				UniqueFieldCount: 5,
+				MaxDepth:         3,
 			},
 		},
 		{
@@ -113,8 +87,9 @@ query fetchExternalServices($first: Int = 10){
 				"first": 5,
 			},
 			want: QueryCost{
-				FieldCount: 11,
-				MaxDepth:   3,
+				FieldCount:       11,
+				UniqueFieldCount: 4,
+				MaxDepth:         3,
 			},
 		},
 		{
@@ -131,8 +106,9 @@ query fetchExternalServices($first: Int = 10){
 `,
 			variables: map[string]any{},
 			want: QueryCost{
-				FieldCount: 21,
-				MaxDepth:   3,
+				FieldCount:       21,
+				UniqueFieldCount: 4,
+				MaxDepth:         3,
 			},
 		},
 		{
@@ -161,8 +137,10 @@ query StatusMessages {
  }
 `,
 			want: QueryCost{
-				FieldCount: 5,
-				MaxDepth:   2,
+				FieldCount:                 5,
+				UniqueFieldCount:           5,
+				HighestDuplicateFieldCount: 3,
+				MaxDepth:                   2,
 			},
 		},
 		{
@@ -180,8 +158,10 @@ query{
 }
 `,
 			want: QueryCost{
-				FieldCount: 2,
-				MaxDepth:   2,
+				FieldCount:                 2,
+				HighestDuplicateFieldCount: 2,
+				UniqueFieldCount:           3,
+				MaxDepth:                   2,
 			},
 		},
 		{
@@ -325,8 +305,10 @@ query Search($query: String!, $version: SearchVersion!, $patternType: SearchPatt
 }
 `,
 			want: QueryCost{
-				FieldCount: 50,
-				MaxDepth:   9,
+				FieldCount:                 50,
+				HighestDuplicateFieldCount: 10,
+				UniqueFieldCount:           51, // includes __typename which fieldcount skips
+				MaxDepth:                   9,
 			},
 		},
 		{
@@ -353,8 +335,9 @@ fragment FileDiffFields on FileDiff {
 }
 `,
 			want: QueryCost{
-				FieldCount: 7,
-				MaxDepth:   5,
+				FieldCount:       7,
+				MaxDepth:         5,
+				UniqueFieldCount: 5,
 			},
 			variables: map[string]any{
 				"base": "a46cf4a8b6dc42ea7b7b716e53c49dd3508a8678",
@@ -377,8 +360,9 @@ fragment BarFields on Bar {
 }
 `,
 			want: QueryCost{
-				FieldCount: 1,
-				MaxDepth:   1,
+				FieldCount:       1,
+				MaxDepth:         1,
+				UniqueFieldCount: 1,
 			},
 		},
 		{
@@ -401,8 +385,9 @@ fragment UsableFields on Usable {
 }
 `,
 			want: QueryCost{
-				FieldCount: 3,
-				MaxDepth:   2,
+				FieldCount:       3,
+				MaxDepth:         2,
+				UniqueFieldCount: 1,
 			},
 		},
 	} {
@@ -415,172 +400,6 @@ fragment UsableFields on Usable {
 			}
 			if diff := cmp.Diff(want, *have); diff != "" {
 				t.Errorf(diff)
-			}
-		})
-	}
-}
-
-func TestRatelimitFromConfig(t *testing.T) {
-	testCases := []struct {
-		name   string
-		config *schema.ApiRatelimit
-
-		uid  string
-		isIP bool
-		cost int
-
-		enabled bool
-
-		wantLimited bool
-		wantResult  throttled.RateLimitResult
-	}{
-		{
-			name:   "Nil config",
-			config: nil,
-
-			enabled: false,
-		},
-		{
-			name: "Disabled config",
-			config: &schema.ApiRatelimit{
-				Enabled: false,
-			},
-			enabled: false,
-		},
-		{
-			name: "No overrides",
-			config: &schema.ApiRatelimit{
-				Enabled:   true,
-				Overrides: nil,
-				PerIP:     5000,
-				PerUser:   5000,
-			},
-			enabled: true,
-
-			uid:  "test",
-			isIP: false,
-			cost: 1,
-
-			wantLimited: false,
-			wantResult: throttled.RateLimitResult{
-				Limit:      1001,
-				Remaining:  1000,
-				ResetAfter: 720 * time.Millisecond,
-				RetryAfter: -1,
-			},
-		},
-		{
-			name: "With value override",
-			config: &schema.ApiRatelimit{
-				Enabled: true,
-				PerIP:   5000,
-				PerUser: 5000,
-				Overrides: []*schema.Overrides{
-					{
-						Key:   "test",
-						Limit: 2500,
-					},
-				},
-			},
-			enabled: true,
-
-			uid:  "test",
-			isIP: false,
-			cost: 1,
-
-			wantLimited: false,
-			wantResult: throttled.RateLimitResult{
-				Limit:      501,
-				Remaining:  500,
-				ResetAfter: 720 * time.Millisecond * 2,
-				RetryAfter: -1,
-			},
-		},
-		{
-			name: "With blocked override",
-			config: &schema.ApiRatelimit{
-				Enabled: true,
-				PerIP:   5000,
-				PerUser: 5000,
-				Overrides: []*schema.Overrides{
-					{
-						Key:   "test",
-						Limit: "blocked",
-					},
-				},
-			},
-			enabled: true,
-
-			uid:  "test",
-			isIP: false,
-			cost: 1,
-
-			wantLimited: true,
-			wantResult: throttled.RateLimitResult{
-				Limit:      0,
-				Remaining:  0,
-				ResetAfter: 0,
-				RetryAfter: 0,
-			},
-		},
-		{
-			name: "With unlimited override",
-			config: &schema.ApiRatelimit{
-				Enabled: true,
-				PerIP:   5000,
-				PerUser: 5000,
-				Overrides: []*schema.Overrides{
-					{
-						Key:   "test",
-						Limit: "unlimited",
-					},
-				},
-			},
-			enabled: true,
-
-			uid:  "test",
-			isIP: false,
-			cost: 1,
-
-			wantLimited: false,
-			wantResult: throttled.RateLimitResult{
-				Limit:      100000,
-				Remaining:  100000,
-				ResetAfter: 0,
-				RetryAfter: 0,
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			store, err := memstore.New(1024)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			logger := logtest.Scoped(t)
-
-			rlw := NewRateLimiteWatcher(logger, store)
-
-			rlw.updateFromConfig(logger, tc.config)
-			rl, enabled := rlw.Get()
-
-			if tc.enabled != enabled {
-				t.Fatalf("Want %v, got %v", tc.enabled, enabled)
-			}
-			if !tc.enabled {
-				return
-			}
-			limited, result, err := rl.RateLimit(tc.uid, tc.cost, LimiterArgs{IsIP: tc.isIP})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if limited != tc.wantLimited {
-				t.Fatalf("Limited, want %v got %v", tc.wantLimited, limited)
-			}
-			if diff := cmp.Diff(tc.wantResult, result); diff != "" {
-				t.Fatal(diff)
 			}
 		})
 	}
@@ -611,7 +430,7 @@ func TestBasicLimiterEnabled(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("limit:%d", tt.limit), func(t *testing.T) {
-			store, err := memstore.New(1)
+			store, err := memstore.NewCtx(1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -631,7 +450,7 @@ func TestBasicLimiterEnabled(t *testing.T) {
 }
 
 func TestBasicLimiter(t *testing.T) {
-	store, err := memstore.New(1)
+	store, err := memstore.NewCtx(1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -654,7 +473,7 @@ func TestBasicLimiter(t *testing.T) {
 	}
 
 	// 1st call should not be limited.
-	limited, _, err := limiter.RateLimit("", 1, limiterArgs)
+	limited, _, err := limiter.RateLimit(context.Background(), "", 1, limiterArgs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +482,7 @@ func TestBasicLimiter(t *testing.T) {
 	}
 
 	// 2nd call should be limited.
-	limited, _, err = limiter.RateLimit("", 1, limiterArgs)
+	limited, _, err = limiter.RateLimit(context.Background(), "", 1, limiterArgs)
 	if err != nil {
 		t.Fatal(err)
 	}

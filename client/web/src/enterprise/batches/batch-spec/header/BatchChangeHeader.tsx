@@ -2,7 +2,7 @@ import React from 'react'
 
 import classNames from 'classnames'
 
-import { PageHeader, FeedbackBadge } from '@sourcegraph/wildcard'
+import { PageHeader } from '@sourcegraph/wildcard'
 
 import { BatchChangesIcon } from '../../../../batches/icons'
 
@@ -21,10 +21,7 @@ interface BatchChangeHeaderProps {
 export const BatchChangeHeader: React.FC<BatchChangeHeaderProps> = ({ className, namespace, title, description }) => (
     <PageHeader
         className={classNames('flex-1 pb-2', styles.header, className)}
-        description={
-            description || 'Run custom code over hundreds of repositories and manage the resulting changesets.'
-        }
-        annotation={<FeedbackBadge status="beta" feedback={{ mailto: 'support@sourcegraph.com' }} />}
+        description={description || 'Run and manage large-scale changes across many repositories.'}
     >
         <PageHeader.Heading as="h2" styleAs="h1">
             <PageHeader.Breadcrumb icon={BatchChangesIcon} />

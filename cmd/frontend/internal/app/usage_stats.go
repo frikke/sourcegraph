@@ -3,9 +3,9 @@ package app
 import (
 	"net/http"
 
-	"github.com/inconshreveable/log15"
+	"github.com/inconshreveable/log15" //nolint:logging // TODO move all logging to sourcegraph/log
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
 	"github.com/sourcegraph/sourcegraph/internal/database"
 	"github.com/sourcegraph/sourcegraph/internal/usagestats"
 )
@@ -13,7 +13,7 @@ import (
 func usageStatsArchiveHandler(db database.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 🚨SECURITY: Only site admins may get this archive.
-		if err := backend.CheckCurrentUserIsSiteAdmin(r.Context(), db); err != nil {
+		if err := auth.CheckCurrentUserIsSiteAdmin(r.Context(), db); err != nil {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}

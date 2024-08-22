@@ -19,7 +19,7 @@ func TestOrgMembers_CreateMembershipInOrgsForAllUsers(t *testing.T) {
 
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	// Create fixtures.
@@ -118,7 +118,7 @@ func TestOrgMembers_MemberCount(t *testing.T) {
 		t.Skip()
 	}
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 	// Create fixtures.
 	org1, err := db.Orgs().Create(ctx, "org1", nil)
@@ -189,127 +189,4 @@ func TestOrgMembers_MemberCount(t *testing.T) {
 
 	}
 
-}
-
-func TestOrgMembers_AutocompleteMembersSearch(t *testing.T) {
-	if testing.Short() {
-		t.Skip()
-	}
-	t.Parallel()
-	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
-	ctx := context.Background()
-
-	tests := []struct {
-		name     string
-		username string
-		email    string
-	}{
-		{
-			name:     "test user1",
-			username: "testuser1",
-			email:    "em1@test.com",
-		},
-		{
-			name:     "user maximum",
-			username: "testuser2",
-			email:    "em2@test.com",
-		},
-
-		{
-			name:     "user fancy",
-			username: "testuser3",
-			email:    "em3@test.com",
-		},
-		{
-			name:     "user notsofancy",
-			username: "testuser4",
-			email:    "em4@test.com",
-		},
-		{
-			name:     "display name",
-			username: "testuser5",
-			email:    "em5@test.com",
-		},
-		{
-			name:     "another name",
-			username: "testuser6",
-			email:    "em6@test.com",
-		},
-		{
-			name:     "test user7",
-			username: "testuser7",
-			email:    "em14@test.com",
-		},
-		{
-			name:     "test user8",
-			username: "testuser8",
-			email:    "em13@test.com",
-		},
-		{
-			name:     "test user9",
-			username: "testuser9",
-			email:    "em18@test.com",
-		},
-		{
-			name:     "test user10",
-			username: "testuser10",
-			email:    "em19@test.com",
-		},
-		{
-			name:     "test user11",
-			username: "testuser11",
-			email:    "em119@test.com",
-		},
-		{
-			name:     "searchabletrue",
-			username: "testuser12",
-			email:    "em19@test.com",
-		},
-		{
-			name:     "test user12",
-			username: "searchablefalse",
-			email:    "em19@test.com",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := db.Users().Create(ctx, NewUser{
-				Username:              test.username,
-				DisplayName:           test.name,
-				Email:                 test.email,
-				Password:              "p",
-				EmailVerificationCode: "c",
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-
-	users, err := db.OrgMembers().AutocompleteMembersSearch(ctx, 1, "testus")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if want := 10; len(users) != want {
-		t.Errorf("got %d, want %d", len(users), want)
-	}
-
-	user, err := db.Users().GetByUsername(ctx, "searchablefalse")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Users().Update(ctx, user.ID, UserUpdate{Searchable: boolptr(false)}); err != nil {
-		t.Fatal(err)
-	}
-
-	users2, err := db.OrgMembers().AutocompleteMembersSearch(ctx, 1, "searchable")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if want := 1; len(users2) != want {
-		t.Errorf("got %d, want %d", len(users2), want)
-	}
 }

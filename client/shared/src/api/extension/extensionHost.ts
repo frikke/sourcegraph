@@ -1,19 +1,19 @@
 import * as comlink from 'comlink'
 import { isMatch } from 'lodash'
-import { ReplaySubject, Subscription, Unsubscribable } from 'rxjs'
-import * as sourcegraph from 'sourcegraph'
+import { ReplaySubject, Subscription, type Unsubscribable } from 'rxjs'
+import type * as sourcegraph from 'sourcegraph'
 
-import { EndpointPair } from '../../platform/context'
-import { SettingsCascade } from '../../settings/settings'
-import { ClientAPI } from '../client/api/api'
+import type { EndpointPair } from '../../platform/context'
+import type { SettingsCascade } from '../../settings/settings'
+import type { ClientAPI } from '../client/api/api'
 import { registerComlinkTransferHandlers } from '../util'
 
 import { activateExtensions, replaceAPIRequire } from './activation'
-import { ExtensionHostAPI, ExtensionHostAPIFactory } from './api/api'
+import type { ExtensionHostAPI, ExtensionHostAPIFactory } from './api/api'
 import { setActiveLoggers } from './api/logging'
 import { createExtensionAPIFactory } from './extensionApi'
 import { createExtensionHostAPI } from './extensionHostApi'
-import { createExtensionHostState, ExtensionHostState } from './extensionHostState'
+import { createExtensionHostState, type ExtensionHostState } from './extensionHostState'
 
 /**
  * Required information when initializing an extension host.
@@ -53,10 +53,11 @@ export function startExtensionHost(
                 throw new Error('extension host is already initialized')
             }
             initialized = true
-            const { subscription: extensionHostSubscription, extensionAPI, extensionHostAPI } = initializeExtensionHost(
-                endpoints,
-                initData
-            )
+            const {
+                subscription: extensionHostSubscription,
+                extensionAPI,
+                extensionHostAPI,
+            } = initializeExtensionHost(endpoints, initData)
             subscription.add(extensionHostSubscription)
             resolve(extensionAPI)
             return extensionHostAPI
@@ -84,10 +85,11 @@ function initializeExtensionHost(
 ): { extensionHostAPI: ExtensionHostAPI; extensionAPI: typeof sourcegraph; subscription: Subscription } {
     const subscription = new Subscription()
 
-    const { extensionAPI, extensionHostAPI, subscription: apiSubscription } = createExtensionAndExtensionHostAPIs(
-        initData,
-        endpoints
-    )
+    const {
+        extensionAPI,
+        extensionHostAPI,
+        subscription: apiSubscription,
+    } = createExtensionAndExtensionHostAPIs(initData, endpoints)
     subscription.add(apiSubscription)
 
     // Make `import 'sourcegraph'` or `require('sourcegraph')` return the default extension API (for testing).
@@ -129,6 +131,7 @@ function createExtensionAndExtensionHostAPIs(
     // Create extension host state
     const extensionHostState = createExtensionHostState(initData, proxy, mainThreadAPIInitializations)
     // Create extension host API
+    // TODO(camdencheek): override the codeintel bits with injectNewCodeIntel or pass in CodeIntelAPI
     const extensionHostAPINew = createExtensionHostAPI(extensionHostState)
     // Create extension API factory
     const createExtensionAPI = createExtensionAPIFactory(extensionHostState, proxy, initData)

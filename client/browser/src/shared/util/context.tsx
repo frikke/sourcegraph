@@ -1,4 +1,4 @@
-import { Observable, of } from 'rxjs'
+import { type Observable, of } from 'rxjs'
 import { map } from 'rxjs/operators'
 
 import { isFirefox } from '@sourcegraph/common'
@@ -48,6 +48,22 @@ export function getPlatformName(): PlatformName {
         return 'safari-extension'
     }
     return isFirefox() ? 'firefox-extension' : 'chrome-extension'
+}
+
+export function getTelemetryClientName(): string {
+    if (window.SOURCEGRAPH_PHABRICATOR_EXTENSION || window.SOURCEGRAPH_INTEGRATION === 'phabricator-integration') {
+        return 'phabricator.integration'
+    }
+    if (window.SOURCEGRAPH_INTEGRATION === 'bitbucket-integration') {
+        return 'bitbucket.integration'
+    }
+    if (window.SOURCEGRAPH_INTEGRATION === 'gitlab-integration') {
+        return 'gitlab.integration'
+    }
+    if (isSafari()) {
+        return 'safari.browserExtension'
+    }
+    return isFirefox() ? 'firefox.browserExtension' : 'chrome.browserExtension'
 }
 
 export function getExtensionVersion(): string {

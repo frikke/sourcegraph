@@ -1,33 +1,35 @@
 import React, { useEffect } from 'react'
 
 import classNames from 'classnames'
-import { RouteComponentProps } from 'react-router'
 import { Subscription } from 'rxjs'
 
+import { Timestamp } from '@sourcegraph/branded/src/components/Timestamp'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
 import {
     Badge,
-    BADGE_VARIANTS,
     Button,
-    useLocalStorage,
+    Card,
+    H2,
+    H3,
     Link,
     Tab,
     TabList,
     TabPanel,
     TabPanels,
     Tabs,
-    H2,
-    H3,
     Text,
-    Card,
+    useLocalStorage,
+    type BADGE_VARIANTS,
 } from '@sourcegraph/wildcard'
 
-import { FilteredConnection } from '../components/FilteredConnection'
+import { FilteredConnection, type Filter } from '../components/FilteredConnection'
 import { PageTitle } from '../components/PageTitle'
-import { Timestamp } from '../components/time/Timestamp'
 import {
-    SurveyResponseAggregateFields,
-    SurveyResponseFields,
-    UserWithSurveyResponseFields,
+    UserActivePeriod,
+    type SurveyResponseAggregateFields,
+    type SurveyResponseFields,
+    type UserWithSurveyResponseFields,
 } from '../graphql-operations'
 import {
     fetchAllSurveyResponses,
@@ -35,13 +37,45 @@ import {
     fetchSurveyResponseAggregates,
 } from '../marketing/backend'
 import { SURVEY_QUESTIONS } from '../marketing/components/SurveyUseCaseForm'
-import { eventLogger } from '../tracking/eventLogger'
 import { userURL } from '../user'
 
 import { ValueLegendItem } from './analytics/components/ValueLegendList'
-import { USER_ACTIVITY_FILTERS } from './SiteAdminUsageStatisticsPage'
 
 import styles from './SiteAdminSurveyResponsesPage.module.scss'
+
+const USER_ACTIVITY_FILTERS: Filter[] = [
+    {
+        label: '',
+        type: 'radio',
+        id: 'user-activity-filters',
+        options: [
+            {
+                label: 'All users',
+                value: 'all',
+                tooltip: 'Show all users',
+                args: { activePeriod: UserActivePeriod.ALL_TIME },
+            },
+            {
+                label: 'Active today',
+                value: 'today',
+                tooltip: 'Show users active since this morning at 00:00 UTC',
+                args: { activePeriod: UserActivePeriod.TODAY },
+            },
+            {
+                label: 'Active this week',
+                value: 'week',
+                tooltip: 'Show users active since Monday at 00:00 UTC',
+                args: { activePeriod: UserActivePeriod.THIS_WEEK },
+            },
+            {
+                label: 'Active this month',
+                value: 'month',
+                tooltip: 'Show users active since the first day of the month at 00:00 UTC',
+                args: { activePeriod: UserActivePeriod.THIS_MONTH },
+            },
+        ],
+    },
+]
 
 interface SurveyResponseNodeProps {
     /**
@@ -278,22 +312,22 @@ class SiteAdminSurveyResponsesSummary extends React.PureComponent<{}, SiteAdminS
     }
 }
 
-interface Props extends RouteComponentProps<{}> {}
-
-class FilteredSurveyResponseConnection extends FilteredConnection<SurveyResponseFields, {}> {}
-class FilteredUserSurveyResponseConnection extends FilteredConnection<UserWithSurveyResponseFields, {}> {}
+interface Props extends TelemetryV2Props {}
 
 const LAST_TAB_STORAGE_KEY = 'site-admin-survey-responses-last-tab'
 /**
  * A page displaying the survey responses on this site.
  */
 
-export const SiteAdminSurveyResponsesPage: React.FunctionComponent<React.PropsWithChildren<Props>> = props => {
+export const SiteAdminSurveyResponsesPage: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
+    telemetryRecorder,
+}) => {
     const [persistedTabIndex, setPersistedTabIndex] = useLocalStorage(LAST_TAB_STORAGE_KEY, 0)
 
     useEffect(() => {
-        eventLogger.logViewEvent('SiteAdminSurveyResponses')
-    }, [])
+        EVENT_LOGGER.logViewEvent('SiteAdminSurveyResponses')
+        telemetryRecorder.recordEvent('admin.surveyResponses', 'view')
+    }, [telemetryRecorder])
 
     return (
         <div className="site-admin-survey-responses-page">
@@ -316,7 +350,7 @@ export const SiteAdminSurveyResponsesPage: React.FunctionComponent<React.PropsWi
                 </TabList>
                 <TabPanels>
                     <TabPanel>
-                        <FilteredSurveyResponseConnection
+                        <FilteredConnection<SurveyResponseFields, {}>
                             key="chronological"
                             className="list-group list-group-flush"
                             hideSearch={true}
@@ -324,12 +358,10 @@ export const SiteAdminSurveyResponsesPage: React.FunctionComponent<React.PropsWi
                             pluralNoun="survey responses"
                             queryConnection={fetchAllSurveyResponses}
                             nodeComponent={SurveyResponseNode}
-                            history={props.history}
-                            location={props.location}
                         />
                     </TabPanel>
                     <TabPanel>
-                        <FilteredUserSurveyResponseConnection
+                        <FilteredConnection<UserWithSurveyResponseFields, {}>
                             key="by-user"
                             listComponent="table"
                             headComponent={UserSurveyResponsesHeader}
@@ -340,8 +372,6 @@ export const SiteAdminSurveyResponsesPage: React.FunctionComponent<React.PropsWi
                             pluralNoun="users"
                             queryConnection={fetchAllUsersWithSurveyResponses}
                             nodeComponent={UserSurveyResponseNode}
-                            history={props.history}
-                            location={props.location}
                         />
                     </TabPanel>
                 </TabPanels>

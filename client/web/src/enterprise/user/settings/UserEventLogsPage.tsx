@@ -1,25 +1,25 @@
 import React, { useCallback, useMemo } from 'react'
 
 import classNames from 'classnames'
-import { RouteComponentProps } from 'react-router'
-import { Observable } from 'rxjs'
+import type { Observable } from 'rxjs'
 import { map } from 'rxjs/operators'
 
+import { Timestamp } from '@sourcegraph/branded/src/components/Timestamp'
 import { dataOrThrowErrors, gql } from '@sourcegraph/http-client'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { Container, PageHeader, Link, Code } from '@sourcegraph/wildcard'
+import { type TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { Code, Container, Link, PageHeader } from '@sourcegraph/wildcard'
 
 import { requestGraphQL } from '../../../backend/graphql'
 import { FilteredConnection } from '../../../components/FilteredConnection'
 import { PageTitle } from '../../../components/PageTitle'
-import { Timestamp } from '../../../components/time/Timestamp'
-import {
+import type {
     UserEventLogFields,
     UserEventLogsConnectionFields,
     UserEventLogsResult,
     UserEventLogsVariables,
 } from '../../../graphql-operations'
-import { UserSettingsAreaRouteContext } from '../../../user/settings/UserSettingsArea'
+import { SiteAdminAlert } from '../../../site-admin/SiteAdminAlert'
+import type { UserSettingsAreaRouteContext } from '../../../user/settings/UserSettingsArea'
 
 import styles from './UserEventLogsPage.module.scss'
 
@@ -54,25 +54,39 @@ export const UserEventNode: React.FunctionComponent<React.PropsWithChildren<User
 )
 
 export interface UserEventLogsPageProps
-    extends Pick<UserSettingsAreaRouteContext, 'user'>,
-        Pick<RouteComponentProps, 'history' | 'location'>,
-        TelemetryProps {}
+    extends Pick<UserSettingsAreaRouteContext, 'authenticatedUser' | 'isSourcegraphDotCom'>,
+        UserEventLogsPageContentProps {}
+
+export interface UserEventLogsPageContentProps extends Pick<UserSettingsAreaRouteContext, 'user'>, TelemetryV2Props {}
 
 /**
  * A page displaying usage statistics for the site.
  */
 export const UserEventLogsPage: React.FunctionComponent<React.PropsWithChildren<UserEventLogsPageProps>> = ({
-    telemetryService,
-    history,
-    location,
+    isSourcegraphDotCom,
+    authenticatedUser,
+    telemetryRecorder,
     user,
 }) => {
+    if (isSourcegraphDotCom && authenticatedUser && user.id !== authenticatedUser.id) {
+        return (
+            <SiteAdminAlert className="sidebar__alert" variant="danger">
+                Only the user may access their event logs.
+            </SiteAdminAlert>
+        )
+    }
+    return <UserEventLogsPageContent telemetryRecorder={telemetryRecorder} user={user} />
+}
+
+export const UserEventLogsPageContent: React.FunctionComponent<
+    React.PropsWithChildren<UserEventLogsPageContentProps>
+> = ({ telemetryRecorder, user }) => {
     useMemo(() => {
-        telemetryService.logViewEvent('UserEventLogPage')
-    }, [telemetryService])
+        telemetryRecorder.recordEvent('settings.userEventLogs', 'view')
+    }, [telemetryRecorder])
 
     const queryUserEventLogs = useCallback(
-        (args: { first?: number }): Observable<UserEventLogsConnectionFields> =>
+        (args: { first?: number | null }): Observable<UserEventLogsConnectionFields> =>
             requestGraphQL<UserEventLogsResult, UserEventLogsVariables>(
                 gql`
                     query UserEventLogs($user: ID!, $first: Int) {
@@ -133,8 +147,6 @@ export const UserEventLogsPage: React.FunctionComponent<React.PropsWithChildren<
                     pluralNoun="user events"
                     queryConnection={queryUserEventLogs}
                     nodeComponent={UserEventNode}
-                    history={history}
-                    location={location}
                 />
             </Container>
         </>

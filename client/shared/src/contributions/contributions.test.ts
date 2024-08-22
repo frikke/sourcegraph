@@ -1,6 +1,8 @@
+import { describe, expect, test } from 'vitest'
+
 import { ContributableMenu } from '@sourcegraph/client-api'
 
-import { ActionItemAction } from '../actions/ActionItem'
+import type { ActionItemAction } from '../actions/ActionItem'
 
 import { getContributedActionItems } from './contributions'
 
@@ -10,29 +12,25 @@ describe('getContributedActionItems', () => {
             getContributedActionItems(
                 {
                     actions: [
-                        { id: 'a', command: 'a', title: 'ta', description: 'da' },
-                        { id: 'b', command: 'b', title: 'tb', description: 'db' },
-                        { id: 'c', command: 'c', title: 'tc', description: 'dc' },
+                        { id: 'a', command: 'a', title: 'ta', description: 'da', telemetryProps: { feature: 'a' } },
+                        { id: 'b', command: 'b', title: 'tb', description: 'db', telemetryProps: { feature: 'b' } },
+                        { id: 'c', command: 'c', title: 'tc', description: 'dc', telemetryProps: { feature: 'c' } },
                     ],
                     menus: {
-                        commandPalette: [
-                            { action: 'a', group: '2' },
-                            { action: 'b', group: '1', alt: 'c' },
-                        ],
-                        'editor/title': [{ action: 'c' }],
+                        'editor/title': [{ action: 'b', alt: 'c' }, { action: 'a' }],
                     },
                 },
-                ContributableMenu.CommandPalette
+                ContributableMenu.EditorTitle
             )
         ).toEqual([
             {
-                action: { id: 'b', command: 'b', title: 'tb', description: 'db' },
+                action: { id: 'b', command: 'b', title: 'tb', description: 'db', telemetryProps: { feature: 'b' } },
                 active: true,
-                altAction: { id: 'c', command: 'c', title: 'tc', description: 'dc' },
+                altAction: { id: 'c', command: 'c', title: 'tc', description: 'dc', telemetryProps: { feature: 'c' } },
                 disabledWhen: false,
             },
             {
-                action: { id: 'a', command: 'a', title: 'ta', description: 'da' },
+                action: { id: 'a', command: 'a', title: 'ta', description: 'da', telemetryProps: { feature: 'a' } },
                 active: true,
                 altAction: undefined,
                 disabledWhen: false,

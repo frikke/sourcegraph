@@ -1,17 +1,31 @@
 package config
 
-type IndexConfiguration struct {
-	SharedSteps []DockerStep `json:"shared_steps" yaml:"shared_steps"`
-	IndexJobs   []IndexJob   `json:"index_jobs" yaml:"index_jobs"`
+import "strings"
+
+type AutoIndexJobSpecList struct {
+	JobSpecs []AutoIndexJobSpec `json:"index_jobs" yaml:"index_jobs"`
 }
 
-type IndexJob struct {
-	Steps       []DockerStep `json:"steps" yaml:"steps"`
-	LocalSteps  []string     `json:"local_steps" yaml:"local_steps"`
-	Root        string       `json:"root" yaml:"root"`
-	Indexer     string       `json:"indexer" yaml:"indexer"`
-	IndexerArgs []string     `json:"indexer_args" yaml:"indexer_args"`
-	Outfile     string       `json:"outfile" yaml:"outfile"`
+type AutoIndexJobSpec struct {
+	Steps            []DockerStep `json:"steps" yaml:"steps"`
+	LocalSteps       []string     `json:"local_steps" yaml:"local_steps"`
+	Root             string       `json:"root" yaml:"root"`
+	Indexer          string       `json:"indexer" yaml:"indexer"`
+	IndexerArgs      []string     `json:"indexer_args" yaml:"indexer_args"`
+	Outfile          string       `json:"outfile" yaml:"outfile"`
+	RequestedEnvVars []string     `json:"requestedEnvVars" yaml:"requestedEnvVars"`
+}
+
+func (j AutoIndexJobSpec) GetRoot() string {
+	return j.Root
+}
+
+// GetIndexerName removes the prefix "sourcegraph/"" and the suffix "@sha256:..."
+// from the indexer name.
+// Example:
+// sourcegraph/lsif-go@sha256:... => lsif-go
+func (j AutoIndexJobSpec) GetIndexerName() string {
+	return extractIndexerName(j.Indexer)
 }
 
 type DockerStep struct {
@@ -20,16 +34,20 @@ type DockerStep struct {
 	Commands []string `json:"commands" yaml:"commands"`
 }
 
-type HintConfidence int
+// extractIndexerName Name removes the prefix "sourcegraph/"" and the suffix "@sha256:..."
+// from the indexer name.
+// Example:
+// sourcegraph/lsif-go@sha256:... => lsif-go
+func extractIndexerName(name string) string {
+	start := 0
+	if strings.HasPrefix(name, "sourcegraph/") {
+		start = len("sourcegraph/")
+	}
 
-const (
-	HintConfidenceUnknown HintConfidence = iota
-	HintConfidenceLanguageSupport
-	HintConfidenceProjectStructureSupported
-)
+	end := len(name)
+	if strings.Contains(name, "@") {
+		end = strings.LastIndex(name, "@")
+	}
 
-type IndexJobHint struct {
-	Root           string
-	Indexer        string
-	HintConfidence HintConfidence
+	return name[start:end]
 }

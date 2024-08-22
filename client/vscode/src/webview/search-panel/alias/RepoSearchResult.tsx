@@ -4,12 +4,15 @@ import { mdiSourceFork, mdiArchive, mdiLock } from '@mdi/js'
 import classNames from 'classnames'
 import SourceRepositoryIcon from 'mdi-react/SourceRepositoryIcon'
 
-import { SearchResultStyles as styles, LastSyncedIcon, ResultContainer } from '@sourcegraph/search-ui'
+import { LegacyResultContainer } from '@sourcegraph/branded'
 import { displayRepoName } from '@sourcegraph/shared/src/components/RepoLink'
-import { getRepoMatchLabel, RepositoryMatch } from '@sourcegraph/shared/src/search/stream'
+import { getRepoMatchLabel, type RepositoryMatch } from '@sourcegraph/shared/src/search/stream'
 import { Button, Icon } from '@sourcegraph/wildcard'
 
 import { useOpenSearchResultsContext } from '../MatchHandlersContext'
+
+import styles from './SearchResultsStyles.module.scss'
+
 export interface RepoSearchResultProps {
     result: RepositoryMatch
     repoName: string
@@ -46,7 +49,6 @@ export const RepoSearchResult: React.FunctionComponent<RepoSearchResultProps> = 
     const renderBody = (): JSX.Element => (
         <div data-testid="search-repo-result">
             <div className={classNames(styles.searchResultMatch, 'p-2 flex-column')}>
-                {result.repoLastFetched && <LastSyncedIcon lastSyncedTime={result.repoLastFetched} />}
                 <div className="d-flex align-items-center flex-row">
                     <div className={styles.matchType}>
                         <small>Repository match</small>
@@ -112,7 +114,7 @@ export const RepoSearchResult: React.FunctionComponent<RepoSearchResultProps> = 
     )
 
     return (
-        <ResultContainer
+        <LegacyResultContainer
             as={as}
             index={index}
             icon={SourceRepositoryIcon}

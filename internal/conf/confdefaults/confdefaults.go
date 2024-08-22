@@ -5,7 +5,9 @@
 // pkg/database/confdb, which we have a linter to protect against.
 package confdefaults
 
-import "github.com/sourcegraph/sourcegraph/internal/conf/conftypes"
+import (
+	"github.com/sourcegraph/sourcegraph/internal/conf/conftypes"
+)
 
 // TODO(slimsag): consider moving these into actual json files for improved
 // editing.
@@ -25,8 +27,6 @@ var DevAndTesting = conftypes.RawUnified{
 			"allowSignup": true
 		}
 	],
-
-	"search.index.enabled": true
 }`,
 }
 
@@ -43,10 +43,7 @@ var DockerContainer = conftypes.RawUnified{
 			"type": "builtin",
 			"allowSignup": true
 		}
-	],
-
-	"disablePublicRepoRedirects": true,
-	"search.index.enabled": true
+	]
 }`,
 }
 
@@ -64,15 +61,13 @@ var KubernetesOrDockerComposeOrPureDocker = conftypes.RawUnified{
 	// The builtin auth provider with signup disallowed (shown below) means that
 	// after the initial site admin signs in, all other users must be invited.
 	//
-	// Other providers are documented at https://docs.sourcegraph.com/admin/auth.
+	// Other providers are documented at https://sourcegraph.com/docs/admin/auth.
 	"auth.providers": [
 		{
 			"type": "builtin",
 			"allowSignup": false
 		}
 	],
-
-	"search.index.enabled": true
 }`,
 }
 

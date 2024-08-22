@@ -1,9 +1,12 @@
+import { startCase } from 'lodash'
+
 import { isErrorLike } from '@sourcegraph/common'
 import { SearchPatternType } from '@sourcegraph/shared/src/graphql-operations'
-import { SettingsCascadeOrError, SettingsSubjectCommonFields } from '@sourcegraph/shared/src/settings/settings'
+import { SearchMode } from '@sourcegraph/shared/src/search/types'
+import type { SettingsCascadeOrError, SettingsSubjectCommonFields } from '@sourcegraph/shared/src/settings/settings'
 
-import { AuthenticatedUser } from '../auth'
-import { LayoutProps } from '../Layout'
+import type { AuthenticatedUser } from '../auth'
+import type { LegacyLayoutProps } from '../LegacyLayout'
 
 /** A fallback settings subject that can be constructed synchronously at initialization time. */
 export function siteSubjectNoAdmin(): SettingsSubjectCommonFields {
@@ -16,7 +19,7 @@ export function siteSubjectNoAdmin(): SettingsSubjectCommonFields {
 export function viewerSubjectFromSettings(
     cascade: SettingsCascadeOrError,
     authenticatedUser?: AuthenticatedUser | null
-): LayoutProps['viewerSubject'] {
+): LegacyLayoutProps['viewerSubject'] {
     if (authenticatedUser) {
         return authenticatedUser
     }
@@ -25,18 +28,51 @@ export function viewerSubjectFromSettings(
     }
     return siteSubjectNoAdmin()
 }
-
 /**
- * Returns the user-configured search pattern type or undefined if not
+ * Returns the user-configured default search mode or undefined if not
  * configured by the user.
  */
-export function defaultPatternTypeFromSettings(settingsCascade: SettingsCascadeOrError): SearchPatternType | undefined {
-    return getFromSettings(settingsCascade, 'search.defaultPatternType')
+export function defaultSearchModeFromSettings(settingsCascade: SettingsCascadeOrError): SearchMode | undefined {
+    // If keyword search is enabled, always use the precise search mode. Keyword search is not designed to
+    // work with smart search, and we plan to remove smart search.
+    // Note: keyword search is enabled even when the default patterntype is regexp.
+    const patternType = defaultPatternTypeFromSettings(settingsCascade)
+    if (patternType === SearchPatternType.keyword || patternType === SearchPatternType.regexp) {
+        return SearchMode.Precise
+    }
+
+    switch (getFromSettings(settingsCascade, 'search.defaultMode')) {
+        case 'precise': {
+            return SearchMode.Precise
+        }
+        case 'smart': {
+            return SearchMode.SmartSearch
+        }
+    }
+    return undefined
 }
 
 /**
- * Returns the user-configured case sensitivity setting or undefined if not
- * configured by the user.
+ * Returns the user-configured search pattern type or the default 'keyword' if not configured.
+ */
+export function defaultPatternTypeFromSettings(settingsCascade: SettingsCascadeOrError): SearchPatternType {
+    const defaultPatternType: SearchPatternType | undefined = getFromSettings(
+        settingsCascade,
+        'search.defaultPatternType'
+    )
+    return defaultPatternType ?? SearchPatternType.keyword
+}
+
+/**
+ * Returns true if the query examples we show on the homepage should be for keyword search.
+ */
+export function showQueryExamplesForKeywordSearch(settingsCascade: SettingsCascadeOrError): boolean {
+    const defaultPatternType = defaultPatternTypeFromSettings(settingsCascade)
+    return defaultPatternType === SearchPatternType.keyword || defaultPatternType === SearchPatternType.regexp
+}
+
+/**
+ * Returns the user-configured case sensitivity setting or undefined if not configured.
  */
 export function defaultCaseSensitiveFromSettings(settingsCascade: SettingsCascadeOrError): boolean | undefined {
     return getFromSettings(settingsCascade, 'search.defaultCaseSensitive')
@@ -61,3 +97,7 @@ function getFromSettings<T>(settingsCascade: SettingsCascadeOrError, setting: st
 
     return undefined
 }
+
+export const prettifySystemRole = (role: string): string => startCase(role.replaceAll('_', ' ').toLowerCase())
+export const prettifyNamespace = (namespace: string): string => startCase(namespace.replaceAll('_', ' ').toLowerCase())
+export const prettifyAction = (action: string): string => startCase(action.replaceAll('_', ' ').toLowerCase())

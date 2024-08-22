@@ -14,13 +14,15 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver"
-	"github.com/google/go-github/github"
+	"github.com/google/go-github/v55/github"
 	"github.com/segmentio/fasthash/fnv1"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/oauth2"
 
 	"github.com/sourcegraph/log"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
+	"github.com/sourcegraph/sourcegraph/internal/bytesize"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/encryption"
 	"github.com/sourcegraph/sourcegraph/internal/env"
@@ -28,8 +30,9 @@ import (
 	"github.com/sourcegraph/sourcegraph/internal/extsvc/auth"
 	"github.com/sourcegraph/sourcegraph/internal/httpcli"
 	"github.com/sourcegraph/sourcegraph/internal/metrics"
+	"github.com/sourcegraph/sourcegraph/internal/oauthutil"
 	"github.com/sourcegraph/sourcegraph/internal/ratelimit"
-	"github.com/sourcegraph/sourcegraph/internal/trace/ot"
+	"github.com/sourcegraph/sourcegraph/internal/trace"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
@@ -139,6 +142,69 @@ func (c *CommitStatus) Key() string {
 	return strconv.FormatInt(int64(fnv1.HashString64(key)), 16)
 }
 
+// A single Commit reference in a Repository, from the REST API.
+type restCommitRef struct {
+	URL    string `json:"url"`
+	SHA    string `json:"sha"`
+	NodeID string `json:"node_id"`
+	Commit struct {
+		URL       string              `json:"url"`
+		Author    *restAuthorCommiter `json:"author"`
+		Committer *restAuthorCommiter `json:"committer"`
+		Message   string              `json:"message"`
+		Tree      restCommitTree      `json:"tree"`
+	} `json:"commit"`
+	Parents []restCommitParent `json:"parents"`
+}
+
+// A single Commit in a Repository, from the REST API.
+type RestCommit struct {
+	URL          string              `json:"url"`
+	SHA          string              `json:"sha"`
+	NodeID       string              `json:"node_id"`
+	Author       *restAuthorCommiter `json:"author"`
+	Committer    *restAuthorCommiter `json:"committer"`
+	Message      string              `json:"message"`
+	Tree         restCommitTree      `json:"tree"`
+	Parents      []restCommitParent  `json:"parents"`
+	Verification Verification        `json:"verification"`
+}
+
+type Verification struct {
+	Verified  bool   `json:"verified"`
+	Reason    string `json:"reason"`
+	Signature string `json:"signature"`
+	Payload   string `json:"payload"`
+}
+
+// An updated reference in a Repository, returned from the REST API `update-ref` endpoint.
+type restUpdatedRef struct {
+	Ref    string `json:"ref"`
+	NodeID string `json:"node_id"`
+	URL    string `json:"url"`
+	Object struct {
+		Type string `json:"type"`
+		SHA  string `json:"sha"`
+		URL  string `json:"url"`
+	} `json:"object"`
+}
+
+type restAuthorCommiter struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+	Date  string `json:"date"`
+}
+
+type restCommitTree struct {
+	URL string `json:"url"`
+	SHA string `json:"sha"`
+}
+
+type restCommitParent struct {
+	URL string `json:"url"`
+	SHA string `json:"sha"`
+}
+
 // Context represent the individual commit status context
 type Context struct {
 	ID          string
@@ -156,6 +222,7 @@ type Label struct {
 
 type PullRequestRepo struct {
 	ID    string
+	Name  string
 	Owner struct {
 		Login string
 	}
@@ -174,6 +241,7 @@ type PullRequest struct {
 	HeadRefName    string
 	BaseRefName    string
 	Number         int64
+	ReviewDecision string
 	Author         Actor
 	BaseRepository PullRequestRepo
 	HeadRepository PullRequestRepo
@@ -815,7 +883,6 @@ func (c *V4Client) LoadPullRequest(ctx context.Context, pr *PullRequest) error {
 	if err != nil {
 		return err
 	}
-
 	version := c.determineGitHubVersion(ctx)
 
 	prFragment, err := pullRequestFragments(version)
@@ -925,6 +992,54 @@ func (c *V4Client) GetOpenPullRequestByRefs(ctx context.Context, owner, name, ba
 		return nil, err
 	}
 	pr.TimelineItems = append(pr.TimelineItems, items...)
+
+	return &pr, nil
+}
+
+// GetOpenPullRequestByRefsReduced fetches the pull request associated with the supplied,
+// but only the fields that are required to determine if the PR is open. It does not include
+// the timeline items, participants, labels and commits (and returns empty lists instead).
+func (c *V4Client) GetOpenPullRequestByRefsReduced(ctx context.Context, owner, name, baseRef, headRef string) (*PullRequest, error) {
+	version := c.determineGitHubVersion(ctx)
+	prFragment, err := pullRequestFragmentsSimple(version)
+	if err != nil {
+		return nil, err
+	}
+	var q strings.Builder
+	q.WriteString(prFragment)
+	q.WriteString("query {\n")
+	q.WriteString(fmt.Sprintf("repository(owner: %q, name: %q) {\n",
+		owner, name))
+	q.WriteString(fmt.Sprintf("pullRequests(baseRefName: %q, headRefName: %q, first: 1, states: OPEN) { \n",
+		abbreviateRef(baseRef), abbreviateRef(headRef),
+	))
+	q.WriteString("nodes{ ... pr }\n}\n}\n}")
+
+	var results struct {
+		Repository struct {
+			PullRequests struct {
+				Nodes []*struct {
+					PullRequest
+				}
+			}
+		}
+	}
+
+	err = c.requestGraphQL(ctx, q.String(), nil, &results)
+	if err != nil {
+		return nil, err
+	}
+	if len(results.Repository.PullRequests.Nodes) != 1 {
+		return nil, errors.Errorf("expected 1 pull request, got %d instead", len(results.Repository.PullRequests.Nodes))
+	}
+
+	node := results.Repository.PullRequests.Nodes[0]
+	pr := node.PullRequest
+	// Initialize lists that would otherwise be nil, to match downstream expectations to use the len function.
+	pr.Commits.Nodes = []CommitWithChecks{}
+	pr.Participants = []Actor{}
+	pr.TimelineItems = []TimelineItem{}
+	pr.Labels.Nodes = []Label{}
 
 	return &pr, nil
 }
@@ -1378,6 +1493,7 @@ fragment prCommit on PullRequestCommit {
 
 fragment repo on Repository {
   id
+  name
   owner {
     login
   }
@@ -1396,6 +1512,7 @@ fragment pr on PullRequest {
   baseRefOid
   headRefName
   baseRefName
+  reviewDecision
   %s
   author {
     ...actor
@@ -1434,6 +1551,59 @@ fragment pr on PullRequest {
 }
 `
 
+const pullRequestFragmentsFmtstrSimple = `
+fragment actor on Actor {
+  avatarUrl
+  login
+  url
+}
+
+fragment repo on Repository {
+  id
+  name
+  owner {
+    login
+  }
+}
+
+fragment pr on PullRequest {
+  id
+  title
+  body
+  state
+  url
+  number
+  createdAt
+  updatedAt
+  headRefOid
+  baseRefOid
+  headRefName
+  baseRefName
+  reviewDecision
+  %s
+  author {
+    ...actor
+  }
+  baseRepository {
+    ...repo
+  }
+  headRepository {
+    ...repo
+  }
+}
+`
+
+func pullRequestFragmentsSimple(version *semver.Version) (string, error) {
+	if ghe220Semver.Check(version) {
+		// Don't ask for isDraft for ghe 2.20.
+		return fmt.Sprintf(pullRequestFragmentsFmtstrSimple, ""), nil
+	}
+	if ghe221PlusOrDotComSemver.Check(version) {
+		return fmt.Sprintf(pullRequestFragmentsFmtstrSimple, "isDraft"), nil
+	}
+	return "", errors.Errorf("unsupported version of GitHub: %s", version)
+}
+
 func pullRequestFragments(version *semver.Version) (string, error) {
 	timelineItemTypes, err := timelineItemTypes(version)
 	if err != nil {
@@ -1467,18 +1637,7 @@ var (
 
 	// The metric generated here will be named as "src_github_requests_total".
 	requestCounter = metrics.NewRequestMeter("github", "Total number of requests sent to the GitHub API.")
-
-	// Get raw proxy URL at service startup, but only get parsed URL at runtime with getGithubProxyURL
-	githubProxyRawURL = env.Get("GITHUB_BASE_URL", "http://github-proxy", "base URL for GitHub.com API (used for github-proxy)")
 )
-
-func getGithubProxyURL() *url.URL {
-	url, err := url.Parse(githubProxyRawURL)
-	if err != nil {
-		log.Scoped("extsvc.github", "github package").Fatal("Error parsing GITHUB_BASE_URL", log.Error(err))
-	}
-	return url
-}
 
 // APIRoot returns the root URL of the API using the base URL of the GitHub instance.
 func APIRoot(baseURL *url.URL) (apiURL *url.URL, githubDotCom bool) {
@@ -1505,33 +1664,29 @@ func newHttpResponseState(statusCode int, headers http.Header) *httpResponseStat
 	}
 }
 
-func doRequest(ctx context.Context, logger log.Logger, apiURL *url.URL, auth auth.Authenticator, rateLimitMonitor *ratelimit.Monitor, httpClient httpcli.Doer, req *http.Request, result any) (responseState *httpResponseState, err error) {
+func doRequest(ctx context.Context, logger log.Logger, apiURL *url.URL, auther auth.Authenticator, rateLimitMonitor *ratelimit.Monitor, httpClient httpcli.Doer, req *http.Request, result any) (responseState *httpResponseState, err error) {
 	req.URL.Path = path.Join(apiURL.Path, req.URL.Path)
 	req.URL = apiURL.ResolveReference(req.URL)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	if auth != nil {
-		if err := auth.Authenticate(req); err != nil {
-			return nil, errors.Wrap(err, "authenticating request")
-		}
-	}
+	// Prevent the CachedTransportOpt from caching client side, but still use ETags
+	// to cache server-side
+	req.Header.Set("Cache-Control", "max-age=0")
 
 	var resp *http.Response
 
-	span, ctx := ot.StartSpanFromContext(ctx, "GitHub")
-	span.SetTag("URL", req.URL.String())
+	tr, ctx := trace.New(ctx, "GitHub",
+		attribute.Stringer("url", req.URL))
 	defer func() {
-		if err != nil {
-			span.SetTag("error", err.Error())
-		}
 		if resp != nil {
-			span.SetTag("status", resp.Status)
+			tr.SetAttributes(attribute.String("status", resp.Status))
 		}
-		span.Finish()
+		tr.EndWithErr(&err)
 	}()
+	req = req.WithContext(ctx)
 
-	resp, err = httpClient.Do(req.WithContext(ctx))
+	resp, err = oauthutil.DoRequest(ctx, logger, httpClient, req, auther)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "request failed")
 	}
 	defer resp.Body.Close()
 
@@ -1566,22 +1721,25 @@ func doRequest(ctx context.Context, logger log.Logger, apiURL *url.URL, auth aut
 		return newHttpResponseState(resp.StatusCode, resp.Header), nil
 	}
 
-	err = json.NewDecoder(resp.Body).Decode(result)
+	if resp.StatusCode != http.StatusNoContent && result != nil {
+		err = json.NewDecoder(resp.Body).Decode(result)
+	}
 	return newHttpResponseState(resp.StatusCode, resp.Header), err
 }
 
 func canonicalizedURL(apiURL *url.URL) *url.URL {
-	if urlIsGitHubDotCom(apiURL) {
-		// For GitHub.com API requests, use github-proxy (which adds our OAuth2 client ID/secret to get a much higher
-		// rate limit).
-		return getGithubProxyURL()
+	if URLIsGitHubDotCom(apiURL) {
+		return &url.URL{
+			Scheme: "https",
+			Host:   "api.github.com",
+		}
 	}
 	return apiURL
 }
 
-func urlIsGitHubDotCom(apiURL *url.URL) bool {
+func URLIsGitHubDotCom(apiURL *url.URL) bool {
 	hostname := strings.ToLower(apiURL.Hostname())
-	return hostname == "api.github.com" || hostname == "github.com" || hostname == "www.github.com" || apiURL.String() == getGithubProxyURL().String()
+	return hostname == "api.github.com" || hostname == "github.com" || hostname == "www.github.com"
 }
 
 var ErrRepoNotFound = &RepoNotFoundError{}
@@ -1601,7 +1759,7 @@ func (e OrgNotFoundError) NotFound() bool { return true }
 // IsNotFound reports whether err is a GitHub API error of type NOT_FOUND, the equivalent cached
 // response error, or HTTP 404.
 func IsNotFound(err error) bool {
-	if errors.HasType(err, &RepoNotFoundError{}) || errors.HasType(err, &OrgNotFoundError{}) || errors.HasType(err, ErrPullRequestNotFound(0)) ||
+	if errors.HasType[*RepoNotFoundError](err) || errors.HasType[*OrgNotFoundError](err) || errors.HasType[ErrPullRequestNotFound](err) ||
 		HTTPErrorCode(err) == http.StatusNotFound {
 		return true
 	}
@@ -1731,9 +1889,13 @@ type Repository struct {
 	IsArchived    bool   // whether the repository is archived on the code host
 	IsLocked      bool   // whether the repository is locked on the code host
 	IsDisabled    bool   // whether the repository is disabled on the code host
-	// This field will always be blank on repos stored in our database because the value will be different
-	// depending on which token was used to fetch it
-	ViewerPermission string // ADMIN, WRITE, READ, or empty if unknown. Only the graphql api populates this. https://developer.github.com/v4/enum/repositorypermission/
+	// This field will always be blank on repos stored in our database because the value will be
+	// different depending on which token was used to fetch it.
+	//
+	// ADMIN, WRITE, READ, or empty if unknown. Only the graphql api populates this. https://developer.github.com/v4/enum/repositorypermission/
+	ViewerPermission string
+	// RepositoryTopics is a  list of topics the repository is tagged with.
+	RepositoryTopics RepositoryTopics
 
 	// Metadata retained for ranking
 	StargazerCount int `json:",omitempty"`
@@ -1742,7 +1904,47 @@ type Repository struct {
 	// This is available for GitHub Enterprise Cloud and GitHub Enterprise Server 3.3.0+ and is used
 	// to identify if a repository is public or private or internal.
 	// https://developer.github.com/changes/2019-12-03-internal-visibility-changes/#repository-visibility-fields
-	Visibility Visibility `json:",omitempty"`
+	Visibility Visibility `json:"visibility,omitempty"`
+
+	// DiskUsageKibibytes is, according to GitHub's docs, in kilobytes, but
+	// empirically it's in kibibytes (meaning: multiples of 1024 bytes, not
+	// 1000).
+	DiskUsageKibibytes int `json:"DiskUsage,omitempty"`
+}
+
+// PublicRepository is a reduced set of fields from a GitHub repository
+// that corresponds with the fields returned from the "List public repositories"
+// GitHub API endpoint: https://docs.github.com/en/rest/repos/repos?apiVersion=2022-11-28#list-public-repositories
+type PublicRepository struct {
+	ID            string // ID of repository (GitHub GraphQL ID, not GitHub database ID)
+	DatabaseID    int64  // The integer database id
+	NameWithOwner string // Full name of repository ("owner/name")
+	Description   string // Description of repository
+	URL           string // The web URL of this repository ("https://github.com/foo/bar")
+	IsPrivate     bool   // Whether the repository is private
+	IsFork        bool   // Whether the repository is a fork of another repository
+}
+
+func (r *Repository) SizeBytes() bytesize.Size {
+	return bytesize.Size(r.DiskUsageKibibytes) * bytesize.KiB
+}
+
+// ParentRepository is the parent of a GitHub repository.
+type ParentRepository struct {
+	NameWithOwner string
+	IsFork        bool
+}
+
+type RepositoryTopics struct {
+	Nodes []RepositoryTopic
+}
+
+type RepositoryTopic struct {
+	Topic Topic
+}
+
+type Topic struct {
+	Name string
 }
 
 type restRepositoryPermissions struct {
@@ -1766,6 +1968,24 @@ type restRepository struct {
 	Stars       int                       `json:"stargazers_count"`
 	Forks       int                       `json:"forks_count"`
 	Visibility  string                    `json:"visibility"`
+	Topics      []string                  `json:"topics"`
+	// DiskUsageKibibytes uses the "size" field which is, according to GitHub's
+	// docs, in kilobytes, but empirically it's in kibibytes (meaning:
+	// multiples of 1024 bytes, not 1000).
+	DiskUsageKibibytes int `json:"size"`
+}
+
+// restPublicRepository is a reduced set of fields from a GitHub repository
+// that corresponds with the fields returned from the "List public repositories"
+// GitHub API endpoint: https://docs.github.com/en/rest/repos/repos?apiVersion=2022-11-28#list-public-repositories
+type restPublicRepository struct {
+	ID          string `json:"node_id"` // GraphQL ID
+	DatabaseID  int64  `json:"id"`
+	FullName    string `json:"full_name"` // same as nameWithOwner
+	Description string `json:"description"`
+	HTMLURL     string `json:"html_url"` // web URL
+	Private     bool   `json:"private"`
+	Fork        bool   `json:"fork"`
 }
 
 // getRepositoryFromAPI attempts to fetch a repository from the GitHub API without use of the redis cache.
@@ -1787,24 +2007,44 @@ func (c *V3Client) getRepositoryFromAPI(ctx context.Context, owner, name string)
 // convertRestRepo converts repo information returned by the rest API
 // to a standard format.
 func convertRestRepo(restRepo restRepository) *Repository {
-	repo := Repository{
-		ID:               restRepo.ID,
-		DatabaseID:       restRepo.DatabaseID,
-		NameWithOwner:    restRepo.FullName,
-		Description:      restRepo.Description,
-		URL:              restRepo.HTMLURL,
-		IsPrivate:        restRepo.Private,
-		IsFork:           restRepo.Fork,
-		IsArchived:       restRepo.Archived,
-		IsLocked:         restRepo.Locked,
-		IsDisabled:       restRepo.Disabled,
-		ViewerPermission: convertRestRepoPermissions(restRepo.Permissions),
-		StargazerCount:   restRepo.Stars,
-		ForkCount:        restRepo.Forks,
+	topics := make([]RepositoryTopic, 0, len(restRepo.Topics))
+	for _, topic := range restRepo.Topics {
+		topics = append(topics, RepositoryTopic{Topic{Name: topic}})
 	}
 
-	if conf.ExperimentalFeatures().EnableGithubInternalRepoVisibility {
-		repo.Visibility = Visibility(restRepo.Visibility)
+	repo := Repository{
+		ID:                 restRepo.ID,
+		DatabaseID:         restRepo.DatabaseID,
+		NameWithOwner:      restRepo.FullName,
+		Description:        restRepo.Description,
+		URL:                restRepo.HTMLURL,
+		IsPrivate:          restRepo.Private,
+		IsFork:             restRepo.Fork,
+		IsArchived:         restRepo.Archived,
+		IsLocked:           restRepo.Locked,
+		IsDisabled:         restRepo.Disabled,
+		ViewerPermission:   convertRestRepoPermissions(restRepo.Permissions),
+		StargazerCount:     restRepo.Stars,
+		ForkCount:          restRepo.Forks,
+		RepositoryTopics:   RepositoryTopics{topics},
+		Visibility:         Visibility(restRepo.Visibility),
+		DiskUsageKibibytes: restRepo.DiskUsageKibibytes,
+	}
+
+	return &repo
+}
+
+// convertRestPublicRepo converts public repo information returned by the rest API
+// to a standard format.
+func convertRestPublicRepo(restPublicRepo restPublicRepository) *PublicRepository {
+	repo := PublicRepository{
+		ID:            restPublicRepo.ID,
+		DatabaseID:    restPublicRepo.DatabaseID,
+		NameWithOwner: restPublicRepo.FullName,
+		Description:   restPublicRepo.Description,
+		URL:           restPublicRepo.HTMLURL,
+		IsPrivate:     restPublicRepo.Private,
+		IsFork:        restPublicRepo.Fork,
 	}
 
 	return &repo
@@ -1875,24 +2115,35 @@ type restTopicsResponse struct {
 
 func GetExternalAccountData(ctx context.Context, data *extsvc.AccountData) (usr *github.User, tok *oauth2.Token, err error) {
 	if data.Data != nil {
-		var u github.User
-		if err := encryption.DecryptJSON(ctx, data.Data, &u); err != nil {
+		usr, err = encryption.DecryptJSON[github.User](ctx, data.Data)
+		if err != nil {
 			return nil, nil, err
 		}
-
-		usr = &u
 	}
 
 	if data.AuthData != nil {
-		var t oauth2.Token
-		if err := encryption.DecryptJSON(ctx, data.AuthData, &t); err != nil {
+		tok, err = encryption.DecryptJSON[oauth2.Token](ctx, data.AuthData)
+		if err != nil {
 			return nil, nil, err
 		}
-
-		tok = &t
 	}
 
 	return usr, tok, nil
+}
+
+func GetPublicExternalAccountData(ctx context.Context, data *extsvc.AccountData) (*extsvc.PublicAccountData, error) {
+	d, _, err := GetExternalAccountData(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	return &extsvc.PublicAccountData{
+		DisplayName: d.GetName(),
+		Login:       d.GetLogin(),
+
+		// Github returns the API url as URL, so to ensure the link to the user's profile
+		// is correct, we substitute this for the HTMLURL which is the correct profile url.
+		URL: d.GetHTMLURL(),
+	}, nil
 }
 
 func SetExternalAccountData(data *extsvc.AccountData, user *github.User, token *oauth2.Token) error {
@@ -1924,8 +2175,9 @@ type UserEmail struct {
 }
 
 type Org struct {
-	ID    int    `json:"id,omitempty"`
-	Login string `json:"login,omitempty"`
+	ID     int    `json:"id,omitempty"`
+	Login  string `json:"login,omitempty"`
+	NodeID string `json:"node_id,omitempty"`
 }
 
 // OrgDetails describes the more detailed Org data you can only get from the
@@ -2014,4 +2266,32 @@ func handlePullRequestError(err error) error {
 // which is used for GitHub App access tokens.
 func IsGitHubAppAccessToken(token string) bool {
 	return strings.HasPrefix(token, "ghu")
+}
+
+var MockGetOAuthContext func() *oauthutil.OAuthContext
+
+func GetOAuthContext(baseURL string) *oauthutil.OAuthContext {
+	if MockGetOAuthContext != nil {
+		return MockGetOAuthContext()
+	}
+
+	for _, authProvider := range conf.SiteConfig().AuthProviders {
+		if authProvider.Github != nil {
+			p := authProvider.Github
+			ghURL := strings.TrimSuffix(p.Url, "/")
+			if !strings.HasPrefix(baseURL, ghURL) {
+				continue
+			}
+
+			return &oauthutil.OAuthContext{
+				ClientID:     p.ClientID,
+				ClientSecret: p.ClientSecret,
+				Endpoint: oauth2.Endpoint{
+					AuthURL:  ghURL + "/login/oauth/authorize",
+					TokenURL: ghURL + "/login/oauth/access_token",
+				},
+			}
+		}
+	}
+	return nil
 }

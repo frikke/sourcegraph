@@ -65,6 +65,7 @@ var (
 		router.Favicon:            {},
 		router.Logout:             {},
 		router.SignUp:             {},
+		router.RequestAccess:      {},
 		router.SiteInit:           {},
 		router.SignIn:             {},
 		router.SignOut:            {},
@@ -79,6 +80,7 @@ var (
 		uirouter.RouteSignUp:             {},
 		uirouter.RoutePasswordReset:      {},
 		uirouter.RoutePingFromSelfHosted: {},
+		uirouter.RouteRequestAccess:      {},
 	}
 	// Some routes return non-standard HTTP responses when a user is not
 	// signed in.
@@ -108,12 +110,20 @@ func AllowAnonymousRequest(req *http.Request) bool {
 		return true
 	}
 
+	if conf.Get().AuthPublic {
+		return true
+	}
+
 	if strings.HasPrefix(req.URL.Path, "/.assets/") {
 		return true
 	}
 
 	// Permission is checked by github token
 	if strings.HasPrefix(req.URL.Path, "/.api/lsif/upload") {
+		return true
+	}
+
+	if strings.HasPrefix(req.URL.Path, "/.api/scip/upload") {
 		return true
 	}
 
@@ -124,6 +134,7 @@ func AllowAnonymousRequest(req *http.Request) bool {
 
 	// Authentication is performed in the webhook handler itself.
 	for _, prefix := range []string{
+		"/.api/webhooks",
 		"/.api/github-webhooks",
 		"/.api/gitlab-webhooks",
 		"/.api/bitbucket-server-webhooks",
@@ -136,6 +147,11 @@ func AllowAnonymousRequest(req *http.Request) bool {
 
 	// Permission is checked by a shared token
 	if strings.HasPrefix(req.URL.Path, "/.executors") {
+		return true
+	}
+
+	// Permission is checked by a shared token for SCIM
+	if strings.HasPrefix(req.URL.Path, "/.api/scim/v2") {
 		return true
 	}
 

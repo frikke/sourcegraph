@@ -1,30 +1,27 @@
 import React, { useCallback, useMemo, useState } from 'react'
 
 import classNames from 'classnames'
-import { Observable } from 'rxjs'
+import type { Observable } from 'rxjs'
 import { useDeepCompareEffectNoCheck } from 'use-deep-compare-effect'
 
-import {
-    SearchPatternType,
-    getUserSearchContextNamespaces,
-    fetchAutoDefinedSearchContexts,
-    QueryState,
-} from '@sourcegraph/search'
-import { SearchBox } from '@sourcegraph/search-ui'
+import { SearchBox } from '@sourcegraph/branded'
 import { wrapRemoteObservable } from '@sourcegraph/shared/src/api/client/api/common'
+import { getUserSearchContextNamespaces, type QueryState, SearchMode } from '@sourcegraph/shared/src/search'
 import { collectMetrics } from '@sourcegraph/shared/src/search/query/metrics'
 import { appendContextFilter, sanitizeQueryForTelemetry } from '@sourcegraph/shared/src/search/query/transformer'
-import { LATEST_VERSION, SearchMatch } from '@sourcegraph/shared/src/search/stream'
-import { globbingEnabledFromSettings } from '@sourcegraph/shared/src/util/globbing'
+import { LATEST_VERSION, type SearchMatch } from '@sourcegraph/shared/src/search/stream'
+import { useIsLightTheme } from '@sourcegraph/shared/src/theme'
 
-import { SearchHomeState } from '../../state'
-import { WebviewPageProps } from '../platform/context'
+import { SearchPatternType } from '../../graphql-operations'
+import type { SearchHomeState } from '../../state'
+import type { WebviewPageProps } from '../platform/context'
 
 import { fetchSearchContexts } from './alias/fetchSearchContext'
 import { BrandHeader } from './components/BrandHeader'
 import { HomeFooter } from './components/HomeFooter'
 
 import styles from './index.module.scss'
+
 export interface SearchHomeViewProps extends WebviewPageProps {
     context: SearchHomeState['context']
 }
@@ -34,13 +31,15 @@ export const SearchHomeView: React.FunctionComponent<React.PropsWithChildren<Sea
     authenticatedUser,
     platformContext,
     settingsCascade,
-    theme,
     context,
     instanceURL,
 }) => {
+    const isLightTheme = useIsLightTheme()
+
     // Toggling case sensitivity or pattern type does NOT trigger a new search on home view.
     const [caseSensitive, setCaseSensitivity] = useState(false)
     const [patternType, setPatternType] = useState(SearchPatternType.standard)
+    const [searchMode, setSearchMode] = useState(SearchMode.SmartSearch)
 
     const [userQueryState, setUserQueryState] = useState<QueryState>({
         query: '',
@@ -56,6 +55,7 @@ export const SearchHomeView: React.FunctionComponent<React.PropsWithChildren<Sea
             .streamSearch(userQueryState.query, {
                 caseSensitive,
                 patternType,
+                searchMode,
                 version: LATEST_VERSION,
                 trace: undefined,
             })
@@ -70,6 +70,7 @@ export const SearchHomeView: React.FunctionComponent<React.PropsWithChildren<Sea
                 queryState: { query: userQueryState.query },
                 searchCaseSensitivity: caseSensitive,
                 searchPatternType: patternType,
+                searchMode,
             })
             .catch(error => {
                 // TODO surface error to users
@@ -119,6 +120,7 @@ export const SearchHomeView: React.FunctionComponent<React.PropsWithChildren<Sea
         userQueryState.query,
         caseSensitive,
         patternType,
+        searchMode,
         instanceURL,
         context.selectedSearchContextSpec,
         platformContext.telemetryService,
@@ -132,8 +134,6 @@ export const SearchHomeView: React.FunctionComponent<React.PropsWithChildren<Sea
             setUserQueryState(context.searchSidebarQueryState.proposedQueryState?.queryState)
         }
     }, [context.searchSidebarQueryState.proposedQueryState?.queryState])
-
-    const globbing = useMemo(() => globbingEnabledFromSettings(settingsCascade), [settingsCascade])
 
     const setSelectedSearchContextSpec = useCallback(
         (spec: string) => {
@@ -152,7 +152,7 @@ export const SearchHomeView: React.FunctionComponent<React.PropsWithChildren<Sea
 
     return (
         <div className="d-flex flex-column align-items-center">
-            <BrandHeader theme={theme} />
+            <BrandHeader isLightTheme={isLightTheme} />
 
             <div className={styles.homeSearchBoxContainer}>
                 {/* eslint-disable-next-line react/forbid-elements */}
@@ -167,7 +167,10 @@ export const SearchHomeView: React.FunctionComponent<React.PropsWithChildren<Sea
                         caseSensitive={caseSensitive}
                         setCaseSensitivity={setCaseSensitivity}
                         patternType={patternType}
+                        defaultPatternType={SearchPatternType.standard}
                         setPatternType={setPatternType}
+                        searchMode={searchMode}
+                        setSearchMode={setSearchMode}
                         isSourcegraphDotCom={isSourcegraphDotCom}
                         structuralSearchDisabled={false}
                         queryState={userQueryState}
@@ -177,30 +180,21 @@ export const SearchHomeView: React.FunctionComponent<React.PropsWithChildren<Sea
                         searchContextsEnabled={true}
                         showSearchContext={true}
                         showSearchContextManagement={false}
-                        defaultSearchContextSpec="global"
                         setSelectedSearchContextSpec={setSelectedSearchContextSpec}
                         selectedSearchContextSpec={context.selectedSearchContextSpec}
                         fetchSearchContexts={fetchSearchContexts}
-                        fetchAutoDefinedSearchContexts={fetchAutoDefinedSearchContexts}
                         getUserSearchContextNamespaces={getUserSearchContextNamespaces}
                         fetchStreamSuggestions={fetchStreamSuggestions}
-                        settingsCascade={settingsCascade}
-                        globbing={globbing}
-                        isLightTheme={theme === 'theme-light'}
                         telemetryService={platformContext.telemetryService}
+                        telemetryRecorder={platformContext.telemetryRecorder}
                         platformContext={platformContext}
                         className={classNames('flex-grow-1 flex-shrink-past-contents', styles.searchBox)}
                         containerClassName={styles.searchBoxContainer}
                         autoFocus={true}
-                        editorComponent="monaco"
                     />
                 </form>
 
-                <HomeFooter
-                    isLightTheme={theme === 'theme-light'}
-                    setQuery={setUserQueryState}
-                    telemetryService={platformContext.telemetryService}
-                />
+                <HomeFooter setQuery={setUserQueryState} telemetryService={platformContext.telemetryService} />
             </div>
         </div>
     )

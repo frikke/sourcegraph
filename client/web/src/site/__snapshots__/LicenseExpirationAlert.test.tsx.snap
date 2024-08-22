@@ -1,6 +1,6 @@
-// Jest Snapshot v1, https://goo.gl/fbAQLP
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`LicenseExpirationAlert expired 1`] = `
+exports[`LicenseExpirationAlert > expired 1`] = `
 <DocumentFragment>
   <div
     aria-live="assertive"
@@ -10,7 +10,7 @@ exports[`LicenseExpirationAlert expired 1`] = `
     <div
       class="content"
     >
-      Your Sourcegraph license expired 3 months ago. 
+      The license for this Sourcegraph instance expired 3 months ago. 
       <a
         class="anchorLink site-alert__link"
         href="/site-admin/license"
@@ -24,7 +24,7 @@ exports[`LicenseExpirationAlert expired 1`] = `
        or 
       <a
         class="anchorLink site-alert__link"
-        href="https://about.sourcegraph.com/contact"
+        href="https://sourcegraph.com/contact"
       >
         <span
           class="underline"
@@ -34,7 +34,7 @@ exports[`LicenseExpirationAlert expired 1`] = `
       </a>
     </div>
     <button
-      aria-label="Close alert"
+      aria-label="Dismiss alert"
       class="btn btnIcon closeButton"
       type="button"
     >
@@ -56,7 +56,7 @@ exports[`LicenseExpirationAlert expired 1`] = `
 </DocumentFragment>
 `;
 
-exports[`LicenseExpirationAlert expiring soon 1`] = `
+exports[`LicenseExpirationAlert > expiring soon 1`] = `
 <DocumentFragment>
   <div
     aria-live="assertive"
@@ -66,7 +66,7 @@ exports[`LicenseExpirationAlert expiring soon 1`] = `
     <div
       class="content"
     >
-      Your Sourcegraph license will expire in 3 days. 
+      The license for this Sourcegraph instance will expire in 3 days. 
       <a
         class="anchorLink site-alert__link"
         href="/site-admin/license"
@@ -80,7 +80,7 @@ exports[`LicenseExpirationAlert expiring soon 1`] = `
        or 
       <a
         class="anchorLink site-alert__link"
-        href="https://about.sourcegraph.com/contact"
+        href="https://sourcegraph.com/contact"
       >
         <span
           class="underline"
@@ -90,7 +90,7 @@ exports[`LicenseExpirationAlert expiring soon 1`] = `
       </a>
     </div>
     <button
-      aria-label="Close alert"
+      aria-label="Dismiss alert"
       class="btn btnIcon closeButton"
       type="button"
     >

@@ -1,17 +1,16 @@
-import React, { FunctionComponent, useCallback, useEffect, useMemo, useState } from 'react'
+import React, { type FunctionComponent, useCallback, useEffect, useMemo, useState } from 'react'
 
 import { gql, useMutation } from '@apollo/client'
-import { mdiDelete } from '@mdi/js'
+import { mdiDelete, mdiFlag } from '@mdi/js'
 import classNames from 'classnames'
-import { RouteComponentProps, useHistory } from 'react-router'
+import { useNavigate, useParams } from 'react-router-dom'
 import { of } from 'rxjs'
 import { catchError, map } from 'rxjs/operators'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { Form } from '@sourcegraph/branded/src/components/Form'
 import { Toggle } from '@sourcegraph/branded/src/components/Toggle'
-import { asError, ErrorLike, isErrorLike, pluralize } from '@sourcegraph/common'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { asError, type ErrorLike, isErrorLike, pluralize } from '@sourcegraph/common'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import {
     Button,
     Container,
@@ -27,8 +26,11 @@ import {
     Label,
     H3,
     Text,
+    ErrorAlert,
+    Form,
 } from '@sourcegraph/wildcard'
 
+import { CreatedByAndUpdatedByInfoByline } from '../components/Byline/CreatedByAndUpdatedByInfoByline'
 import { Collapsible } from '../components/Collapsible'
 import { LoaderButton } from '../components/LoaderButton'
 import { PageTitle } from '../components/PageTitle'
@@ -36,20 +38,24 @@ import { RadioButtons } from '../components/RadioButtons'
 
 import { fetchFeatureFlags as defaultFetchFeatureFlags } from './backend'
 import { getFeatureFlagReferences, parseProductReference } from './SiteAdminFeatureFlagsPage'
+import { UserSelect } from './user-select/UserSelect'
 
 import styles from './SiteAdminFeatureFlagConfigurationPage.module.scss'
 
-export interface SiteAdminFeatureFlagConfigurationProps extends RouteComponentProps<{ name: string }>, TelemetryProps {
+export interface SiteAdminFeatureFlagConfigurationProps extends TelemetryProps, TelemetryV2Props {
     fetchFeatureFlags?: typeof defaultFetchFeatureFlags
     productVersion?: string
 }
 
 export const SiteAdminFeatureFlagConfigurationPage: FunctionComponent<
     React.PropsWithChildren<SiteAdminFeatureFlagConfigurationProps>
-> = ({ match: { params }, fetchFeatureFlags = defaultFetchFeatureFlags, productVersion = window.context.version }) => {
-    const history = useHistory()
+> = ({ fetchFeatureFlags = defaultFetchFeatureFlags, productVersion = window.context.version, telemetryRecorder }) => {
+    const { name = '' } = useParams<{ name: string }>()
+    const navigate = useNavigate()
     const productGitVersion = parseProductReference(productVersion)
-    const isCreateFeatureFlag = params.name === 'new'
+    const isCreateFeatureFlag = name === 'new'
+
+    useEffect(() => telemetryRecorder.recordEvent('admin.featureFlagConfiguration', 'view'), [telemetryRecorder])
 
     // Load the initial feature flag, unless we are creating a new feature flag.
     const featureFlagOrError = useObservable(
@@ -58,16 +64,16 @@ export const SiteAdminFeatureFlagConfigurationPage: FunctionComponent<
                 isCreateFeatureFlag
                     ? of(undefined)
                     : fetchFeatureFlags().pipe(
-                          map(flags => flags.find(flag => flag.name === params.name)),
+                          map(flags => flags.find(flag => flag.name === name)),
                           map(flag => {
                               if (flag === undefined) {
-                                  throw new Error(`Could not find feature flag with name '${params.name}'.`)
+                                  throw new Error(`Could not find feature flag with name '${name}'.`)
                               }
                               return flag
                           }),
                           catchError((error): [ErrorLike] => [asError(error)])
                       ),
-            [isCreateFeatureFlag, params.name, fetchFeatureFlags]
+            [isCreateFeatureFlag, name, fetchFeatureFlags]
         )
     )
 
@@ -94,15 +100,12 @@ export const SiteAdminFeatureFlagConfigurationPage: FunctionComponent<
     )
 
     // Set up mutations for creation or management of this feature flag.
-    const [createFeatureFlag, { loading: createFlagLoading, error: createFlagError }] = useMutation(
-        CREATE_FEATURE_FLAG_MUTATION
-    )
-    const [updateFeatureFlag, { loading: updateFlagLoading, error: updateFlagError }] = useMutation(
-        UPDATE_FEATURE_FLAG_MUTATION
-    )
-    const [deleteFeatureFlag, { loading: deleteFlagLoading, error: deleteFlagError }] = useMutation(
-        DELETE_FEATURE_FLAG_MUTATION
-    )
+    const [createFeatureFlag, { loading: createFlagLoading, error: createFlagError }] =
+        useMutation(CREATE_FEATURE_FLAG_MUTATION)
+    const [updateFeatureFlag, { loading: updateFlagLoading, error: updateFlagError }] =
+        useMutation(UPDATE_FEATURE_FLAG_MUTATION)
+    const [deleteFeatureFlag, { loading: deleteFlagLoading, error: deleteFlagError }] =
+        useMutation(DELETE_FEATURE_FLAG_MUTATION)
 
     // Create the main form fields and action buttons based on the state of the page.
     let body: React.ReactElement
@@ -130,7 +133,7 @@ export const SiteAdminFeatureFlagConfigurationPage: FunctionComponent<
                             ...flagValue,
                         },
                     }).then(() => {
-                        history.push(`./${flagName || 'new'}`)
+                        navigate(`/site-admin/feature-flags/configuration/${flagName || 'new'}`)
                     })
                 }
             >
@@ -144,7 +147,7 @@ export const SiteAdminFeatureFlagConfigurationPage: FunctionComponent<
             </Button>
         )
     } else if (isErrorLike(featureFlagOrError)) {
-        // Error occured state
+        // Error occurred state
         body = <ErrorAlert prefix="Error fetching feature flag" error={featureFlagOrError} />
     } else if (flagName && flagType && flagValue) {
         // Found existing feature flag state
@@ -170,7 +173,7 @@ export const SiteAdminFeatureFlagConfigurationPage: FunctionComponent<
                                 ...flagValue,
                             },
                         }).then(() => {
-                            history.push(`./${flagName}`)
+                            navigate(0)
                         })
                     }
                 >
@@ -193,7 +196,7 @@ export const SiteAdminFeatureFlagConfigurationPage: FunctionComponent<
                                 name: flagName,
                             },
                         }).then(() => {
-                            history.push('../')
+                            navigate('/site-admin/feature-flags')
                         })
                     }
                 >
@@ -217,32 +220,54 @@ export const SiteAdminFeatureFlagConfigurationPage: FunctionComponent<
     return (
         <>
             <PageTitle title={`${verb} feature flag`} />
-            <PageHeader
-                headingElement="h2"
-                path={[
-                    {
-                        text: <>{verb} feature flag</>,
-                    },
-                ]}
-                className="mb-3"
-            />
-
-            {createFlagError && <ErrorAlert prefix="Error creating feature flag" error={createFlagError} />}
-            {updateFlagError && <ErrorAlert prefix="Error updating feature flag" error={updateFlagError} />}
-            {deleteFlagError && <ErrorAlert prefix="Error deleting feature flag" error={deleteFlagError} />}
-
             <Container>
+                <PageHeader
+                    headingElement="h2"
+                    path={
+                        isCreateFeatureFlag
+                            ? [
+                                  { icon: mdiFlag },
+                                  { to: '/site-admin/feature-flags', text: 'Feature flags' },
+                                  { text: `${verb} feature flag` },
+                              ]
+                            : [
+                                  { icon: mdiFlag },
+                                  { to: '/site-admin/feature-flags', text: 'Feature flags' },
+                                  { text: flagName },
+                              ]
+                    }
+                    className="mb-3"
+                    byline={
+                        featureFlagOrError &&
+                        !isErrorLike(featureFlagOrError) &&
+                        !isCreateFeatureFlag && (
+                            <CreatedByAndUpdatedByInfoByline
+                                createdAt={featureFlagOrError.createdAt}
+                                updatedAt={featureFlagOrError.updatedAt}
+                                noAuthor={true}
+                            />
+                        )
+                    }
+                />
+                {createFlagError && <ErrorAlert prefix="Error creating feature flag" error={createFlagError} />}
+                {updateFlagError && <ErrorAlert prefix="Error updating feature flag" error={updateFlagError} />}
+                {deleteFlagError && <ErrorAlert prefix="Error deleting feature flag" error={deleteFlagError} />}
+
                 {body}
 
                 <ReferencesCollapsible flagName={flagName} productGitVersion={productGitVersion} />
+                <div className="mt-3">
+                    {actions}
+                    <Button
+                        type="button"
+                        className="ml-2"
+                        variant="secondary"
+                        onClick={() => navigate('/site-admin/feature-flags')}
+                    >
+                        Cancel
+                    </Button>
+                </div>
             </Container>
-
-            <div className="mt-3">
-                {actions}
-                <Button type="button" className="ml-2" variant="secondary" onClick={() => history.push('../')}>
-                    Cancel
-                </Button>
-            </div>
         </>
     )
 }
@@ -254,7 +279,7 @@ interface FeatureFlagOverride {
     value: boolean
 }
 
-interface FeaturefFlagOverrideParsedID {
+interface FeatureFlagOverrideParsedID {
     OrgID: number
     UserID: number
     FlagName: string
@@ -271,6 +296,7 @@ interface FeatureFlagRolloutValue {
 interface CreateFeatureFlagOverrideResult {
     createFeatureFlagOverride: FeatureFlagOverride
 }
+
 interface CreateFeatureFlagOverrideVariables {
     namespace: string
     flagName: string
@@ -292,10 +318,10 @@ const AddFeatureFlagOverride: FunctionComponent<
     const [overrideType, setOverrideType] = useState<FeatureFlagOverrideType>('User')
     const [namespaceID, setNamespaceID] = useState<number | string>('')
 
-    const getBase64Namespace = useCallback((): string => btoa(`${overrideType}:${namespaceID}`), [
-        namespaceID,
-        overrideType,
-    ])
+    const getBase64Namespace = useCallback(
+        (): string => btoa(`${overrideType}:${namespaceID}`),
+        [namespaceID, overrideType]
+    )
 
     const [addOverride, { loading, error, reset }] = useMutation<
         CreateFeatureFlagOverrideResult,
@@ -365,13 +391,24 @@ const AddFeatureFlagOverride: FunctionComponent<
                             selected={overrideType}
                         />
                     </Label>
-                    <Input
-                        inputClassName="mt-2"
-                        label={`${overrideType} ID`}
-                        type="number"
-                        value={namespaceID}
-                        onChange={setInputValue}
-                    />
+                    {overrideType === 'User' && (
+                        <>
+                            <Label id="add-feature-flag--user">Select user</Label>
+                            <UserSelect
+                                onSelect={user => setNamespaceID(user?.databaseID ?? '')}
+                                htmlID="add-feature-flag--user"
+                            />
+                        </>
+                    )}
+                    {overrideType !== 'User' && (
+                        <Input
+                            inputClassName="mt-2"
+                            label={`${overrideType} ID`}
+                            type="number"
+                            value={namespaceID}
+                            onChange={setInputValue}
+                        />
+                    )}
                     <Label className="w-100">
                         <div className="mb-2 mt-2">Value</div>
                         <Toggle
@@ -389,7 +426,7 @@ const AddFeatureFlagOverride: FunctionComponent<
                             Cancel
                         </Button>
                         <LoaderButton
-                            type="submit"
+                            type="button"
                             variant="primary"
                             disabled={loading || namespaceID === ''}
                             onClick={() => addOverride()}
@@ -446,7 +483,7 @@ const FeatureFlagOverrideItem: FunctionComponent<
 
     const { OrgID: orgID, UserID: userID } = JSON.parse(
         atob(id).replace('FeatureFlagOverride:{', '{')
-    ) as FeaturefFlagOverrideParsedID
+    ) as FeatureFlagOverrideParsedID
     const nsLabel = orgID > 0 ? 'OrgID' : 'UserID'
     const nsValue = orgID > 0 ? orgID : userID
 
@@ -759,7 +796,7 @@ const FeatureFlagBooleanValueSettings: React.FunctionComponent<
 
 /**
  * Searches for potential references and renders them in a collapsible, or returns an
- * empty fragment - this allows references to works seamlessly in case the flag has not
+ * empty fragment - this allows references to work seamlessly in case the flag has not
  * been implemented yet, or if this Sourcegraph instance does not have a copy of the
  * Sourcegraph repository.
  */
@@ -770,10 +807,10 @@ const ReferencesCollapsible: React.FunctionComponent<
     }>
 > = ({ flagName, productGitVersion }) => {
     const references = useObservable(
-        useMemo(() => (flagName ? getFeatureFlagReferences(flagName, productGitVersion) : of([])), [
-            flagName,
-            productGitVersion,
-        ])
+        useMemo(
+            () => (flagName ? getFeatureFlagReferences(flagName, productGitVersion) : of([])),
+            [flagName, productGitVersion]
+        )
     )
     if (references === undefined || references.length === 0) {
         return <></>

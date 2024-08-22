@@ -1,10 +1,10 @@
-import { ComponentProps, MouseEvent, ReactElement } from 'react'
+import type { ComponentProps, MouseEvent, ReactElement } from 'react'
 
 import { Group } from '@visx/group'
 import { BarRounded } from '@visx/shape'
-import { ScaleBand, ScaleLinear } from 'd3-scale'
+import type { ScaleBand, ScaleLinear } from 'd3-scale'
 
-import { Category } from '../utils/get-grouped-categories'
+import type { Category } from '../utils/get-grouped-categories'
 
 interface StackedBarsProps<Datum> extends ComponentProps<typeof Group> {
     xScale: ScaleBand<string>
@@ -14,7 +14,7 @@ interface StackedBarsProps<Datum> extends ComponentProps<typeof Group> {
     getDatumName: (datum: Datum) => string
     getDatumValue: (datum: Datum) => number
     getDatumColor: (datum: Datum) => string | undefined
-    onBarHover: (datum: Datum, category: Category<Datum>) => void
+    onBarHover: (datum: Datum, category: Category<Datum>, node: Element) => void
     onBarLeave: () => void
     onBarClick: (event: MouseEvent, datum: Datum, index: number) => void
 }
@@ -59,7 +59,7 @@ export function StackedBars<Datum>(props: StackedBarsProps<Datum>): ReactElement
                                 radius={5}
                                 bottom={isFirstBar}
                                 top={isLastBar}
-                                onMouseEnter={() => onBarHover(stackedDatum.datum, category)}
+                                onMouseEnter={event => onBarHover(stackedDatum.datum, category, event.currentTarget)}
                                 onClick={event => onBarClick(event, stackedDatum.datum, index)}
                                 onMouseLeave={onBarLeave}
                             />
@@ -91,7 +91,7 @@ function getStackedData<Datum>(input: GetStackedDataInput<Datum>): StackedCatego
     return categories.map<StackedCategory<Datum>>(category => ({
         ...category,
         stackedData: category.data.reduce<StackedDatum<Datum>[]>((stack, item) => {
-            const previousStackedValue = stack.length !== 0 ? stack[stack.length - 1].stackedValue : 0
+            const previousStackedValue = stack.length !== 0 ? stack.at(-1)!.stackedValue : 0
 
             stack.push({ datum: item, stackedValue: previousStackedValue + getDatumValue(item) })
 

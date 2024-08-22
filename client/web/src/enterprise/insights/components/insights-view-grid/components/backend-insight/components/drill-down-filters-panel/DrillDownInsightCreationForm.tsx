@@ -1,17 +1,25 @@
-import { FunctionComponent } from 'react'
+import type { FunctionComponent } from 'react'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { Button, Input, H3 } from '@sourcegraph/wildcard'
+import {
+    Button,
+    Input,
+    H3,
+    ErrorAlert,
+    useForm,
+    useField,
+    FORM_ERROR,
+    getDefaultInputProps,
+    createRequiredValidator,
+    type SubmissionResult,
+} from '@sourcegraph/wildcard'
 
 import { LoaderButton } from '../../../../../../../../components/LoaderButton'
-import { getDefaultInputProps, useField, createRequiredValidator } from '../../../../../form'
-import { FORM_ERROR, SubmissionResult, useForm } from '../../../../../form/hooks/useForm'
 
 export interface DrillDownInsightCreationFormValues {
     insightName: string
 }
 
-const insightRequiredValidator = createRequiredValidator('Insight name is a required field.')
+const INSIGHT_NAME_VALIDATORS = createRequiredValidator('Insight name is a required field.')
 
 const DEFAULT_FORM_VALUES: DrillDownInsightCreationFormValues = {
     insightName: '',
@@ -34,7 +42,7 @@ export const DrillDownInsightCreationForm: FunctionComponent<DrillDownInsightCre
     const insightName = useField({
         name: 'insightName',
         formApi: formAPI,
-        validators: { sync: insightRequiredValidator },
+        validators: { sync: INSIGHT_NAME_VALIDATORS },
     })
 
     return (

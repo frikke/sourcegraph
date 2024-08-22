@@ -10,14 +10,12 @@ import (
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/std"
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/usershell"
 	"github.com/sourcegraph/sourcegraph/dev/sg/root"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 func aptGetInstall(pkg string, preinstall ...string) check.FixAction[CheckArgs] {
-	commands := []string{
-		`sudo apt-get update`,
-	}
-	commands = append(commands, preinstall...)
-	commands = append(commands, fmt.Sprintf("sudo apt-get install -y %s", pkg))
+	commands := preinstall
+	commands = append(commands, "sudo apt-get update", fmt.Sprintf("sudo apt-get install -y %s", pkg))
 	return cmdFixes(commands...)
 }
 
@@ -33,9 +31,10 @@ var Ubuntu = []category{
 			},
 			{
 				Name:  "git",
-				Check: checkAction(check.Combine(check.InPath("git"), checkGitVersion(">= 2.34.1"))),
-				Fix:   aptGetInstall("git", "sudo add-apt-repository ppa:git-core/ppa"),
-			}, {
+				Check: checkAction(check.Git),
+				Fix:   aptGetInstall("git", "sudo add-apt-repository -y ppa:git-core/ppa"),
+			},
+			{
 				Name:  "pcre",
 				Check: checkAction(check.HasUbuntuLibrary("libpcre3-dev")),
 				Fix:   aptGetInstall("libpcre3-dev"),
@@ -77,10 +76,28 @@ var Ubuntu = []category{
 				Fix:   aptGetInstall("bash"),
 			},
 			{
+				// Bazelisk is a wrapper for Bazel written in Go. It automatically picks a good version of Bazel given your current working directory
+				// Bazelisk replaces the bazel binary in your path
+				Name:  "bazelisk",
+				Check: checkAction(check.Bazelisk),
+				Fix: func(ctx context.Context, cio check.IO, args CheckArgs) error {
+					if err := check.InPath("bazel")(ctx); err == nil {
+						cio.WriteAlertf("There already exists a bazel binary in your path and it is not managed by Bazlisk. Please remove it as Bazelisk replaces the bazel binary")
+						return errors.New("bazel binary already exists - please uninstall it with your package manager ex. `apt remove bazel`")
+					}
+					return cmdFix(`sudo curl -L https://github.com/bazelbuild/bazelisk/releases/download/v1.16.0/bazelisk-linux-amd64 -o /usr//bin/bazel && sudo chmod +x /usr/bin/bazel`)(ctx, cio, args)
+				},
+			},
+			{
+				Name:  "ibazel",
+				Check: checkAction(check.InPath("ibazel")),
+				Fix:   cmdFix(`sudo curl -L  https://github.com/bazelbuild/bazel-watcher/releases/download/v0.21.4/ibazel_linux_amd64 -o /usr/bin/ibazel && sudo chmod +x /usr/bin/ibazel`),
+			},
+			{
 				Name: "asdf",
 				// TODO add the if Keegan check
-				Check: checkAction(check.CommandOutputContains("asdf", "version")),
-				Fix: func(ctx context.Context, cio check.IO, args CheckArgs) error {
+				Check: checkAction(check.ASDF),
+				Fix: func(ctx context.Context, cio check.IO, _ CheckArgs) error {
 					if err := usershell.Run(ctx, "git clone https://github.com/asdf-vm/asdf.git ~/.asdf --branch v0.9.0").StreamLines(cio.Verbose); err != nil {
 						return err
 					}
@@ -88,6 +105,16 @@ var Ubuntu = []category{
 						`echo ". $HOME/.asdf/asdf.sh" >>`, usershell.ShellConfigPath(ctx),
 					).Wait()
 				},
+			},
+			{
+				Name:  "p4 CLI (Perforce)",
+				Check: checkAction(check.InPath("p4")),
+				// https://www.perforce.com/perforce-packages
+				// https://superuser.com/a/1512272/186941
+				Fix: aptGetInstall("helix-cli",
+					"wget -qO - https://package.perforce.com/perforce.pubkey | sudo apt-key add -",
+					"printf \"deb http://package.perforce.com/apt/ubuntu $(lsb_release -sc) release\" | sudo tee /etc/apt/sources.list.d/perforce.list",
+				),
 			},
 		},
 	},
@@ -128,15 +155,25 @@ var Ubuntu = []category{
 		},
 	},
 	categoryCloneRepositories(),
-	categoryProgrammingLanguagesAndTools(),
+	categoryProgrammingLanguagesAndTools(
+		// src-cli is installed differently on Ubuntu and Mac
+		&dependency{
+			Name:  "src",
+			Check: checkAction(check.Combine(check.InPath("src"), checkSrcCliVersion(">= 4.0.2"))),
+			Fix:   cmdFix(`sudo curl -L https://sourcegraph.com/.api/src-cli/src_linux_amd64 -o /usr/local/bin/src && sudo chmod +x /usr/local/bin/src`),
+		},
+	),
 	{
 		Name:      "Postgres database",
 		DependsOn: []string{depsBaseUtilities},
 		Checks: []*dependency{
 			{
 				Name:  "Install Postgres",
-				Check: checkAction(check.Combine(check.InPath("psql"))),
-				Fix:   aptGetInstall("postgresql postgresql-contrib"),
+				Check: checkAction(check.InPath("psql")),
+				Fix: aptGetInstall(
+					"postgresql-12",
+					"DEBIAN_FRONTEND=noninteractive curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc|sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg && echo \"deb http://apt.postgresql.org/pub/repos/apt/ `lsb_release -cs`-pgdg main\" | sudo tee  /etc/apt/sources.list.d/pgdg.list",
+				),
 			},
 			{
 				Name: "Start Postgres",
@@ -150,11 +187,11 @@ var Ubuntu = []category{
 					if err := checkSourcegraphDatabase(ctx, out, args); err == nil {
 						return nil
 					}
-					return checkPostgresConnection(ctx)
+					return check.PostgresConnection(ctx)
 				},
 				Description: `Sourcegraph requires the PostgreSQL database to be running.
 
-We recommend installing it with Homebrew and starting it as a system service.
+We recommend installing it with your OS package manager  and starting it as a system service.
 If you know what you're doing, you can also install PostgreSQL another way.
 For example: you can use https://postgresapp.com/
 
@@ -199,7 +236,7 @@ If you're not sure: use the recommended commands to install PostgreSQL.`,
 				Name: "Start Redis",
 				Description: `Sourcegraph requires the Redis database to be running.
 We recommend installing it with Homebrew and starting it as a system service.`,
-				Check: checkAction(check.Retry(checkRedisConnection, 5, 500*time.Millisecond)),
+				Check: checkAction(check.Redis),
 				Fix:   cmdFix("sudo systemctl enable --now redis-server.service"),
 			},
 		},
@@ -222,9 +259,9 @@ To do that, we need to add sourcegraph.test to the /etc/hosts file.`,
 				Description: `In order to use TLS to access your local Sourcegraph instance, you need to
 trust the certificate created by Caddy, the proxy we use locally.
 
-YOU NEED TO RESTART 'sg setup' AFTER RUNNING THIS COMMAND!`,
+WARNING: if you just fixed (automatically or manually) this step, you must restart sg setup for the check to pass.`,
 				Enabled: disableInCI(), // Can't seem to get this working
-				Check:   checkAction(checkCaddyTrusted),
+				Check:   checkAction(check.Caddy),
 				Fix: func(ctx context.Context, cio check.IO, args CheckArgs) error {
 					return root.Run(usershell.Command(ctx, `./dev/caddy.sh trust`)).StreamLines(cio.Verbose)
 				},
@@ -235,7 +272,7 @@ YOU NEED TO RESTART 'sg setup' AFTER RUNNING THIS COMMAND!`,
 	{
 		Name:      "Cloud services",
 		DependsOn: []string{depsBaseUtilities},
-		Enabled:   enableForTeammatesOnly(),
+		Enabled:   disableInCI(),
 		Checks: []*dependency{
 			dependencyGcloud(),
 		},

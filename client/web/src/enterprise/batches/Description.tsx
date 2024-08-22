@@ -3,9 +3,9 @@ import React from 'react'
 import classNames from 'classnames'
 
 import { renderMarkdown } from '@sourcegraph/common'
-import { Markdown } from '@sourcegraph/shared/src/components/Markdown'
+import { Markdown } from '@sourcegraph/wildcard'
 
-import { BatchChangeFields } from '../../graphql-operations'
+import type { BatchChangeFields } from '../../graphql-operations'
 
 interface DescriptionProps extends Pick<BatchChangeFields, 'description'> {
     className?: string

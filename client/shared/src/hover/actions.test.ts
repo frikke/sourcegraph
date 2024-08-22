@@ -1,43 +1,31 @@
-import { Remote } from 'comlink'
-import { createMemoryHistory, MemoryHistory, createPath } from 'history'
-import { from, Observable, of, Subscription } from 'rxjs'
+import { from, type Observable, of, lastValueFrom, firstValueFrom } from 'rxjs'
 import { first } from 'rxjs/operators'
 import { TestScheduler } from 'rxjs/testing'
 import * as sinon from 'sinon'
-import * as sourcegraph from 'sourcegraph'
+import type * as sourcegraph from 'sourcegraph'
+import { beforeEach, describe, expect, it } from 'vitest'
 
-import { TextDocumentPositionParameters } from '@sourcegraph/client-api'
-import { HoveredToken, LOADER_DELAY, MaybeLoadingResult } from '@sourcegraph/codeintellify'
+import type { TextDocumentPositionParameters } from '@sourcegraph/client-api'
+import { type HoveredToken, LOADER_DELAY, type MaybeLoadingResult } from '@sourcegraph/codeintellify'
 import { resetAllMemoizationCaches } from '@sourcegraph/common'
 import { Position, Range } from '@sourcegraph/extension-api-classes'
-import { Location } from '@sourcegraph/extension-api-types'
-import { GraphQLResult, SuccessGraphQLResult } from '@sourcegraph/http-client'
+import type { Location } from '@sourcegraph/extension-api-types'
+import type { GraphQLResult, SuccessGraphQLResult } from '@sourcegraph/http-client'
 
-import { ActionItemAction } from '../actions/ActionItem'
-import { ExposedToClient } from '../api/client/mainthread-api'
-import { FlatExtensionHostAPI } from '../api/contract'
-import { WorkspaceRootWithMetadata } from '../api/extension/extensionHostApi'
-import { integrationTestContext } from '../api/integration-test/testHelpers'
-import { PlatformContext, URLToFileContext } from '../platform/context'
+import type { WorkspaceRootWithMetadata } from '../api/extension/extensionHostApi'
+import type { PlatformContext, URLToFileContext } from '../platform/context'
 import {
-    FileSpec,
-    UIPositionSpec,
-    RawRepoSpec,
-    RepoSpec,
-    RevisionSpec,
-    ViewStateSpec,
-    toAbsoluteBlobURL,
+    type FileSpec,
+    type UIPositionSpec,
+    type RawRepoSpec,
+    type RepoSpec,
+    type RevisionSpec,
+    type ViewStateSpec,
     toPrettyBlobURL,
 } from '../util/url'
 
-import {
-    getDefinitionURL,
-    getHoverActionItems,
-    getHoverActionsContext,
-    HoverActionsContext,
-    registerHoverContributions,
-} from './actions'
-import { HoverContext } from './HoverOverlay'
+import { getDefinitionURL, getHoverActionsContext, type HoverActionsContext } from './actions'
+import type { HoverContext } from './HoverOverlay'
 
 const FIXTURE_PARAMS: TextDocumentPositionParameters & URLToFileContext = {
     textDocument: { uri: 'git://r?c#f' },
@@ -370,8 +358,8 @@ describe('getDefinitionURL', () => {
 
     it('emits null if the locations result is empty', () =>
         expect(
-            of({ isLoading: false, result: [] })
-                .pipe(
+            lastValueFrom(
+                of({ isLoading: false, result: [] }).pipe(
                     getDefinitionURL(
                         { urlToFile, requestGraphQL },
                         {
@@ -381,7 +369,7 @@ describe('getDefinitionURL', () => {
                     ),
                     first(({ isLoading }) => !isLoading)
                 )
-                .toPromise()
+            )
         ).resolves.toStrictEqual({ isLoading: false, result: null }))
 
     describe('if there is exactly 1 location result', () => {
@@ -408,11 +396,11 @@ describe('getDefinitionURL', () => {
                         Partial<ViewStateSpec>
                 ) => ''
             )
-            await of<MaybeLoadingResult<Location[]>>({
-                isLoading: false,
-                result: [{ uri: 'git://r3?c3#f' }],
-            })
-                .pipe(
+            await lastValueFrom(
+                of({
+                    isLoading: false,
+                    result: [{ uri: 'git://r3?c3#f' }],
+                }).pipe(
                     getDefinitionURL(
                         { urlToFile, requestGraphQL },
                         {
@@ -422,7 +410,7 @@ describe('getDefinitionURL', () => {
                     ),
                     first(({ isLoading }) => !isLoading)
                 )
-                .toPromise()
+            )
             sinon.assert.calledOnce(urlToFile)
             expect(urlToFile.getCalls()[0].args[0]).toMatchObject({
                 filePath: 'f',
@@ -436,11 +424,11 @@ describe('getDefinitionURL', () => {
         describe('when the result is inside the current root', () => {
             it('emits the definition URL the user input revision (not commit SHA) of the root', () =>
                 expect(
-                    of<MaybeLoadingResult<Location[]>>({
-                        isLoading: false,
-                        result: [{ uri: 'git://r3?c3#f' }],
-                    })
-                        .pipe(
+                    lastValueFrom(
+                        of({
+                            isLoading: false,
+                            result: [{ uri: 'git://r3?c3#f' }],
+                        }).pipe(
                             getDefinitionURL(
                                 { urlToFile, requestGraphQL },
                                 {
@@ -450,18 +438,18 @@ describe('getDefinitionURL', () => {
                             ),
                             first(({ isLoading }) => !isLoading)
                         )
-                        .toPromise()
+                    )
                 ).resolves.toEqual({ isLoading: false, result: { url: '/r3@v3/-/blob/f', multiple: false } }))
         })
 
         describe('when the result is not inside the current root (different repo and/or commit)', () => {
             it('emits the definition URL with range', () =>
                 expect(
-                    of<MaybeLoadingResult<Location[]>>({
-                        isLoading: false,
-                        result: [FIXTURE_LOCATION_CLIENT],
-                    })
-                        .pipe(
+                    lastValueFrom(
+                        of({
+                            isLoading: false,
+                            result: [FIXTURE_LOCATION_CLIENT],
+                        }).pipe(
                             getDefinitionURL(
                                 { urlToFile, requestGraphQL },
                                 {
@@ -471,16 +459,16 @@ describe('getDefinitionURL', () => {
                             ),
                             first(({ isLoading }) => !isLoading)
                         )
-                        .toPromise()
+                    )
                 ).resolves.toEqual({ isLoading: false, result: { url: '/r2@c2/-/blob/f2?L3:3', multiple: false } }))
 
             it('emits the definition URL without range', () =>
                 expect(
-                    of<MaybeLoadingResult<Location[]>>({
-                        isLoading: false,
-                        result: [{ ...FIXTURE_LOCATION_CLIENT, range: undefined }],
-                    })
-                        .pipe(
+                    lastValueFrom(
+                        of({
+                            isLoading: false,
+                            result: [{ ...FIXTURE_LOCATION_CLIENT, range: undefined }],
+                        }).pipe(
                             getDefinitionURL(
                                 { urlToFile, requestGraphQL },
                                 {
@@ -490,317 +478,26 @@ describe('getDefinitionURL', () => {
                             ),
                             first(({ isLoading }) => !isLoading)
                         )
-                        .toPromise()
+                    )
                 ).resolves.toEqual({ isLoading: false, result: { url: '/r2@c2/-/blob/f2', multiple: false } }))
         })
     })
 
     it('emits the definition panel URL if there is more than 1 location result', () =>
         expect(
-            of<MaybeLoadingResult<Location[]>>({
-                isLoading: false,
-                result: [FIXTURE_LOCATION_CLIENT, { ...FIXTURE_LOCATION, uri: 'other' }],
-            })
-                .pipe(
+            firstValueFrom(
+                of({
+                    isLoading: false,
+                    result: [FIXTURE_LOCATION_CLIENT, { ...FIXTURE_LOCATION, uri: 'other' }],
+                }).pipe(
                     getDefinitionURL(
                         { urlToFile, requestGraphQL },
                         {
                             getWorkspaceRoots: () => of([{ uri: 'git://r?c', inputRevision: 'v' }]),
                         },
                         FIXTURE_PARAMS
-                    ),
-                    first()
+                    )
                 )
-                .toPromise()
+            )
         ).resolves.toEqual({ isLoading: false, result: { url: '/r@v/-/blob/f?L2:2#tab=def', multiple: true } }))
-})
-
-describe('registerHoverContributions()', () => {
-    const subscription = new Subscription()
-    let history!: MemoryHistory
-
-    let extensionHostAPI!: Promise<Remote<FlatExtensionHostAPI>>
-    let extensionAPI!: typeof sourcegraph
-    let exposedToClient!: ExposedToClient
-    let locationAssign!: sinon.SinonSpy<[string], void>
-    beforeEach(async () => {
-        resetAllMemoizationCaches()
-
-        const context = await integrationTestContext(undefined, {
-            textDocuments: [
-                {
-                    languageId: 'x',
-                    uri: 'git://r?c#f',
-                    text: undefined,
-                },
-            ],
-            roots: [],
-            viewers: [],
-        })
-        subscription.add(() => context.unsubscribe())
-        extensionHostAPI = Promise.resolve(context.extensionHostAPI)
-        extensionAPI = context.extensionAPI
-        exposedToClient = context.exposedToClient
-
-        history = createMemoryHistory()
-        locationAssign = sinon.spy((_url: string) => undefined)
-        const contributionsSubscription = registerHoverContributions({
-            extensionsController: {
-                extHostAPI: Promise.resolve(extensionHostAPI),
-                registerCommand: exposedToClient.registerCommand,
-            },
-            platformContext: { urlToFile, requestGraphQL },
-            history,
-            locationAssign,
-        })
-        subscription.add(contributionsSubscription)
-        await contributionsSubscription.contributionsPromise
-    })
-    afterAll(() => subscription.unsubscribe())
-
-    describe('getHoverActions()', () => {
-        const GO_TO_DEFINITION_ACTION: ActionItemAction = {
-            action: {
-                command: 'goToDefinition',
-                commandArguments: ['{"textDocument":{"uri":"git://r?c#f"},"position":{"line":1,"character":1}}'],
-                id: 'goToDefinition',
-                title: 'Go to definition',
-                actionItem: undefined,
-                category: undefined,
-                description: undefined,
-                iconURL: undefined,
-            },
-            active: true,
-            disabledWhen: false,
-            altAction: undefined,
-        }
-        const GO_TO_DEFINITION_PRELOADED_ACTION: ActionItemAction = {
-            action: {
-                command: 'open',
-                commandArguments: ['/r2@c2/-/blob/f2?L3:3'],
-                id: 'goToDefinition.preloaded',
-                title: 'Go to definition',
-                disabledTitle: 'You are at the definition',
-            },
-            active: true,
-            disabledWhen: false,
-            altAction: undefined,
-        }
-        const FIND_REFERENCES_ACTION: ActionItemAction = {
-            action: {
-                command: 'open',
-                commandArguments: ['/r@v/-/blob/f?L2:2#tab=references'],
-                id: 'findReferences',
-                title: 'Find references',
-            },
-            active: true,
-            disabledWhen: false,
-            altAction: undefined,
-        }
-
-        it('shows goToDefinition (non-preloaded) when the definition is loading', () =>
-            expect(
-                getHoverActionItems(
-                    {
-                        'goToDefinition.showLoading': true,
-                        'goToDefinition.url': null,
-                        'goToDefinition.notFound': false,
-                        'goToDefinition.error': false,
-                        'findReferences.url': null,
-                        hoverPosition: FIXTURE_PARAMS,
-                        hoveredOnDefinition: false,
-                    },
-                    extensionHostAPI
-                ).toPromise()
-            ).resolves.toEqual([GO_TO_DEFINITION_ACTION]))
-
-        it('shows goToDefinition (non-preloaded) when the definition had an error', () =>
-            expect(
-                getHoverActionItems(
-                    {
-                        'goToDefinition.showLoading': false,
-                        'goToDefinition.url': null,
-                        'goToDefinition.notFound': false,
-                        'goToDefinition.error': true,
-                        'findReferences.url': null,
-                        hoverPosition: FIXTURE_PARAMS,
-                        hoveredOnDefinition: false,
-                    },
-                    extensionHostAPI
-                ).toPromise()
-            ).resolves.toEqual([GO_TO_DEFINITION_ACTION]))
-
-        it('hides goToDefinition when the definition was not found', () =>
-            expect(
-                getHoverActionItems(
-                    {
-                        'goToDefinition.showLoading': false,
-                        'goToDefinition.url': null,
-                        'goToDefinition.notFound': true,
-                        'goToDefinition.error': false,
-                        'findReferences.url': null,
-                        hoverPosition: FIXTURE_PARAMS,
-                        hoveredOnDefinition: false,
-                    },
-                    extensionHostAPI
-                ).toPromise()
-            ).resolves.toEqual([]))
-
-        it('shows goToDefinition.preloaded when goToDefinition.url is available', () =>
-            expect(
-                getHoverActionItems(
-                    {
-                        'goToDefinition.showLoading': false,
-                        'goToDefinition.url': '/r2@c2/-/blob/f2?L3:3',
-                        'goToDefinition.notFound': false,
-                        'goToDefinition.error': false,
-                        'findReferences.url': null,
-                        hoverPosition: FIXTURE_PARAMS,
-                        hoveredOnDefinition: false,
-                    },
-                    extensionHostAPI
-                ).toPromise()
-            ).resolves.toEqual([GO_TO_DEFINITION_PRELOADED_ACTION]))
-
-        it('shows findReferences when the definition exists', () =>
-            expect(
-                getHoverActionItems(
-                    {
-                        'goToDefinition.showLoading': false,
-                        'goToDefinition.url': '/r2@c2/-/blob/f2?L3:3',
-                        'goToDefinition.notFound': false,
-                        'goToDefinition.error': false,
-                        'findReferences.url': '/r@v/-/blob/f?L2:2#tab=references',
-                        hoverPosition: FIXTURE_PARAMS,
-                        hoveredOnDefinition: false,
-                    },
-                    extensionHostAPI
-                ).toPromise()
-            ).resolves.toEqual([GO_TO_DEFINITION_PRELOADED_ACTION, FIND_REFERENCES_ACTION]))
-
-        it('hides findReferences when the definition might exist (and is still loading)', () =>
-            expect(
-                getHoverActionItems(
-                    {
-                        'goToDefinition.showLoading': true,
-                        'goToDefinition.url': null,
-                        'goToDefinition.notFound': false,
-                        'goToDefinition.error': false,
-                        'findReferences.url': '/r@v/-/blob/f?L2:2#tab=references',
-                        hoverPosition: FIXTURE_PARAMS,
-                        hoveredOnDefinition: false,
-                    },
-                    extensionHostAPI
-                ).toPromise()
-            ).resolves.toEqual([GO_TO_DEFINITION_ACTION, FIND_REFERENCES_ACTION]))
-
-        it('shows findReferences when the definition had an error', () =>
-            expect(
-                getHoverActionItems(
-                    {
-                        'goToDefinition.showLoading': false,
-                        'goToDefinition.url': null,
-                        'goToDefinition.notFound': false,
-                        'goToDefinition.error': true,
-                        'findReferences.url': '/r@v/-/blob/f?L2:2#tab=references',
-                        hoverPosition: FIXTURE_PARAMS,
-                        hoveredOnDefinition: false,
-                    },
-                    extensionHostAPI
-                ).toPromise()
-            ).resolves.toEqual([GO_TO_DEFINITION_ACTION, FIND_REFERENCES_ACTION]))
-
-        it('does not show findReferences when the definition was not found', () =>
-            expect(
-                getHoverActionItems(
-                    {
-                        'goToDefinition.showLoading': false,
-                        'goToDefinition.url': null,
-                        'goToDefinition.notFound': true,
-                        'goToDefinition.error': false,
-                        'findReferences.url': '/r@v/-/blob/f?L2:2#tab=references',
-                        hoverPosition: FIXTURE_PARAMS,
-                        hoveredOnDefinition: false,
-                    },
-                    extensionHostAPI
-                ).toPromise()
-            ).resolves.toEqual([]))
-    })
-
-    describe('goToDefinition command', () => {
-        test('reports no definition found', async () => {
-            const definitionSubscription = extensionAPI.languages.registerDefinitionProvider(['*'], {
-                provideDefinition: () => of([]),
-            })
-
-            await expect(
-                exposedToClient.executeCommand({ command: 'goToDefinition', args: [JSON.stringify(FIXTURE_PARAMS)] })
-            ).rejects.toMatchObject({ message: 'No definition found.' })
-
-            definitionSubscription.unsubscribe()
-        })
-
-        test('navigates to an in-app URL using the passed history object', async () => {
-            jsdom.reconfigure({ url: 'https://sourcegraph.test/r2@c2/-/blob/f1' })
-            history.replace('/r2@c2/-/blob/f1')
-            expect(history).toHaveLength(1)
-
-            const definitionSubscription = extensionAPI.languages.registerDefinitionProvider(['*'], {
-                provideDefinition: () => of(FIXTURE_LOCATION),
-            })
-
-            await exposedToClient.executeCommand({ command: 'goToDefinition', args: [JSON.stringify(FIXTURE_PARAMS)] })
-            sinon.assert.notCalled(locationAssign)
-            expect(history).toHaveLength(2)
-            expect(createPath(history.location)).toBe('/r2@c2/-/blob/f2?L3:3')
-
-            definitionSubscription.unsubscribe()
-        })
-
-        test('navigates to an external URL using the global location object', async () => {
-            jsdom.reconfigure({ url: 'https://github.test/r2@c2/-/blob/f1' })
-            history.replace('/r2@c2/-/blob/f1')
-            expect(history).toHaveLength(1)
-            urlToFile.callsFake(toAbsoluteBlobURL.bind(null, 'https://sourcegraph.test'))
-
-            const definitionSubscription = extensionAPI.languages.registerDefinitionProvider(['*'], {
-                provideDefinition: () =>
-                    of([FIXTURE_LOCATION, { ...FIXTURE_LOCATION, uri: new URL('git://r3?v3#f3') }]),
-            })
-
-            await exposedToClient.executeCommand({ command: 'goToDefinition', args: [JSON.stringify(FIXTURE_PARAMS)] })
-            sinon.assert.calledOnce(locationAssign)
-            sinon.assert.calledWith(locationAssign, 'https://sourcegraph.test/r@c/-/blob/f?L2:2#tab=def')
-            expect(history).toHaveLength(1)
-
-            definitionSubscription.unsubscribe()
-        })
-
-        test('reports panel already visible', async () => {
-            const definitionSubscription = extensionAPI.languages.registerDefinitionProvider(['*'], {
-                provideDefinition: () =>
-                    of([FIXTURE_LOCATION, { ...FIXTURE_LOCATION, uri: new URL('git://r3?v3#f3') }]),
-            })
-
-            history.push('/r@c/-/blob/f?L2:2#tab=def')
-            await expect(
-                exposedToClient.executeCommand({ command: 'goToDefinition', args: [JSON.stringify(FIXTURE_PARAMS)] })
-            ).rejects.toMatchObject({ message: 'Multiple definitions shown in panel below.' })
-
-            definitionSubscription.unsubscribe()
-        })
-
-        test('reports already at the definition', async () => {
-            const definitionSubscription = extensionAPI.languages.registerDefinitionProvider(['*'], {
-                provideDefinition: () => of([FIXTURE_LOCATION]),
-            })
-
-            history.push('/r2@c2/-/blob/f2?L3:3')
-            await expect(
-                exposedToClient.executeCommand({ command: 'goToDefinition', args: [JSON.stringify(FIXTURE_PARAMS)] })
-            ).rejects.toMatchObject({ message: 'Already at the definition.' })
-
-            definitionSubscription.unsubscribe()
-        })
-    })
 })

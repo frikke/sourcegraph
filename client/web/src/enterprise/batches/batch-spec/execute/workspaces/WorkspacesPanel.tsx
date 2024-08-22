@@ -2,7 +2,7 @@ import React from 'react'
 
 import { Panel, useWindowSize, VIEWPORT_LG } from '@sourcegraph/wildcard'
 
-import { Workspaces, WorkspacesProps } from './Workspaces'
+import { Workspaces, type WorkspacesProps } from './Workspaces'
 
 import styles from './WorkspacesPanel.module.scss'
 
@@ -24,7 +24,7 @@ export const WorkspacesPanel: React.FunctionComponent<React.PropsWithChildren<Wo
             maxSize={0.45 * width}
             position="left"
             storageKey={WORKSPACES_LIST_SIZE}
-            ariaLabel="Execution workspaces sidebar"
+            ariaLabel="execution workspaces"
         >
             <Workspaces {...props} />
         </Panel>

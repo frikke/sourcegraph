@@ -1,6 +1,7 @@
 package graphqlbackend
 
 import (
+	"embed"
 	_ "embed"
 )
 
@@ -16,8 +17,8 @@ var batchesSchema string
 
 // codeIntelSchema is the Code Intel raw graqhql schema.
 //
-//go:embed codeintel.graphql
-var codeIntelSchema string
+//go:embed codeintel*.graphql
+var codeIntelSchema embed.FS
 
 // dotcomSchema is the Dotcom schema extension raw graqhql schema.
 //
@@ -33,6 +34,11 @@ var licenseSchema string
 //
 //go:embed code_monitors.graphql
 var codeMonitorsSchema string
+
+// savedSearchesSchema is the saved searches raw GraphQL schema.
+//
+//go:embed saved_searches.graphql
+var savedSearchesSchema string
 
 // insightsSchema is the Code Insights raw graqhql schema.
 //
@@ -63,3 +69,64 @@ var notebooksSchema string
 //
 //go:embed insights_aggregations.graphql
 var insightsAggregationsSchema string
+
+// outboundWebhooksSchema is the outbound webhook raw GraphQL schema.
+//
+//go:embed outbound_webhooks.graphql
+var outboundWebhooksSchema string
+
+// embeddingsSchema is the Embeddings raw graqhql schema.
+//
+//go:embed embeddings.graphql
+var embeddingsSchema string
+
+// codyContextSchema is the Context raw graqhql schema.
+//
+//go:embed cody_context.graphql
+var codyContextSchema string
+
+// rbacSchema is the RBAC raw graphql schema.
+//
+//go:embed rbac.graphql
+var rbacSchema string
+
+// ownSchema is the Sourcegraph Own raw graqhql schema.
+//
+//go:embed own.graphql
+var ownSchema string
+
+// completionSchema is the Sourcegraph Completions raw graqhql schema.
+//
+//go:embed completions.graphql
+var completionSchema string
+
+// gitHubAppsSchema is the GitHub apps raw graqhql schema.
+//
+//go:embed githubapps.graphql
+var gitHubAppsSchema string
+
+// guardrailsSchema is the Sourcegraph Guardrails raw graphql schema.
+//
+//go:embed guardrails.graphql
+var guardrailsSchema string
+
+// contentLibrary is the Sourcegraph Content Library raw graphql schema.
+//
+//go:embed content_library.graphql
+var contentLibrary string
+
+// searchJobSchema is the Sourcegraph Search Job raw graphql schema.
+//
+//go:embed search_jobs.graphql
+var searchJobSchema string
+
+// telemetrySchema is the Sourcegraph Telemetry V2 raw graphql schema.
+//
+//go:embed telemetry.graphql
+var telemetrySchema string
+
+//go:embed viewer.graphql
+var viewerSchema string
+
+//go:embed prompts.graphql
+var promptsSchema string

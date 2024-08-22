@@ -1,59 +1,67 @@
 import React from 'react'
 
+import '@sourcegraph/shared/src/testing/mockReactVisibilitySensor'
+
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { createBrowserHistory } from 'history'
 import { BrowserRouter } from 'react-router-dom'
-import { CompatRouter } from 'react-router-dom-v5-compat'
-import { EMPTY, NEVER, of } from 'rxjs'
-import sinon from 'sinon'
+import { EMPTY, lastValueFrom, NEVER, of } from 'rxjs'
+import { assert, spy } from 'sinon'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { SearchQueryStateStoreProvider } from '@sourcegraph/search'
 import { GitRefType, SearchPatternType } from '@sourcegraph/shared/src/graphql-operations'
-import { AggregateStreamingSearchResults, Skipped } from '@sourcegraph/shared/src/search/stream'
+import { SearchMode, SearchQueryStateStoreProvider } from '@sourcegraph/shared/src/search'
+import type { AggregateStreamingSearchResults, Skipped } from '@sourcegraph/shared/src/search/stream'
+import { LATEST_VERSION } from '@sourcegraph/shared/src/search/stream'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 import { NOOP_TELEMETRY_SERVICE } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import { MockedTestProvider } from '@sourcegraph/shared/src/testing/apollo'
 import {
+    CHUNK_MATCH_RESULT,
     COLLAPSABLE_SEARCH_RESULT,
-    extensionsController,
     HIGHLIGHTED_FILE_LINES_REQUEST,
+    LINE_MATCH_RESULT,
     MULTIPLE_SEARCH_RESULT,
     REPO_MATCH_RESULT,
-    RESULT,
 } from '@sourcegraph/shared/src/testing/searchTestHelpers'
+import { simulateMenuItemClick } from '@sourcegraph/shared/src/testing/simulateMenuItemClick'
 
-import { AuthenticatedUser } from '../../auth'
-import { useExperimentalFeatures, useNavbarQueryState } from '../../stores'
+import type { AuthenticatedUser } from '../../auth'
+import { useNavbarQueryState } from '../../stores'
 import * as helpers from '../helpers'
 
+import { SearchResultsCacheProvider } from './SearchResultsCacheProvider'
 import { generateMockedResponses } from './sidebar/Revisions.mocks'
-import { StreamingSearchResults, StreamingSearchResultsProps } from './StreamingSearchResults'
+import { StreamingSearchResults, type StreamingSearchResultsProps } from './StreamingSearchResults'
 
 describe('StreamingSearchResults', () => {
-    const history = createBrowserHistory()
-
     const streamingSearchResult = MULTIPLE_SEARCH_RESULT
 
     const defaultProps: StreamingSearchResultsProps = {
-        extensionsController,
         telemetryService: NOOP_TELEMETRY_SERVICE,
 
-        history,
-        location: history.location,
         authenticatedUser: null,
 
         settingsCascade: {
             subjects: null,
-            final: null,
+            final: { experimentalFeatures: { newSearchResultFiltersPanel: false } },
         },
-        platformContext: { settings: NEVER, requestGraphQL: () => EMPTY, sourcegraphURL: 'https://sourcegraph.com' },
+        platformContext: {
+            settings: NEVER,
+            requestGraphQL: () => EMPTY,
+            sourcegraphURL: 'https://sourcegraph.com',
+            telemetryRecorder: noOpTelemetryRecorder,
+        } as any,
 
         streamSearch: () => of(MULTIPLE_SEARCH_RESULT),
 
         fetchHighlightedFileLineRanges: HIGHLIGHTED_FILE_LINES_REQUEST,
-        isLightTheme: true,
         isSourcegraphDotCom: false,
         searchContextsEnabled: true,
+        searchAggregationEnabled: false,
+        codeMonitoringEnabled: true,
+        ownEnabled: true,
+        searchJobsEnabled: true,
     }
 
     const revisionsMockResponses = generateMockedResponses(GitRefType.GIT_BRANCH, 5, 'github.com/golang/oauth2')
@@ -61,13 +69,11 @@ describe('StreamingSearchResults', () => {
     function renderWrapper(component: React.ReactElement<StreamingSearchResultsProps>) {
         return render(
             <BrowserRouter>
-                <CompatRouter>
-                    <MockedTestProvider mocks={revisionsMockResponses}>
-                        <SearchQueryStateStoreProvider useSearchQueryState={useNavbarQueryState}>
-                            {component}
-                        </SearchQueryStateStoreProvider>
-                    </MockedTestProvider>
-                </CompatRouter>
+                <MockedTestProvider mocks={revisionsMockResponses}>
+                    <SearchQueryStateStoreProvider useSearchQueryState={useNavbarQueryState}>
+                        <SearchResultsCacheProvider>{component}</SearchResultsCacheProvider>
+                    </SearchQueryStateStoreProvider>
+                </MockedTestProvider>
             </BrowserRouter>
         )
     }
@@ -76,47 +82,44 @@ describe('StreamingSearchResults', () => {
     const mockUser = {
         id: 'userID',
         username: 'username',
-        email: 'user@me.com',
+        emails: [{ email: 'user@me.com', isPrimary: true, verified: true }],
         siteAdmin: true,
     } as AuthenticatedUser
-
-    // Modified from https://sourcegraph.com/github.com/reach/reach-ui@26c826684729e51e45eef29aa4316df19c0e2c03/-/blob/test/utils.tsx?L105
-    // userEvent.click does not work for Reach menu items. Use this function from Reach's official test code instead.
-    function simualateMenuItemClick(element: HTMLElement) {
-        fireEvent.mouseEnter(element)
-        fireEvent.keyDown(element, { key: ' ' })
-        fireEvent.keyUp(element, { key: ' ' })
-    }
 
     beforeEach(() => {
         useNavbarQueryState.setState({
             searchCaseSensitivity: false,
             searchQueryFromURL: 'r:golang/oauth2 test f:travis',
         })
-        useExperimentalFeatures.setState({ showSearchContext: true, codeMonitoring: false })
-        window.context = {
-            enableLegacyExtensions: false,
-        } as any
     })
 
     it('should call streaming search API with the right parameters from URL', async () => {
-        useNavbarQueryState.setState({ searchCaseSensitivity: true, searchPatternType: SearchPatternType.regexp })
-        const searchSpy = sinon.spy(defaultProps.streamSearch)
+        useNavbarQueryState.setState({
+            searchCaseSensitivity: true,
+            searchPatternType: SearchPatternType.regexp,
+            searchMode: SearchMode.SmartSearch,
+        })
+        const searchSpy = spy(defaultProps.streamSearch)
 
         renderWrapper(<StreamingSearchResults {...defaultProps} streamSearch={searchSpy} />)
 
-        sinon.assert.calledOnce(searchSpy)
+        assert.calledOnce(searchSpy)
         const call = searchSpy.getCall(0)
         // We have to extract the query from the observable since we can't directly compare observables
-        const receivedQuery = await call.args[0].toPromise()
+        const receivedQuery = await lastValueFrom(call.args[0])
         const receivedOptions = call.args[1]
 
         expect(receivedQuery).toEqual('r:golang/oauth2 test f:travis')
         expect(receivedOptions).toEqual({
-            version: 'V3',
+            version: LATEST_VERSION,
             patternType: SearchPatternType.regexp,
             caseSensitive: true,
+            searchMode: SearchMode.SmartSearch,
             trace: undefined,
+            chunkMatches: true,
+            maxLineLen: 5 * 1024,
+            featureOverrides: [],
+            zoektSearchOptions: '',
         })
     })
 
@@ -135,28 +138,28 @@ describe('StreamingSearchResults', () => {
         renderWrapper(<StreamingSearchResults {...defaultProps} streamSearch={() => of(COLLAPSABLE_SEARCH_RESULT)} />)
 
         screen
-            .getAllByTestId('result-container')
+            .getAllByTestId('file-search-result')
             .map(element => expect(element).toHaveAttribute('data-expanded', 'false'))
 
         userEvent.click(await screen.findByLabelText(/Open search actions menu/))
-        simualateMenuItemClick(await screen.findByText(/Expand all/, { selector: '[role=menuitem]' }))
+        simulateMenuItemClick(await screen.findByText(/Expand all/, { selector: '[role=menuitem]' }))
 
         screen
-            .getAllByTestId('result-container')
+            .getAllByTestId('file-search-result')
             .map(element => expect(element).toHaveAttribute('data-expanded', 'true'))
 
         userEvent.click(await screen.findByLabelText(/Open search actions menu/))
-        simualateMenuItemClick(await screen.findByText(/Collapse all/, { selector: '[role=menuitem]' }))
+        simulateMenuItemClick(await screen.findByText(/Collapse all/, { selector: '[role=menuitem]' }))
 
         screen
-            .getAllByTestId('result-container')
+            .getAllByTestId('file-search-result')
             .map(element => expect(element).toHaveAttribute('data-expanded', 'false'))
     })
 
     it('should render correct components for file match and repository match', () => {
         const results: AggregateStreamingSearchResults = {
             ...streamingSearchResult,
-            results: [RESULT, REPO_MATCH_RESULT],
+            results: [CHUNK_MATCH_RESULT, REPO_MATCH_RESULT],
         }
         renderWrapper(<StreamingSearchResults {...defaultProps} streamSearch={() => of(results)} />)
         expect(screen.getAllByTestId('result-container').length).toBe(2)
@@ -166,9 +169,21 @@ describe('StreamingSearchResults', () => {
         expect(screen.getAllByTestId('result-container')[1]).toHaveAttribute('data-result-type', 'repo')
     })
 
+    it('should render correct components for file match using legacy line match format', () => {
+        const results: AggregateStreamingSearchResults = {
+            ...streamingSearchResult,
+            results: [LINE_MATCH_RESULT],
+        }
+
+        renderWrapper(<StreamingSearchResults {...defaultProps} streamSearch={() => of(results)} />)
+        expect(screen.getAllByTestId('result-container').length).toBe(1)
+
+        expect(screen.getAllByTestId('result-container')[0]).toHaveAttribute('data-result-type', 'content')
+    })
+
     it('should log view, query, and results fetched events', () => {
-        const logSpy = sinon.spy()
-        const logViewEventSpy = sinon.spy()
+        const logSpy = spy()
+        const logViewEventSpy = spy()
         const telemetryService = {
             ...NOOP_TELEMETRY_SERVICE,
             log: logSpy,
@@ -177,13 +192,16 @@ describe('StreamingSearchResults', () => {
 
         renderWrapper(<StreamingSearchResults {...defaultProps} telemetryService={telemetryService} />)
 
-        sinon.assert.calledOnceWithExactly(logViewEventSpy, 'SearchResults')
-        sinon.assert.calledWith(logSpy, 'SearchResultsQueried')
-        sinon.assert.calledWith(logSpy, 'SearchResultsFetched')
+        assert.calledOnceWithExactly(logViewEventSpy, 'SearchResults')
+        assert.calledWith(logSpy, 'SearchResultsQueried')
+        assert.calledWith(logSpy, 'SearchResultsFetched')
     })
 
-    it('should log event when clicking on search result', () => {
-        const logSpy = sinon.spy()
+    // This test passes but it throws some internal happy-dom errors while
+    // running. See thread  https://sourcegraph.slack.com/archives/C04MYFW01NV/p1705436143793999
+    // you can find original problem issue https://github.com/sourcegraph/sourcegraph/issues/59700
+    it.skip('should log events when clicking on search result', () => {
+        const logSpy = spy()
         const telemetryService = {
             ...NOOP_TELEMETRY_SERVICE,
             log: logSpy,
@@ -192,7 +210,20 @@ describe('StreamingSearchResults', () => {
         renderWrapper(<StreamingSearchResults {...defaultProps} telemetryService={telemetryService} />)
 
         userEvent.click(screen.getAllByTestId('result-container')[0])
-        sinon.assert.calledWith(logSpy, 'SearchResultClicked')
+        assert.calledWith(logSpy, 'SearchResultClicked')
+        assert.calledWith(logSpy, 'search.ranking.result-clicked', {
+            index: 0,
+            type: 'fileMatch',
+            resultsLength: 3,
+        })
+
+        userEvent.click(screen.getAllByTestId('result-container')[2])
+        assert.calledWith(logSpy, 'SearchResultClicked')
+        assert.calledWith(logSpy, 'search.ranking.result-clicked', {
+            index: 2,
+            type: 'fileMatch',
+            resultsLength: 3,
+        })
     })
 
     it('should not show saved search modal on first load', () => {
@@ -203,7 +234,7 @@ describe('StreamingSearchResults', () => {
     it('should open and close saved search modal if events trigger', async () => {
         renderWrapper(<StreamingSearchResults {...defaultProps} authenticatedUser={mockUser} />)
         userEvent.click(await screen.findByLabelText(/Open search actions menu/))
-        simualateMenuItemClick(await screen.findByText(/Save search/, { selector: '[role=menuitem]' }))
+        simulateMenuItemClick(await screen.findByText(/Save search/, { selector: '[role=menuitem]' }))
 
         fireEvent.keyDown(await screen.findByText(/Save search query to:/), {
             key: 'Escape',
@@ -216,7 +247,7 @@ describe('StreamingSearchResults', () => {
     })
 
     it('should start a new search with added params when onSearchAgain event is triggered', async () => {
-        const submitSearchMock = jest.spyOn(helpers, 'submitSearch').mockImplementation(() => {})
+        const submitSearchMock = vi.spyOn(helpers, 'submitSearch').mockImplementation(() => {})
         const tests = [
             {
                 parsedSearchQuery: 'r:golang/oauth2 test f:travis',
@@ -232,20 +263,11 @@ describe('StreamingSearchResults', () => {
             },
             {
                 parsedSearchQuery: 'r:golang/oauth2 (foo count:1) or (bar count:2)',
-                skipReason: ['document-match-limit', 'excluded-fork'] as Skipped['reason'][],
+                skipReason: ['document-match-limit', 'repository-fork'] as Skipped['reason'][],
                 additionalProperties: ['count:1000', 'fork:yes'],
                 want: 'r:golang/oauth2 (foo count:1000) or (bar count:1000) fork:yes',
             },
         ]
-
-        ;(global as any).document.createRange = () => ({
-            setStart: () => {},
-            setEnd: () => {},
-            commonAncestorContainer: {
-                nodeName: 'BODY',
-                ownerDocument: document,
-            },
-        })
 
         for (const [index, test] of tests.entries()) {
             cleanup()
@@ -278,9 +300,13 @@ describe('StreamingSearchResults', () => {
                 userEvent.click(check, undefined, { skipPointerEventsCheck: true })
             }
 
-            userEvent.click(await screen.findByText(/search again/i, { selector: 'button[type=submit]' }), undefined, {
-                skipPointerEventsCheck: true,
-            })
+            userEvent.click(
+                await screen.findByText(/modify and re-run/i, { selector: 'button[type=submit]' }),
+                undefined,
+                {
+                    skipPointerEventsCheck: true,
+                }
+            )
 
             expect(helpers.submitSearch).toBeCalledTimes(index + 1)
             const args = submitSearchMock.mock.calls[index][0]

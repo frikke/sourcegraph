@@ -1,9 +1,11 @@
 import assert from 'assert'
 
-import { createDriverForTest, Driver } from '@sourcegraph/shared/src/testing/driver'
+import { afterEach, beforeEach, describe, it } from 'mocha'
+
+import { createDriverForTest, type Driver } from '@sourcegraph/shared/src/testing/driver'
 import { afterEachSaveScreenshotIfFailed } from '@sourcegraph/shared/src/testing/screenshotReporter'
 
-import { createWebIntegrationTestContext, WebIntegrationTestContext } from '../context'
+import { createWebIntegrationTestContext, type WebIntegrationTestContext } from '../context'
 
 import { MIGRATION_TO_GQL_INSIGHT_DATA_FIXTURE } from './fixtures/calculated-insights'
 import { createJITMigrationToGQLInsightMetadataFixture } from './fixtures/insights-metadata'
@@ -37,11 +39,13 @@ describe('Code insights page', () => {
             // settings. We have to mock them by mocking user settings cascade.
             // userSettings: settings,
             overrides: {
-                GetInsights: () => ({
+                GetAllInsightConfigurations: () => ({
                     __typename: 'Query',
                     insightViews: {
                         __typename: 'InsightViewConnection',
                         nodes: [createJITMigrationToGQLInsightMetadataFixture({ type: 'calculated' })],
+                        pageInfo: { __typename: 'PageInfo', endCursor: null, hasNextPage: false },
+                        totalCount: 1,
                     },
                 }),
                 GetInsightView: () => ({
@@ -62,7 +66,7 @@ describe('Code insights page', () => {
             },
         })
 
-        await driver.page.goto(driver.sourcegraphBaseUrl + '/insights/dashboards/all')
+        await driver.page.goto(driver.sourcegraphBaseUrl + '/insights/all')
         await driver.page.waitForSelector('svg circle')
 
         const variables = await testContext.waitForGraphQLRequest(async () => {

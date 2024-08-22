@@ -5,7 +5,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/grafana/regexp"
-	"github.com/opentracing/opentracing-go/log"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/database"
@@ -28,15 +28,19 @@ func (s *RepoSearchJob) Run(ctx context.Context, clients job.RuntimeClients, str
 	tr, ctx, stream, finish := job.StartSpan(ctx, stream, s)
 	defer func() { finish(alert, err) }()
 
-	repos := searchrepos.NewResolver(clients.Logger, clients.DB, clients.SearcherURLs, clients.Zoekt)
-	err = repos.Paginate(ctx, s.RepoOpts, func(page *searchrepos.Resolved) error {
-		tr.LogFields(log.Int("resolved.len", len(page.RepoRevs)))
+	repos := searchrepos.NewResolver(clients.Logger, clients.DB, clients.Gitserver, clients.SearcherURLs, clients.SearcherGRPCConnectionCache, clients.Zoekt)
+	it := repos.Iterator(ctx, s.RepoOpts)
+
+	for it.Next() {
+		page := it.Current()
+		tr.SetAttributes(attribute.Int("resolved.len", len(page.RepoRevs)))
+		page.MaybeSendStats(stream)
 
 		descriptionMatches := make(map[api.RepoID][]result.Range)
 		if len(s.DescriptionPatterns) > 0 {
 			repoDescriptionsSet, err := s.repoDescriptions(ctx, clients.DB, page.RepoRevs)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			descriptionMatches = s.descriptionMatchRanges(repoDescriptionsSet)
 		}
@@ -44,13 +48,11 @@ func (s *RepoSearchJob) Run(ctx context.Context, clients job.RuntimeClients, str
 		stream.Send(streaming.SearchEvent{
 			Results: repoRevsToRepoMatches(page.RepoRevs, s.RepoNamePatterns, descriptionMatches),
 		})
-
-		return nil
-	})
+	}
 
 	// Do not error with no results for repo search. For text search, this is an
 	// actionable error, but for repo search, it is not.
-	err = errors.Ignore(err, errors.IsPred(searchrepos.ErrNoResolvedRepos))
+	err = errors.Ignore(it.Err(), errors.IsPred(searchrepos.ErrNoResolvedRepos))
 	return nil, err
 }
 
@@ -103,15 +105,13 @@ func (*RepoSearchJob) Name() string {
 	return "RepoSearchJob"
 }
 
-func (s *RepoSearchJob) Fields(v job.Verbosity) (res []log.Field) {
+func (s *RepoSearchJob) Attributes(v job.Verbosity) (res []attribute.KeyValue) {
 	switch v {
 	case job.VerbosityMax:
 		fallthrough
 	case job.VerbosityBasic:
-		res = append(res,
-			trace.Scoped("repoOpts", s.RepoOpts.Tags()...),
-			log.Object("repoNamePatterns", s.RepoNamePatterns),
-		)
+		res = append(res, trace.Scoped("repoOpts", s.RepoOpts.Attributes()...)...)
+		res = append(res, trace.Stringers("repoNamePatterns", s.RepoNamePatterns))
 	}
 	return res
 }

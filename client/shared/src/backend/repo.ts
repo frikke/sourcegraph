@@ -1,13 +1,12 @@
-import { from, Observable } from 'rxjs'
+import { from, type Observable } from 'rxjs'
 import { map } from 'rxjs/operators'
 
 import { createAggregateError, memoizeObservable } from '@sourcegraph/common'
 import { dataOrThrowErrors, gql } from '@sourcegraph/http-client'
 
-import { TreeEntriesResult, TreeFields } from '../graphql-operations'
-import { PlatformContext } from '../platform/context'
-import * as GQL from '../schema'
-import { AbsoluteRepoFile, makeRepoURI, RepoSpec } from '../util/url'
+import type { ResolveRawRepoNameResult, TreeEntriesResult, TreeFields } from '../graphql-operations'
+import type { PlatformContext } from '../platform/context'
+import { type AbsoluteRepoFile, makeRepoGitURI, type RepoSpec } from '../util/url'
 
 import { CloneInProgressError, RepoNotFoundError } from './errors'
 
@@ -20,7 +19,7 @@ export const resolveRawRepoName = memoizeObservable(
         repoName,
     }: Pick<RepoSpec, 'repoName'> & Pick<PlatformContext, 'requestGraphQL'>): Observable<string> =>
         from(
-            requestGraphQL<GQL.IQuery>({
+            requestGraphQL<ResolveRawRepoNameResult>({
                 request: gql`
                     query ResolveRawRepoName($repoName: String!) {
                         repository(name: $repoName) {
@@ -64,6 +63,7 @@ export const fetchTreeEntries = memoizeObservable(
                     $first: Int
                 ) {
                     repository(name: $repoName) {
+                        id
                         commit(rev: $commitID, inputRevspec: $revision) {
                             tree(path: $filePath) {
                                 ...TreeFields
@@ -74,8 +74,12 @@ export const fetchTreeEntries = memoizeObservable(
                 fragment TreeFields on GitTree {
                     isRoot
                     url
-                    entries(first: $first, recursiveSingleChild: true) {
+                    entries(first: $first) {
+                        __typename
                         ...TreeEntryFields
+                        ... on GitBlob {
+                            languages
+                        }
                     }
                 }
                 fragment TreeEntryFields on TreeEntry {
@@ -87,7 +91,6 @@ export const fetchTreeEntries = memoizeObservable(
                         url
                         commit
                     }
-                    isSingleChild
                 }
             `,
             variables: args,
@@ -100,5 +103,5 @@ export const fetchTreeEntries = memoizeObservable(
                 return data.repository.commit.tree
             })
         ),
-    ({ first, requestGraphQL, ...args }) => `${makeRepoURI(args)}:first-${String(first)}`
+    ({ first, requestGraphQL, ...args }) => `${makeRepoGitURI(args)}:first-${String(first)}`
 )

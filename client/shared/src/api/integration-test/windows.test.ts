@@ -1,13 +1,13 @@
 import { pick } from 'lodash'
-import { from, of } from 'rxjs'
-import { switchMap, take, toArray, first } from 'rxjs/operators'
-import { ViewComponent, Window } from 'sourcegraph'
+import { lastValueFrom, of } from 'rxjs'
+import { switchMap, take, toArray } from 'rxjs/operators'
+import type { ViewComponent, Window } from 'sourcegraph'
+import { describe, expect, test } from 'vitest'
 
-import { wrapRemoteObservable } from '../client/api/common'
-import { NotificationType } from '../extension/extensionHostApi'
-import { TextDocumentData } from '../viewerTypes'
+import { fromSubscribable } from '@sourcegraph/common'
 
-import { assertToJSON, integrationTestContext } from './testHelpers'
+import { assertToJSON, integrationTestContext } from '../../testing/testHelpers'
+import type { TextDocumentData } from '../viewerTypes'
 
 describe('Windows (integration)', () => {
     describe('app.activeWindow', () => {
@@ -161,13 +161,15 @@ describe('Windows (integration)', () => {
                     viewers: [],
                 })
 
-                const viewers = from(extensionAPI.app.activeWindowChanges)
-                    .pipe(
-                        switchMap(activeWindow => (activeWindow ? activeWindow.activeViewComponentChanges : of(null))),
+                const viewers = lastValueFrom(
+                    fromSubscribable(extensionAPI.app.activeWindowChanges).pipe(
+                        switchMap(activeWindow =>
+                            activeWindow ? fromSubscribable(activeWindow.activeViewComponentChanges) : of(null)
+                        ),
                         take(4),
                         toArray()
                     )
-                    .toPromise()
+                )
 
                 await extensionHostAPI.addTextDocumentIfNotExists({ uri: 'foo', languageId: 'l1', text: 't1' })
                 await extensionHostAPI.addTextDocumentIfNotExists({ uri: 'bar', languageId: 'l2', text: 't2' })
@@ -191,36 +193,6 @@ describe('Windows (integration)', () => {
                     [null, 'foo', null, 'bar']
                 )
             })
-        })
-
-        test('Window#showNotification', async () => {
-            const { extensionAPI, extensionHostAPI } = await integrationTestContext()
-            const value = wrapRemoteObservable(extensionHostAPI.getPlainNotifications()).pipe(first()).toPromise()
-            extensionAPI.app.activeWindow!.showNotification('a', NotificationType.Info)
-            expect(await value).toEqual({ message: 'a', type: NotificationType.Info })
-        })
-
-        test('Window#showMessage', async () => {
-            const showMessageRequests: string[] = []
-            const { extensionAPI } = await integrationTestContext({
-                showMessage: message => {
-                    showMessageRequests.push(message)
-                    return Promise.resolve()
-                },
-            })
-
-            expect(await extensionAPI.app.activeWindow!.showMessage('a')).toBe(undefined)
-            expect(showMessageRequests).toEqual(['a'])
-        })
-
-        test('Window#showInputBox', async () => {
-            const { extensionAPI } = await integrationTestContext({
-                showInputBox: options => Promise.resolve('default value: ' + (options?.value || '')),
-            })
-
-            expect(await extensionAPI.app.activeWindow!.showInputBox({ prompt: 'a', value: 'b' })).toBe(
-                'default value: b'
-            )
         })
     })
 })

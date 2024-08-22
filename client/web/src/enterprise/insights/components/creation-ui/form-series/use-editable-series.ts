@@ -2,10 +2,11 @@ import { useState } from 'react'
 
 import * as uuid from 'uuid'
 
-import { DEFAULT_DATA_SERIES_COLOR } from '../../../constants'
-import { useFieldAPI } from '../../form'
+import type { useFieldAPI } from '@sourcegraph/wildcard'
 
-import { EditableDataSeries } from './types'
+import { DEFAULT_DATA_SERIES_COLOR } from '../../../constants'
+
+import type { EditableDataSeries } from './types'
 
 export const createDefaultEditSeries = (series?: Partial<EditableDataSeries>): EditableDataSeries => ({
     id: `runtime-series.${uuid.v4()}`,

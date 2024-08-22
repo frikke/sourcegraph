@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -eux
 
 [ -z "$PUBLISH_TOKEN" ] && echo "You must set a \$PUBLISH_TOKEN before running this script. You can generate a token in the JetBrains marketplace." && exit 1
 
@@ -8,14 +8,18 @@ git diff-index --quiet HEAD || (echo "Please commit your changes before releasin
 
 # Make sure we have all dependencies
 pushd "../.." > /dev/null
-yarn && yarn generate
+pnpm install && pnpm generate
 popd > /dev/null || exit
 
 # Build the JavaScript artifacts
-yarn build
+pnpm build
 
+# Ensure the plugin fulfills compatibility requirements
+./gradlew runPluginVerifier
+
+./gradlew -PforceAgentBuild=true clean buildPluginAndAssertAgentBinariesExist
 # Build the release candidate and publish it onto the registry
-./gradlew publishPlugin
+./gradlew -PforceAgentBuild=true publishPlugin
 
 # The release script automatically changes the README and moves the unreleased
 # section into a version numbered one. We don't care about this while we are

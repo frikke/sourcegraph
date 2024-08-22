@@ -1,16 +1,15 @@
 import * as React from 'react'
 
-import { Observable, Subject, Subscription } from 'rxjs'
-import { catchError, filter, map, mapTo, startWith, switchMap, tap } from 'rxjs/operators'
+import { type Observable, Subject, Subscription } from 'rxjs'
+import { catchError, filter, map, startWith, switchMap, tap } from 'rxjs/operators'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { asError, ErrorLike, isErrorLike, logger } from '@sourcegraph/common'
+import { Timestamp } from '@sourcegraph/branded/src/components/Timestamp'
+import { asError, type ErrorLike, isErrorLike, logger } from '@sourcegraph/common'
 import { dataOrThrowErrors, gql } from '@sourcegraph/http-client'
-import { Badge, Button, Link, AnchorLink } from '@sourcegraph/wildcard'
+import { Badge, Button, Link, AnchorLink, ErrorAlert } from '@sourcegraph/wildcard'
 
 import { requestGraphQL } from '../../../backend/graphql'
-import { Timestamp } from '../../../components/time/Timestamp'
-import {
+import type {
     DeleteExternalAccountResult,
     DeleteExternalAccountVariables,
     ExternalAccountFields,
@@ -60,7 +59,10 @@ function deleteExternalAccount(externalAccount: Scalars['ID']): Observable<void>
             }
         `,
         { externalAccount }
-    ).pipe(map(dataOrThrowErrors), mapTo(undefined))
+    ).pipe(
+        map(dataOrThrowErrors),
+        map(() => undefined)
+    )
 }
 
 export interface ExternalAccountNodeProps {
@@ -94,7 +96,7 @@ export class ExternalAccountNode extends React.PureComponent<ExternalAccountNode
                     filter(() => window.confirm('Really delete the association with this external account?')),
                     switchMap(() =>
                         deleteExternalAccount(this.props.node.id).pipe(
-                            mapTo(null),
+                            map(() => null),
                             catchError(error => [asError(error)]),
                             map(deletionOrError => ({ deletionOrError })),
                             tap(() => {
@@ -106,10 +108,10 @@ export class ExternalAccountNode extends React.PureComponent<ExternalAccountNode
                         )
                     )
                 )
-                .subscribe(
-                    stateUpdate => this.setState(stateUpdate),
-                    error => logger.error(error)
-                )
+                .subscribe({
+                    next: stateUpdate => this.setState(stateUpdate),
+                    error: error => logger.error(error),
+                })
         )
     }
 

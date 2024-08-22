@@ -5,14 +5,16 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	"github.com/sourcegraph/sourcegraph/internal/authz"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc/awscodecommit"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc/bitbucketcloud"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc/bitbucketserver"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc/github"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc/gitlab"
+	proto "github.com/sourcegraph/sourcegraph/internal/repoupdater/v1"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 )
 
@@ -24,6 +26,52 @@ type RepoUpdateSchedulerInfoArgs struct {
 type RepoUpdateSchedulerInfoResult struct {
 	Schedule *RepoScheduleState `json:",omitempty"`
 	Queue    *RepoQueueState    `json:",omitempty"`
+}
+
+func (r *RepoUpdateSchedulerInfoResult) ToProto() *proto.RepoUpdateSchedulerInfoResponse {
+	res := &proto.RepoUpdateSchedulerInfoResponse{}
+	if r.Schedule != nil {
+		res.Schedule = &proto.RepoScheduleState{
+			Index:           int64(r.Schedule.Index),
+			Total:           int64(r.Schedule.Total),
+			IntervalSeconds: int64(r.Schedule.IntervalSeconds),
+			Due:             timestamppb.New(r.Schedule.Due),
+		}
+	}
+
+	if r.Queue != nil {
+		res.Queue = &proto.RepoQueueState{
+			Index:    int64(r.Queue.Index),
+			Total:    int64(r.Queue.Total),
+			Updating: r.Queue.Updating,
+			Priority: int64(r.Queue.Priority),
+		}
+	}
+	return res
+}
+
+func RepoUpdateSchedulerInfoResultFromProto(p *proto.RepoUpdateSchedulerInfoResponse) *RepoUpdateSchedulerInfoResult {
+	r := &RepoUpdateSchedulerInfoResult{}
+
+	if p.Schedule != nil {
+		r.Schedule = &RepoScheduleState{
+			Index:           int(p.Schedule.GetIndex()),
+			Total:           int(p.Schedule.GetTotal()),
+			IntervalSeconds: int(p.Schedule.GetIntervalSeconds()),
+			Due:             p.Schedule.GetDue().AsTime(),
+		}
+	}
+
+	if p.Queue != nil {
+		r.Queue = &RepoQueueState{
+			Index:    int(p.Queue.GetIndex()),
+			Total:    int(p.Queue.GetTotal()),
+			Updating: p.Queue.GetUpdating(),
+			Priority: int(p.Queue.GetPriority()),
+		}
+	}
+
+	return r
 }
 
 type RepoScheduleState struct {
@@ -38,47 +86,6 @@ type RepoQueueState struct {
 	Total    int
 	Updating bool
 	Priority int
-}
-
-// RepoLookupArgs is a request for information about a repository on repoupdater.
-type RepoLookupArgs struct {
-	// Repo is the repository name to look up.
-	Repo api.RepoName `json:",omitempty"`
-
-	// Update will enqueue a high priority git update for this repo if it exists and this
-	// field is true.
-	Update bool
-}
-
-func (a *RepoLookupArgs) String() string {
-	return fmt.Sprintf("RepoLookupArgs{Repo: %s, Update: %t}", a.Repo, a.Update)
-}
-
-// RepoLookupResult is the response to a repository information request (RepoLookupArgs).
-type RepoLookupResult struct {
-	// Repo contains information about the repository, if it is found. If an error occurred, it is nil.
-	Repo *RepoInfo
-
-	ErrorNotFound               bool // the repository host reported that the repository was not found
-	ErrorUnauthorized           bool // the repository host rejected the client's authorization
-	ErrorTemporarilyUnavailable bool // the repository host was temporarily unavailable (e.g., rate limit exceeded)
-}
-
-func (r *RepoLookupResult) String() string {
-	var parts []string
-	if r.Repo != nil {
-		parts = append(parts, "repo="+r.Repo.String())
-	}
-	if r.ErrorNotFound {
-		parts = append(parts, "notfound")
-	}
-	if r.ErrorUnauthorized {
-		parts = append(parts, "unauthorized")
-	}
-	if r.ErrorTemporarilyUnavailable {
-		parts = append(parts, "tempunavailable")
-	}
-	return fmt.Sprintf("RepoLookupResult{%s}", strings.Join(parts, " "))
 }
 
 // RepoInfo is information about a repository that lives on an external service (such as GitHub or GitLab).
@@ -101,6 +108,49 @@ type RepoInfo struct {
 	// ExternalRepo specifies this repository's ID on the external service where it resides (and the external
 	// service itself).
 	ExternalRepo api.ExternalRepoSpec
+}
+
+func (r *RepoInfo) ToProto() *proto.RepoInfo {
+	if r == nil {
+		return nil
+	}
+
+	return &proto.RepoInfo{
+		Id:          int32(r.ID),
+		Name:        string(r.Name),
+		Description: r.Description,
+		Fork:        r.Fork,
+		Archived:    r.Archived,
+		Private:     r.Private,
+		VcsInfo:     r.VCS.ToProto(),
+		Links:       r.Links.ToProto(),
+		ExternalRepo: &proto.ExternalRepoSpec{
+			Id:          r.ExternalRepo.ID,
+			ServiceType: r.ExternalRepo.ServiceType,
+			ServiceId:   r.ExternalRepo.ServiceID,
+		},
+	}
+}
+
+func RepoInfoFromProto(p *proto.RepoInfo) *RepoInfo {
+	if p == nil {
+		return nil
+	}
+	return &RepoInfo{
+		ID:          api.RepoID(p.GetId()),
+		Name:        api.RepoName(p.GetName()),
+		Description: p.GetDescription(),
+		Fork:        p.GetFork(),
+		Archived:    p.GetArchived(),
+		Private:     p.GetPrivate(),
+		VCS:         VCSInfoFromProto(p.GetVcsInfo()),
+		Links:       RepoLinksFromProto(p.GetLinks()),
+		ExternalRepo: api.ExternalRepoSpec{
+			ID:          p.GetExternalRepo().GetId(),
+			ServiceType: p.GetExternalRepo().GetServiceType(),
+			ServiceID:   p.GetExternalRepo().GetServiceId(),
+		},
+	}
 }
 
 func NewRepoInfo(r *types.Repo) *RepoInfo {
@@ -203,12 +253,48 @@ type VCSInfo struct {
 	URL string // the Git remote URL
 }
 
+func (i *VCSInfo) ToProto() *proto.VCSInfo {
+	return &proto.VCSInfo{
+		Url: i.URL,
+	}
+}
+
+func VCSInfoFromProto(p *proto.VCSInfo) VCSInfo {
+	return VCSInfo{
+		URL: p.GetUrl(),
+	}
+}
+
 // RepoLinks contains URLs and URL patterns for objects in this repository.
 type RepoLinks struct {
 	Root   string // the repository's main (root) page URL
 	Tree   string // the URL to a tree, with {rev} and {path} substitution variables
 	Blob   string // the URL to a blob, with {rev} and {path} substitution variables
 	Commit string // the URL to a commit, with {commit} substitution variable
+}
+
+func (rl *RepoLinks) ToProto() *proto.RepoLinks {
+	if rl == nil {
+		return nil
+	}
+	return &proto.RepoLinks{
+		Root:   rl.Root,
+		Tree:   rl.Tree,
+		Blob:   rl.Blob,
+		Commit: rl.Commit,
+	}
+}
+
+func RepoLinksFromProto(p *proto.RepoLinks) *RepoLinks {
+	if p == nil {
+		return nil
+	}
+	return &RepoLinks{
+		Root:   p.GetRoot(),
+		Tree:   p.GetTree(),
+		Blob:   p.GetBlob(),
+		Commit: p.GetCommit(),
+	}
 }
 
 // RepoUpdateRequest is a request to update the contents of a given repo, or clone it if it doesn't exist.
@@ -228,6 +314,13 @@ type RepoUpdateResponse struct {
 	Name string `json:"name"`
 }
 
+func RepoUpdateResponseFromProto(p *proto.EnqueueRepoUpdateResponse) *RepoUpdateResponse {
+	return &RepoUpdateResponse{
+		ID:   api.RepoID(p.GetId()),
+		Name: p.GetName(),
+	}
+}
+
 func (a *RepoUpdateResponse) String() string {
 	return fmt.Sprintf("RepoUpdateResponse{ID: %d Name: %s}", a.ID, a.Name)
 }
@@ -239,32 +332,5 @@ type ChangesetSyncRequest struct {
 
 // ChangesetSyncResponse is a response to sync a number of changesets
 type ChangesetSyncResponse struct {
-	Error string
-}
-
-// PermsSyncRequest is a request to sync permissions. The provided options are used to
-// sync all provided users and repos - to use different options, make a separate request.
-type PermsSyncRequest struct {
-	UserIDs []int32                 `json:"user_ids"`
-	RepoIDs []api.RepoID            `json:"repo_ids"`
-	Options authz.FetchPermsOptions `json:"options"`
-}
-
-// PermsSyncResponse is a response to sync permissions.
-type PermsSyncResponse struct {
-	Error string
-}
-
-// ExternalServiceSyncRequest is a request to sync a specific external service eagerly.
-//
-// The FrontendAPI is one of the issuers of this request. It does so when creating or
-// updating an external service so that admins don't have to wait until the next sync
-// run to see their repos being synced.
-type ExternalServiceSyncRequest struct {
-	ExternalServiceID int64
-}
-
-// ExternalServiceSyncResult is a result type of an external service's sync request.
-type ExternalServiceSyncResult struct {
 	Error string
 }

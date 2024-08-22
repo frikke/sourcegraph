@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -34,7 +35,8 @@ func TestMain(m *testing.M) {
 // v3.38.0 -> privileged migrations introduced
 
 func TestStitchFrontendDefinitions(t *testing.T) {
-	if testing.Short() {
+	if testing.Short() || os.Getenv("BAZEL_TEST") == "1" {
+		t.Skip()
 		return
 	}
 	t.Parallel()
@@ -79,7 +81,8 @@ func TestStitchFrontendDefinitions(t *testing.T) {
 }
 
 func TestStitchCodeintelDefinitions(t *testing.T) {
-	if testing.Short() {
+	if testing.Short() || os.Getenv("BAZEL_TEST") == "1" {
+		t.Skip()
 		return
 	}
 	t.Parallel()
@@ -124,7 +127,8 @@ func TestStitchCodeintelDefinitions(t *testing.T) {
 }
 
 func TestStitchCodeinsightsDefinitions(t *testing.T) {
-	if testing.Short() {
+	if testing.Short() || os.Getenv("BAZEL_TEST") == "1" {
+		t.Skip()
 		return
 	}
 	t.Parallel()
@@ -169,7 +173,8 @@ func TestStitchCodeinsightsDefinitions(t *testing.T) {
 }
 
 func TestStitchAndApplyFrontendDefinitions(t *testing.T) {
-	if testing.Short() {
+	if testing.Short() || os.Getenv("BAZEL_TEST") == "1" {
+		t.Skip()
 		return
 	}
 	t.Parallel()
@@ -183,7 +188,8 @@ func TestStitchAndApplyFrontendDefinitions(t *testing.T) {
 }
 
 func TestStitchAndApplyCodeintelDefinitions(t *testing.T) {
-	if testing.Short() {
+	if testing.Short() || os.Getenv("BAZEL_TEST") == "1" {
+		t.Skip()
 		return
 	}
 	t.Parallel()
@@ -197,7 +203,8 @@ func TestStitchAndApplyCodeintelDefinitions(t *testing.T) {
 }
 
 func TestStitchAndApplyCodeinsightsDefinitions(t *testing.T) {
-	if testing.Short() {
+	if testing.Short() || os.Getenv("BAZEL_TEST") == "1" {
+		t.Skip()
 		return
 	}
 	t.Parallel()
@@ -214,7 +221,7 @@ func TestStitchAndApplyCodeinsightsDefinitions(t *testing.T) {
 // asserts that the resulting graph has the expected root, leaf, and version boundary values.
 func testStitchGraphShape(t *testing.T, schemaName string, from, to, expectedRoot int, expectedLeaves []int, expectedBoundsByRev map[string]shared.MigrationBounds) {
 	t.Run(fmt.Sprintf("stitch 3.%d -> 3.%d", from, to), func(t *testing.T) {
-		stitched, err := StitchDefinitions(schemaName, repositoryRoot(t), makeRange(from, to))
+		stitched, err := StitchDefinitions(testMigrationsReader, schemaName, makeRange(from, to))
 		if err != nil {
 			t.Fatalf("failed to stitch definitions: %s", err)
 		}
@@ -241,7 +248,7 @@ func testStitchGraphShape(t *testing.T, schemaName string, from, to, expectedRoo
 // compared against the target version's description (in the git-tree).
 func testStitchApplication(t *testing.T, schemaName string, from, to int) {
 	t.Run(fmt.Sprintf("upgrade 3.%d -> 3.%d", from, to), func(t *testing.T) {
-		stitched, err := StitchDefinitions(schemaName, repositoryRoot(t), makeRange(from, to))
+		stitched, err := StitchDefinitions(testMigrationsReader, schemaName, makeRange(from, to))
 		if err != nil {
 			t.Fatalf("failed to stitch definitions: %s", err)
 		}
@@ -251,13 +258,13 @@ func testStitchApplication(t *testing.T, schemaName string, from, to int) {
 		db := dbtest.NewRawDB(logger, t)
 		migrationsTableName := "testing"
 
-		store := connections.NewStoreShim(store.NewWithDB(db, migrationsTableName, store.NewOperations(&observation.TestContext)))
-		if err := store.EnsureSchemaTable(ctx); err != nil {
+		storeShim := connections.NewStoreShim(store.NewWithDB(observation.TestContextTB(t), db, migrationsTableName))
+		if err := storeShim.EnsureSchemaTable(ctx); err != nil {
 			t.Fatalf("failed to prepare store: %s", err)
 		}
 
 		migrationRunner := runner.NewRunnerWithSchemas(logger, map[string]runner.StoreFactory{
-			schemaName: func(ctx context.Context) (runner.Store, error) { return store, nil },
+			schemaName: func(ctx context.Context) (runner.Store, error) { return storeShim, nil },
 		}, []*schemas.Schema{
 			{
 				Name:                schemaName,
@@ -291,11 +298,11 @@ func testStitchApplication(t *testing.T, schemaName string, from, to int) {
 			fmt.Sprintf("internal/database/schema%s.json", fileSuffix),
 		)
 
-		schemas, err := store.Describe(ctx)
+		schemaDescriptions, err := storeShim.Describe(ctx)
 		if err != nil {
 			t.Fatalf("failed to describe database: %s", err)
 		}
-		schema := canonicalize(schemas["public"])
+		schema := canonicalize(schemaDescriptions["public"])
 
 		if diff := cmp.Diff(expectedSchema, schema); diff != "" {
 			t.Fatalf("unexpected schema (-want +got):\n%s", diff)
@@ -356,4 +363,32 @@ func canonicalize(schemaDescription schemas.SchemaDescription) schemas.SchemaDes
 	schemaDescription.Tables = filtered
 
 	return schemaDescription
+}
+
+var testMigrationsReader MigrationsReader = &cachedMigrationsReader{
+	inner: NewLazyMigrationsReader(),
+	m:     make(map[string]func() (map[string]string, error)),
+}
+
+type cachedMigrationsReader struct {
+	inner MigrationsReader
+
+	mu sync.Mutex
+	m  map[string]func() (map[string]string, error)
+}
+
+func (c *cachedMigrationsReader) Get(version string) (map[string]string, error) {
+	c.mu.Lock()
+	get, ok := c.m[version]
+	if !ok {
+		// we haven't calculated the version, store it as a sync.OnceValues to
+		// singleflight requests.
+		get = sync.OnceValues(func() (map[string]string, error) {
+			return c.inner.Get(version)
+		})
+		c.m[version] = get
+	}
+	c.mu.Unlock()
+
+	return get()
 }

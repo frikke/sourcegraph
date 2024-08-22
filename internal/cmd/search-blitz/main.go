@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/inconshreveable/log15"
+	"github.com/inconshreveable/log15" //nolint:logging // TODO move all logging to sourcegraph/log
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -24,7 +24,7 @@ const (
 	envLogDir = "LOG_DIR"
 )
 
-func run(ctx context.Context, wg *sync.WaitGroup, env string) {
+func run(ctx context.Context, wg *sync.WaitGroup, config *Config) {
 	defer wg.Done()
 
 	bc, err := newClient()
@@ -33,11 +33,6 @@ func run(ctx context.Context, wg *sync.WaitGroup, env string) {
 	}
 
 	sc, err := newStreamClient()
-	if err != nil {
-		panic(err)
-	}
-
-	config, err := loadQueries(env)
 	if err != nil {
 		panic(err)
 	}
@@ -52,12 +47,12 @@ func run(ctx context.Context, wg *sync.WaitGroup, env string) {
 		return nil
 	}
 
-	loopSearch := func(ctx context.Context, c genericClient, group string, qc *QueryConfig) {
+	loopSearch := func(ctx context.Context, c genericClient, qc *QueryConfig) {
 		if qc.Interval == 0 {
-			qc.Interval = time.Minute
+			qc.Interval = 5 * time.Minute
 		}
 
-		log := log15.New("group", group, "name", qc.Name, "query", qc.Query, "type", c.clientType())
+		log := log15.New("name", qc.Name, "query", qc.Query, "type", c.clientType())
 
 		// Randomize start to a random time in the initial interval so our
 		// queries aren't all scheduled at the same time.
@@ -72,8 +67,16 @@ func run(ctx context.Context, wg *sync.WaitGroup, env string) {
 		defer ticker.Stop()
 
 		for {
-
-			m, err := c.search(ctx, qc.Query, qc.Name)
+			var m *metrics
+			var err error
+			if qc.Query != "" {
+				m, err = c.search(ctx, qc.Query, qc.Name)
+			} else if qc.Snippet != "" {
+				m, err = c.attribution(ctx, qc.Snippet, qc.Name)
+			} else {
+				log.Error("snippet and query unset")
+				return
+			}
 			if err != nil {
 				log.Error(err.Error())
 			} else {
@@ -82,10 +85,10 @@ func run(ctx context.Context, wg *sync.WaitGroup, env string) {
 
 				tookSeconds, firstResultSeconds := m.took.Seconds(), m.firstResult.Seconds()
 
-				tsv.Log(group, qc.Name, c.clientType(), m.trace, m.matchCount, tookSeconds, firstResultSeconds)
-				durationSearchSeconds.WithLabelValues(group, qc.Name, c.clientType()).Observe(tookSeconds)
-				firstResultSearchSeconds.WithLabelValues(group, qc.Name, c.clientType()).Observe(firstResultSeconds)
-				matchCount.WithLabelValues(group, qc.Name, c.clientType()).Set(float64(m.matchCount))
+				tsv.Log(qc.Name, c.clientType(), m.trace, m.matchCount, tookSeconds, firstResultSeconds)
+				durationSearchSeconds.WithLabelValues(qc.Name, c.clientType()).Observe(tookSeconds)
+				firstResultSearchSeconds.WithLabelValues(qc.Name, c.clientType()).Observe(firstResultSeconds)
+				matchCount.WithLabelValues(qc.Name, c.clientType()).Set(float64(m.matchCount))
 			}
 
 			select {
@@ -96,7 +99,7 @@ func run(ctx context.Context, wg *sync.WaitGroup, env string) {
 		}
 	}
 
-	scheduleQuery := func(ctx context.Context, group string, qc *QueryConfig) {
+	scheduleQuery := func(ctx context.Context, qc *QueryConfig) {
 		if len(qc.Protocols) == 0 {
 			qc.Protocols = allProtocols
 		}
@@ -106,20 +109,19 @@ func run(ctx context.Context, wg *sync.WaitGroup, env string) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				loopSearch(ctx, client, group, qc)
+				loopSearch(ctx, client, qc)
 			}()
 		}
 	}
 
-	for _, group := range config.Groups {
-		for _, qc := range group.Queries {
-			scheduleQuery(ctx, group.Name, qc)
-		}
+	for _, qc := range config.Queries {
+		scheduleQuery(ctx, qc)
 	}
 }
 
 type genericClient interface {
 	search(ctx context.Context, query, queryName string) (*metrics, error)
+	attribution(ctx context.Context, snippet, queryName string) (*metrics, error)
 	clientType() string
 }
 
@@ -189,10 +191,16 @@ func main() {
 	defer cleanup()
 
 	env := os.Getenv("SEARCH_BLITZ_ENV")
+	queryFile := os.Getenv("SEARCH_BLITZ_QUERY_FILE")
+
+	config, err := loadConfig(queryFile, env)
+	if err != nil {
+		panic(err)
+	}
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
-	go run(ctx, &wg, env)
+	go run(ctx, &wg, config)
 
 	wg.Add(1)
 	srv := startServer(&wg)

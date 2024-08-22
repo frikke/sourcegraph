@@ -17,9 +17,11 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/grafana/regexp"
+	"golang.org/x/time/rate"
 
 	"github.com/sourcegraph/sourcegraph/internal/httpcli"
 	"github.com/sourcegraph/sourcegraph/internal/httptestutil"
+	"github.com/sourcegraph/sourcegraph/internal/ratelimit"
 	"github.com/sourcegraph/sourcegraph/internal/testutil"
 	"github.com/sourcegraph/sourcegraph/internal/unpack"
 )
@@ -57,7 +59,7 @@ func TestDownload(t *testing.T) {
 	}
 
 	tmp := t.TempDir()
-	err = unpack.Tgz(bytes.NewReader(p), tmp, unpack.Opts{})
+	err = unpack.Tgz(p, tmp, unpack.Opts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,13 +121,13 @@ func TestVersion(t *testing.T) {
 }
 
 func TestParse_empty(t *testing.T) {
-	b := []byte(`
+	b := bytes.NewReader([]byte(`
 <!DOCTYPE html>
 <html>
   <body>
   </body>
 </html>
-`)
+`))
 
 	_, err := parse(b)
 	if err != nil {
@@ -166,7 +168,7 @@ func TestParse_broken(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err := parse(buf.Bytes())
+			_, err := parse(&buf)
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -177,7 +179,7 @@ func TestParse_broken(t *testing.T) {
 func TestParse_PEP503(t *testing.T) {
 	// There may be any other HTML elements on the API pages as long as the required
 	// anchor elements exist.
-	b := []byte(`
+	b := bytes.NewReader([]byte(`
 <!DOCTYPE html>
 <html>
   <head>
@@ -194,7 +196,7 @@ func TestParse_PEP503(t *testing.T) {
 	</div>
   </body>
 </html>
-`)
+`))
 
 	got, err := parse(b)
 	if err != nil {
@@ -446,11 +448,9 @@ func newTestClient(t testing.TB, name string, update bool) *Client {
 		}
 	})
 
-	doer, err := httpcli.NewFactory(nil, httptestutil.NewRecorderOpt(rec)).Doer()
-	if err != nil {
-		t.Fatal(err)
-	}
+	doer := httpcli.NewFactory(nil, httptestutil.NewRecorderOpt(rec))
 
-	c := NewClient("urn", []string{"https://pypi.org/simple"}, doer)
+	c, _ := NewClient("urn", []string{"https://pypi.org/simple"}, doer)
+	c.limiter = ratelimit.NewInstrumentedLimiter("pypi", rate.NewLimiter(100, 10))
 	return c
 }

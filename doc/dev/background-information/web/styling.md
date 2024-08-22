@@ -27,7 +27,7 @@ An example of this is `<HoverOverlay/>`: see how [the different props it accepts
 They are defined for each code host referencing CSS class names **that the code host defines in its own styles**:
 
 - for [GitHub](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@b5af21f76dbb96ceece9f0908f56b3a7145ec4f7/-/blob/client/browser/src/shared/code-hosts/github/codeHost.ts#L353-361) using the class names from GitHub's [Primer design system](https://primer.style/react/Buttons)
-- for [Gitlab](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@b5af21f76dbb96ceece9f0908f56b3a7145ec4f7/-/blob/client/browser/src/shared/code-hosts/gitlab/codeHost.ts#L203-211) using class names from Gitlab's [Pajamas design system](https://design.gitlab.com/components/button)
+- for [GitLab](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@b5af21f76dbb96ceece9f0908f56b3a7145ec4f7/-/blob/client/browser/src/shared/code-hosts/gitlab/codeHost.ts#L203-211) using class names from Gitlab's [Pajamas design system](https://design.gitlab.com/components/button)
 - for [Bitbucket](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@b5af21f76dbb96ceece9f0908f56b3a7145ec4f7/-/blob/client/browser/src/shared/code-hosts/bitbucket/codeHost.tsx#L235-242) using the class names from [Atlassian UI](https://aui.atlassian.com/aui/7.10/docs/buttons.html)
 - for [Phabricator](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@b5af21f76dbb96ceece9f0908f56b3a7145ec4f7/-/blob/client/browser/src/shared/code-hosts/phabricator/codeHost.ts#L195-202) using class names found in the Phabricator UI with the browser dev tools (it doesn't have a documented design system, but is easy to reverse-engineer).
 
@@ -76,7 +76,7 @@ To use this approach, colocate a SCSS stylesheet with the React component and us
 Example:
 
 - `PageSelector.tsx` component would have a `PageSelector.module.scss` file next to it.
-- Use `yarn watch-generate` to generate a Typescript type declaration file: `PageSelector.module.scss.d.ts` in the same folder.
+- Use `pnpm generate` to generate a TypeScript type declaration file: `PageSelector.module.scss.d.ts` in the same folder.
 - After that, it's possible to type-safely use class names from the CSS module.
 
 ```tsx
@@ -162,8 +162,6 @@ This ensures our spacing generally aligns with an [8pt grid](https://medium.com/
 In our webapp, it is recommended to make use of [Bootstrap's margin and padding utilities](https://getbootstrap.com/docs/4.5/utilities/spacing/), which are configured to align with the 8pt grid.
 
 ### Layout
-
-We use modern CSS for our layouting needs. You can find a [small playground in our Storybook](https://main--5f0f381c0e50750022dc6bf7.chromatic.com/?path=/story/branded-global-styles--layout). The dev tools of modern browsers provide a lot of useful tooling to work with CSS layouts.
 
 Layouts should always be _responsive_ to make sure Sourcegraph is usable with different screen resolutions and window sizes, e.g. when resizing the browser window and using Sourcegraph side-by-side with an editor.
 

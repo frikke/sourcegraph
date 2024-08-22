@@ -1,29 +1,44 @@
 import * as React from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
+import { mdiApplicationEditOutline } from '@mdi/js'
 import { from } from 'rxjs'
 
 import { logger } from '@sourcegraph/common'
 import { SimpleActionItem } from '@sourcegraph/shared/src/actions/SimpleActionItem'
-import { PlatformContext } from '@sourcegraph/shared/src/platform/context'
-import { isSettingsValid, Settings } from '@sourcegraph/shared/src/settings/settings'
-import { Popover, PopoverContent, PopoverTrigger, Position, useObservable } from '@sourcegraph/wildcard'
+import type { PlatformContext } from '@sourcegraph/shared/src/platform/context'
+import { isSettingsValid, type Settings } from '@sourcegraph/shared/src/settings/settings'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import {
+    Button,
+    Icon,
+    Popover,
+    PopoverContent,
+    PopoverTrigger,
+    Position,
+    Tooltip,
+    useObservable,
+} from '@sourcegraph/wildcard'
 
-import { eventLogger } from '../tracking/eventLogger'
+import { RepoHeaderActionAnchor, RepoHeaderActionMenuLink } from '../repo/components/RepoHeaderActions'
+import { RepoActionInfo } from '../repo/RepoActionInfo'
 
 import { getEditorSettingsErrorMessage } from './build-url'
 import type { EditorSettings } from './editor-settings'
-import { EditorId, getEditor } from './editors'
+import { type EditorId, getEditor } from './editors'
 import { migrateLegacySettings } from './migrate-legacy-settings'
 import { OpenInEditorPopover } from './OpenInEditorPopover'
 import { useOpenCurrentUrlInEditor } from './useOpenCurrentUrlInEditor'
 
 import styles from './OpenInEditorActionItem.module.scss'
 
-export interface OpenInEditorActionItemProps {
+export interface OpenInEditorActionItemProps extends TelemetryV2Props {
     platformContext: PlatformContext
     externalServiceType?: string
     assetsRoot?: string
+    source?: 'repoHeader' | 'actionItemsBar'
+    actionType?: 'nav' | 'dropdown'
 }
 
 // We only want to attempt to upgrade the legacy open in editor settings once per
@@ -84,11 +99,21 @@ export const OpenInEditorActionItem: React.FunctionComponent<OpenInEditorActionI
             {editors.map(
                 (editor, index) =>
                     editor && (
-                        <SimpleActionItem
+                        <EditorItem
                             key={editor.id}
                             tooltip={`Open file in ${editor?.name}`}
-                            onSelect={() => {
-                                eventLogger.log('OpenInEditorClicked', { editor: editor.id }, { editor: editor.id })
+                            icon={
+                                <img
+                                    src={`${assetsRoot}/img/editors/${editor.id}.svg`}
+                                    alt={`Open file in ${editor?.name}`}
+                                    className={styles.icon}
+                                />
+                            }
+                            onClick={() => {
+                                EVENT_LOGGER.log('OpenInEditorClicked', { editor: editor.id }, { editor: editor.id })
+                                props.telemetryRecorder.recordEvent('blob.openInEditor', 'click', {
+                                    metadata: { editor: editor.telemetryID },
+                                })
                                 openCurrentUrlInEditor(
                                     settings?.openInEditor,
                                     props.externalServiceType,
@@ -96,26 +121,40 @@ export const OpenInEditorActionItem: React.FunctionComponent<OpenInEditorActionI
                                     index
                                 )
                             }}
-                        >
-                            <img
-                                src={`${assetsRoot}/img/editors/${editor.id}.svg`}
-                                alt={`Open file in ${editor?.name}`}
-                                className={styles.icon}
-                            />
-                        </SimpleActionItem>
+                            source={props.source}
+                            actionType={props.actionType}
+                        />
                     )
             )}
         </>
-    ) : (
+    ) : // We can not render the editor popover inside the dropdown view yet.
+    // Since the dropdown view is only used on very limited viewport dimensions,
+    // we're okay with having the user go to the settings to configure this
+    // instead.
+    //
+    // Chances are that they won't have an IDE configured on these devices
+    // anyways.
+    props.actionType !== 'dropdown' ? (
         <Popover isOpen={popoverOpen} onOpenChange={event => setPopoverOpen(event.isOpen)}>
-            <PopoverTrigger as="div">
-                <SimpleActionItem tooltip="Set your preferred editor" isActive={popoverOpen} onSelect={togglePopover}>
-                    <img
-                        src={`${assetsRoot}/img/open-in-editor.svg`}
-                        alt="Set your preferred editor"
-                        className={styles.icon}
-                    />
-                </SimpleActionItem>
+            <PopoverTrigger as="div" className={styles.item}>
+                <EditorItem
+                    tooltip="Set your preferred editor"
+                    isActive={popoverOpen}
+                    icon={
+                        props.source === 'repoHeader' ? (
+                            <Icon aria-hidden={true} className={styles.icon} svgPath={mdiApplicationEditOutline} />
+                        ) : (
+                            <img
+                                src={`${assetsRoot}/img/open-in-editor.svg`}
+                                alt="Set your preferred editor"
+                                className={styles.icon}
+                            />
+                        )
+                    }
+                    onClick={togglePopover}
+                    source={props.source}
+                    actionType={props.actionType}
+                />
             </PopoverTrigger>
             <PopoverContent position={Position.leftStart} className="pt-0 pb-0" aria-labelledby="repo-revision-popover">
                 <OpenInEditorPopover
@@ -126,7 +165,7 @@ export const OpenInEditorActionItem: React.FunctionComponent<OpenInEditorActionI
                 />
             </PopoverContent>
         </Popover>
-    )
+    ) : null
 }
 
 function upgradeSettings(platformContext: PlatformContext, settings: Settings, userSettingsSubject: string): void {
@@ -145,4 +184,40 @@ function upgradeSettings(platformContext: PlatformContext, settings: Settings, u
                 logger.error('Setting migration failed.', error)
             })
     }
+}
+
+interface EditorItemProps {
+    tooltip: string
+    onClick: () => void
+    icon: React.ReactNode
+    isActive?: boolean
+    source?: 'repoHeader' | 'actionItemsBar'
+    actionType?: 'nav' | 'dropdown'
+}
+
+function EditorItem(props: EditorItemProps): JSX.Element {
+    if (props.source === 'actionItemsBar') {
+        return (
+            <SimpleActionItem tooltip={props.tooltip} onSelect={props.onClick} isActive={props.isActive}>
+                {props.icon}
+            </SimpleActionItem>
+        )
+    }
+
+    if (props.actionType === 'dropdown') {
+        return (
+            <RepoHeaderActionMenuLink file={true} as={Button} onClick={props.onClick}>
+                {props.icon}
+                <span>{props.tooltip}</span>
+            </RepoHeaderActionMenuLink>
+        )
+    }
+
+    return (
+        <Tooltip content={props.tooltip}>
+            <RepoHeaderActionAnchor onSelect={props.onClick} className={styles.item}>
+                <RepoActionInfo icon={props.icon} displayName="Editor" />
+            </RepoHeaderActionAnchor>
+        </Tooltip>
+    )
 }

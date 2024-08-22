@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/gomodule/redigo/redis"
-	"github.com/inconshreveable/log15"
+	"github.com/inconshreveable/log15" //nolint:logging // TODO move all logging to sourcegraph/log
 
 	"github.com/sourcegraph/sourcegraph/internal/redispool"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
@@ -14,10 +14,12 @@ import (
 const recommendedPolicy = "allkeys-lru"
 
 func CheckRedisCacheEvictionPolicy() {
-	cacheConn := redispool.Cache.Get()
+	cachePool := redispool.Cache.Pool()
+	cacheConn := cachePool.Get()
 	defer cacheConn.Close()
 
-	storeConn := redispool.Store.Get()
+	storePool := redispool.Store.Pool()
+	storeConn := storePool.Get()
 	defer storeConn.Close()
 
 	storeRunID, err := getRunID(storeConn)

@@ -4,17 +4,17 @@ import (
 	"context"
 	"testing"
 
-	mockassert "github.com/derision-test/go-mockgen/testutil/assert"
+	mockassert "github.com/derision-test/go-mockgen/v2/testutil/assert"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/database/dbmocks"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 func TestHandler(t *testing.T) {
 	t.Run("store error", func(t *testing.T) {
 		want := errors.New("error")
-		store := database.NewMockWebhookLogStore()
+		store := dbmocks.NewMockWebhookLogStore()
 		store.DeleteStaleFunc.SetDefaultReturn(want)
 
 		ph := &handler{
@@ -27,7 +27,7 @@ func TestHandler(t *testing.T) {
 	})
 
 	t.Run("success", func(t *testing.T) {
-		store := database.NewMockWebhookLogStore()
+		store := dbmocks.NewMockWebhookLogStore()
 		ph := &handler{
 			store: store,
 		}

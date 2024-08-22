@@ -1,8 +1,9 @@
 import * as React from 'react'
 
-import * as H from 'history'
-import { uniq, isEqual } from 'lodash'
-import { combineLatest, merge, Observable, of, Subject, Subscription } from 'rxjs'
+import type * as H from 'history'
+import { isEqual, uniq } from 'lodash'
+import { useLocation, useNavigate, type NavigateFunction } from 'react-router-dom'
+import { combineLatest, merge, of, Subject, Subscription, type Observable } from 'rxjs'
 import {
     catchError,
     debounceTime,
@@ -10,31 +11,38 @@ import {
     distinctUntilChanged,
     filter,
     map,
+    scan,
+    share,
     skip,
     startWith,
     switchMap,
     takeUntil,
     tap,
-    scan,
-    share,
 } from 'rxjs/operators'
 
-import { asError, ErrorLike, isErrorLike, logger } from '@sourcegraph/common'
+import { asError, isErrorLike, logger, type ErrorLike } from '@sourcegraph/common'
 
-import { ConnectionNodes, ConnectionNodesState, ConnectionNodesDisplayProps, ConnectionProps } from './ConnectionNodes'
-import { Connection, ConnectionQueryArguments } from './ConnectionType'
+import {
+    ConnectionNodes,
+    type ConnectionNodesDisplayProps,
+    type ConnectionNodesState,
+    type ConnectionProps,
+} from './ConnectionNodes'
+import type { Connection } from './ConnectionType'
 import { QUERY_KEY } from './constants'
-import { FilteredConnectionFilter, FilteredConnectionFilterValue } from './FilterControl'
-import { ConnectionError, ConnectionLoading, ConnectionForm, ConnectionContainer } from './ui'
+import type { BasicFilterArgs, Filter, FilterOption, FilterValues } from './FilterControl'
+import { DEFAULT_PAGE_SIZE } from './hooks/usePageSwitcherPagination'
+import { ConnectionContainer, ConnectionError, ConnectionForm, ConnectionLoading } from './ui'
 import type { ConnectionFormProps } from './ui/ConnectionForm'
-import { getFilterFromURL, getUrlQuery, parseQueryInt, hasID } from './utils'
+import { getFilterFromURL, hasID, parseQueryInt, urlSearchParamsForFilteredConnection } from './utils'
 
 /**
  * Fields that belong in FilteredConnectionProps and that don't depend on the type parameters. These are the fields
  * that are most likely to be needed by callers, and it's simpler for them if they are in a parameter-less type.
  */
 interface FilteredConnectionDisplayProps extends ConnectionNodesDisplayProps, ConnectionFormProps {
-    history: H.History
+    navigate: NavigateFunction
+
     location: H.Location
 
     /** CSS class name for the root element. */
@@ -76,13 +84,24 @@ interface FilteredConnectionDisplayProps extends ConnectionNodesDisplayProps, Co
      */
     querySubject?: Subject<string>
 
-    /** A function that generates an aria label given a node display name */
+    /** A function that generates an aria label given a node display name. */
     ariaLabelFunction?: (displayName: string) => string
+
+    /**
+     * Sets the aria-live attribute for the container around the nodes. This will announce updates to
+     * the list to screen reader users (e.g. reading out nodes after they have finished loading).
+     */
+    ariaLive?: 'polite' | 'off'
+
+    /**
+     * A component that wraps around everything after the connection form. This is useful
+     * for adding additional padding/background to the list, errors, or loading indicators.
+     */
+    contentWrapperComponent?: React.ComponentType<{ children: React.ReactNode }>
 }
 
 /**
  * Props for the FilteredConnection component.
- *
  * @template C The GraphQL connection type, such as GQL.IRepositoryConnection.
  * @template N The node type of the GraphQL connection, such as GQL.IRepository (if C is GQL.IRepositoryConnection)
  * @template NP Props passed to `nodeComponent` in addition to `{ node: N }`
@@ -95,7 +114,7 @@ interface FilteredConnectionProps<C extends Connection<N>, N, NP = {}, HP = {}>
     queryConnection: (args: FilteredConnectionQueryArguments) => Observable<C>
 
     /** Called when the queryConnection Observable emits. */
-    onUpdate?: (value: C | ErrorLike | undefined, query: string, activeValues: FilteredConnectionArgs) => void
+    onUpdate?: (value: C | ErrorLike | undefined, query: string, activeValues: Partial<BasicFilterArgs>) => void
 
     /**
      * Set to true when the GraphQL response is expected to emit an `PageInfo.endCursor` value when
@@ -109,9 +128,14 @@ interface FilteredConnectionProps<C extends Connection<N>, N, NP = {}, HP = {}>
 /**
  * The arguments for the Props.queryConnection function.
  */
-export interface FilteredConnectionQueryArguments extends ConnectionQueryArguments {}
+export interface FilteredConnectionQueryArguments {
+    query?: string
+    first?: number | null
+    after?: string | null
+}
+
 interface FilteredConnectionState<C extends Connection<N>, N> extends ConnectionNodesState {
-    activeValues: Map<string, FilteredConnectionFilterValue>
+    activeFilterValues: FilterValues
 
     /** The fetched connection data or an error (if an error occurred). */
     connectionOrError?: C | ErrorLike
@@ -129,28 +153,43 @@ interface FilteredConnectionState<C extends Connection<N>, N> extends Connection
 }
 
 /**
+ * @deprecated Prefer using lower-level connection components exported from `./ui/index.ts`
+ *
+ * Check out usage examples:
+ * 1. https://sourcegraph.com/github.com/sourcegraph/sourcegraph@4794d2ff1669a83bb15aa4e2ee8c448e53eae754/-/blob/client/web/src/team/list/TeamListPage.tsx?L106-148
+ * 2. https://sourcegraph.com/github.com/sourcegraph/sourcegraph@4794d2ff1669a83bb15aa4e2ee8c448e53eae754/-/blob/client/web/src/repo/commits/RepositoryCommitsPage.tsx?L230-269
+ * 3. https://sourcegraph.com/github.com/sourcegraph/sourcegraph@4794d2ff1669a83bb15aa4e2ee8c448e53eae754/-/blob/client/web/src/site-admin/SiteAdminPackagesPage.tsx?L340-381
+ *
+ * ------------------------------------------
+ *
  * Displays a collection of items with filtering and pagination. It is called
  * "connection" because it is intended for use with GraphQL, which calls it that
  * (see http://graphql.org/learn/pagination/).
- *
  * @template N The node type of the GraphQL connection, such as `GQL.IRepository` (if `C` is `GQL.IRepositoryConnection`)
  * @template NP Props passed to `nodeComponent` in addition to `{ node: N }`
  * @template HP Props passed to `headComponent` in addition to `{ nodes: N[]; totalCount?: number | null }`.
  * @template C The GraphQL connection type, such as `GQL.IRepositoryConnection`.
  */
-export class FilteredConnection<
-    N,
-    NP = {},
-    HP = {},
-    C extends Connection<N> = Connection<N>
-> extends React.PureComponent<FilteredConnectionProps<C, N, NP, HP>, FilteredConnectionState<C, N>> {
+export function FilteredConnection<N, NP = {}, HP = {}, C extends Connection<N> = Connection<N>>(
+    props: Omit<FilteredConnectionProps<C, N, NP, HP>, 'location' | 'navigate'>
+): JSX.Element | null {
+    const location = useLocation()
+    const navigate = useNavigate()
+
+    return <InnerFilteredConnection<N, NP, HP, C> {...props} location={location} navigate={navigate} />
+}
+
+class InnerFilteredConnection<N, NP = {}, HP = {}, C extends Connection<N> = Connection<N>> extends React.PureComponent<
+    FilteredConnectionProps<C, N, NP, HP>,
+    FilteredConnectionState<C, N>
+> {
     public static defaultProps: Partial<FilteredConnectionProps<any, any>> = {
-        defaultFirst: 20,
+        defaultFirst: DEFAULT_PAGE_SIZE,
         useURLQuery: true,
     }
 
     private queryInputChanges = new Subject<string>()
-    private activeValuesChanges = new Subject<Map<string, FilteredConnectionFilterValue>>()
+    private activeFilterValuesChanges = new Subject<FilterValues>()
     private showMoreClicks = new Subject<void>()
     private componentUpdates = new Subject<FilteredConnectionProps<C, N, NP, HP>>()
     private subscriptions = new Subscription()
@@ -177,20 +216,18 @@ export class FilteredConnection<
         this.state = {
             loading: true,
             query: (!this.props.hideSearch && this.props.useURLQuery && searchParameters.get(QUERY_KEY)) || '',
-            activeValues:
-                (this.props.useURLQuery && getFilterFromURL(searchParameters, this.props.filters)) ||
-                new Map<string, FilteredConnectionFilterValue>(),
+            activeFilterValues:
+                (this.props.useURLQuery && getFilterFromURL(searchParameters, this.props.filters)) || {},
             first: (this.props.useURLQuery && parseQueryInt(searchParameters, 'first')) || this.props.defaultFirst!,
             visible: (this.props.useURLQuery && parseQueryInt(searchParameters, 'visible')) || 0,
         }
     }
 
     public componentDidMount(): void {
-        const activeValuesChanges = this.activeValuesChanges.pipe(startWith(this.state.activeValues))
+        const activeFilterValuesChanges = this.activeFilterValuesChanges.pipe(startWith(this.state.activeFilterValues))
 
-        const queryChanges = (this.props.querySubject
-            ? merge(this.queryInputChanges, this.props.querySubject)
-            : this.queryInputChanges
+        const queryChanges = (
+            this.props.querySubject ? merge(this.queryInputChanges, this.props.querySubject) : this.queryInputChanges
         ).pipe(
             distinctUntilChanged(),
             tap(query => !this.props.hideSearch && this.setState({ query })),
@@ -205,19 +242,19 @@ export class FilteredConnection<
         const refreshRequests = new Subject<{ forceRefresh: boolean }>()
 
         this.subscriptions.add(
-            activeValuesChanges
+            activeFilterValuesChanges
                 .pipe(
                     tap(values => {
-                        if (this.props.filters === undefined || this.props.onValueSelect === undefined) {
+                        if (this.props.filters === undefined || this.props.onFilterSelect === undefined) {
                             return
                         }
                         for (const filter of this.props.filters) {
-                            if (this.props.onValueSelect) {
-                                const value = values.get(filter.id)
+                            if (this.props.onFilterSelect) {
+                                const value = values[filter.id]
                                 if (value === undefined) {
                                     continue
                                 }
-                                this.props.onValueSelect(filter, value)
+                                this.props.onFilterSelect(filter, value)
                             }
                         }
                     })
@@ -228,44 +265,46 @@ export class FilteredConnection<
         this.subscriptions.add(
             // Use this.activeFilterChanges not activeFilterChanges so that it doesn't trigger on the initial mount
             // (it doesn't need to).
-            this.activeValuesChanges.subscribe(values => {
-                this.setState({ activeValues: new Map(values) })
+            this.activeFilterValuesChanges.subscribe(values => {
+                this.setState({ activeFilterValues: values })
             })
         )
 
         this.subscriptions.add(
             combineLatest([
                 queryChanges,
-                activeValuesChanges,
-                refreshRequests.pipe(
-                    startWith<{ forceRefresh: boolean }>({ forceRefresh: false })
-                ),
+                activeFilterValuesChanges,
+                refreshRequests.pipe(startWith<{ forceRefresh: boolean }>({ forceRefresh: false })),
             ])
                 .pipe(
-                    // Track whether the query or the active filter changed
+                    // Track whether the query or the active order or filter changed
                     scan<
-                        [string, Map<string, FilteredConnectionFilterValue> | undefined, { forceRefresh: boolean }],
+                        [string, FilterValues | undefined, { forceRefresh: boolean }],
                         {
                             query: string
-                            values: Map<string, FilteredConnectionFilterValue> | undefined
+                            filterValues: FilterValues | undefined
                             shouldRefresh: boolean
                             queryCount: number
                         }
                     >(
-                        ({ query, values, queryCount }, [currentQuery, currentValues, { forceRefresh }]) => ({
+                        (
+                            { query, filterValues, queryCount },
+                            [currentQuery, currentFilterValues, { forceRefresh }]
+                        ) => ({
                             query: currentQuery,
-                            values: currentValues,
-                            shouldRefresh: forceRefresh || query !== currentQuery || values !== currentValues,
+                            filterValues: currentFilterValues,
+                            shouldRefresh:
+                                forceRefresh || query !== currentQuery || filterValues !== currentFilterValues,
                             queryCount: queryCount + 1,
                         }),
                         {
                             query: this.state.query,
-                            values: this.state.activeValues,
+                            filterValues: this.state.activeFilterValues,
                             shouldRefresh: false,
                             queryCount: 0,
                         }
                     ),
-                    switchMap(({ query, values, shouldRefresh, queryCount }) => {
+                    switchMap(({ query, filterValues, shouldRefresh, queryCount }) => {
                         const result = this.props
                             .queryConnection({
                                 // If this is our first query and we were supplied a value for `visible`,
@@ -274,7 +313,9 @@ export class FilteredConnection<
                                 first: (queryCount === 1 && this.state.visible) || this.state.first,
                                 after: shouldRefresh ? undefined : this.state.after,
                                 query,
-                                ...(values ? this.buildArgs(values) : {}),
+                                ...(this.props.filters && filterValues
+                                    ? this.buildArgs(this.props.filters, filterValues)
+                                    : {}),
                             })
                             .pipe(
                                 catchError(error => [asError(error)]),
@@ -288,15 +329,16 @@ export class FilteredConnection<
                                 share()
                             )
 
-                        return (shouldRefresh
-                            ? merge(
-                                  result,
-                                  of({
-                                      connectionOrError: undefined,
-                                      loading: true,
-                                  }).pipe(delay(250), takeUntil(result))
-                              )
-                            : result
+                        return (
+                            shouldRefresh
+                                ? merge(
+                                      result,
+                                      of({
+                                          connectionOrError: undefined,
+                                          loading: true,
+                                      }).pipe(delay(250), takeUntil(result))
+                                  )
+                                : result
                         ).pipe(map(stateUpdate => ({ shouldRefresh, ...stateUpdate })))
                     }),
                     scan<PartialStateUpdate & { shouldRefresh: boolean }, PartialStateUpdate & { previousPage: N[] }>(
@@ -342,27 +384,32 @@ export class FilteredConnection<
                 .subscribe(
                     ({ connectionOrError, previousPage, ...rest }) => {
                         if (this.props.useURLQuery) {
-                            const searchFragment = this.urlQuery({ visibleResultCount: previousPage.length })
-                            const searchFragmentParams = new URLSearchParams(searchFragment)
-                            searchFragmentParams.sort()
+                            const { location, navigate } = this.props
+                            const newParams = this.urlQuery({ first: previousPage.length })
+                            newParams.sort()
 
-                            const oldParams = new URLSearchParams(this.props.location.search)
+                            const oldParams = new URLSearchParams(location.search)
                             oldParams.sort()
 
-                            if (!isEqual(Array.from(searchFragmentParams), Array.from(oldParams))) {
-                                this.props.history.replace({
-                                    search: searchFragment,
-                                    hash: this.props.location.hash,
-                                    // Do not throw away flash messages
-                                    state: this.props.location.state,
-                                })
+                            if (!isEqual(Array.from(newParams), Array.from(oldParams))) {
+                                navigate(
+                                    {
+                                        search: newParams.toString(),
+                                        hash: location.hash,
+                                    },
+                                    {
+                                        replace: true,
+                                        // Do not throw away flash messages
+                                        state: location.state,
+                                    }
+                                )
                             }
                         }
                         if (this.props.onUpdate) {
                             this.props.onUpdate(
                                 connectionOrError,
                                 this.state.query,
-                                this.buildArgs(this.state.activeValues)
+                                this.buildArgs(this.props.filters ?? [], this.state.activeFilterValues)
                             )
                         }
                         this.setState({ connectionOrError, ...rest })
@@ -422,7 +469,11 @@ export class FilteredConnection<
                     map(({ queryConnection }) => queryConnection),
                     distinctUntilChanged(),
                     skip(1), // prevent from triggering on initial mount
-                    tap(() => this.focusFilter())
+                    tap(() => {
+                        if (this.props.autoFocus) {
+                            this.focusFilter()
+                        }
+                    })
                 )
                 .subscribe(() =>
                     this.setState({ loading: true, connectionOrError: undefined }, () =>
@@ -430,39 +481,56 @@ export class FilteredConnection<
                     )
                 )
         )
+
+        // React to location changes.
+        this.subscriptions.add(
+            this.componentUpdates
+                .pipe(
+                    map(({ location }) => location.search),
+                    distinctUntilChanged(),
+                    map(searchParams => new URLSearchParams(searchParams)),
+                    map(searchParams => getFilterFromURL(searchParams, this.props.filters)),
+                    // Map is compared by reference, so by default distinctUntilChanged
+                    // will always return false for two maps. isEqual compares
+                    // them by value.
+                    distinctUntilChanged((prev, next) => isEqual(prev, next)),
+                    skip(1)
+                )
+                .subscribe(newFilterValues => {
+                    if (this.props.useURLQuery) {
+                        this.activeFilterValuesChanges.next(newFilterValues)
+                    }
+                })
+        )
+
         this.componentUpdates.next(this.props)
     }
 
     private urlQuery({
         first,
         query,
-        values,
-        visibleResultCount,
+        filterValues,
     }: {
         first?: number
         query?: string
-        values?: Map<string, FilteredConnectionFilterValue>
-        visibleResultCount?: number
-    }): string {
+        filterValues?: FilterValues
+    }): URLSearchParams {
         if (!first) {
             first = this.state.first
         }
         if (!query) {
             query = this.state.query
         }
-        if (!values) {
-            values = this.state.activeValues
+        if (!filterValues) {
+            filterValues = this.state.activeFilterValues
         }
 
-        return getUrlQuery({
+        return urlSearchParamsForFilteredConnection({
             query,
-            first: {
-                actual: first,
-                // Always set through `defaultProps`
-                default: this.props.defaultFirst!,
-            },
-            values,
-            visibleResultCount,
+            pagination: { first },
+            // Always set through `defaultProps`
+            pageSize: this.props.defaultFirst!,
+            filterValues,
             search: this.props.location.search,
             filters: this.props.filters,
         })
@@ -491,12 +559,19 @@ export class FilteredConnection<
 
         const inputPlaceholder = this.props.inputPlaceholder || `Search ${this.props.pluralNoun}...`
 
+        const ContentWrapperComponent = this.props.contentWrapperComponent || React.Fragment
+
         return (
-            <ConnectionContainer compact={this.props.compact} className={this.props.className}>
+            <ConnectionContainer
+                compact={this.props.compact}
+                className={this.props.className}
+                ariaLive={this.props.ariaLive}
+            >
                 {(!this.props.hideSearch || this.props.filters) && (
                     <ConnectionForm
                         ref={this.setFilterRef}
                         hideSearch={this.props.hideSearch}
+                        showSearchFirst={this.props.showSearchFirst}
                         inputClassName={this.props.inputClassName}
                         inputPlaceholder={inputPlaceholder}
                         inputAriaLabel={this.props.inputAriaLabel || inputPlaceholder}
@@ -504,46 +579,48 @@ export class FilteredConnection<
                         onInputChange={this.onChange}
                         autoFocus={this.props.autoFocus}
                         filters={this.props.filters}
-                        onValueSelect={this.onDidSelectValue}
-                        values={this.state.activeValues}
+                        onFilterSelect={this.onDidSelectFilterValue}
+                        filterValues={this.state.activeFilterValues}
                         compact={this.props.compact}
                         formClassName={this.props.formClassName}
                     />
                 )}
-                {errors.length > 0 && <ConnectionError errors={errors} compact={this.props.compact} />}
 
-                {this.state.connectionOrError && !isErrorLike(this.state.connectionOrError) && (
-                    <ConnectionNodes
-                        connection={this.state.connectionOrError}
-                        loading={this.state.loading}
-                        connectionQuery={this.state.connectionQuery}
-                        first={this.state.first}
-                        query={this.state.query}
-                        noun={this.props.noun}
-                        pluralNoun={this.props.pluralNoun}
-                        listComponent={this.props.listComponent}
-                        listClassName={this.props.listClassName}
-                        summaryClassName={this.props.summaryClassName}
-                        headComponent={this.props.headComponent}
-                        headComponentProps={this.props.headComponentProps}
-                        footComponent={this.props.footComponent}
-                        showMoreClassName={this.props.showMoreClassName}
-                        nodeComponent={this.props.nodeComponent}
-                        nodeComponentProps={this.props.nodeComponentProps}
-                        noShowMore={this.props.noShowMore}
-                        noSummaryIfAllNodesVisible={this.props.noSummaryIfAllNodesVisible}
-                        onShowMore={this.onClickShowMore}
-                        location={this.props.location}
-                        emptyElement={this.props.emptyElement}
-                        totalCountSummaryComponent={this.props.totalCountSummaryComponent}
-                        withCenteredSummary={this.props.withCenteredSummary}
-                        ariaLabelFunction={this.props.ariaLabelFunction}
-                    />
-                )}
+                <ContentWrapperComponent>
+                    {errors.length > 0 && <ConnectionError errors={errors} compact={this.props.compact} />}
 
-                {this.state.loading && (
-                    <ConnectionLoading compact={this.props.compact} className={this.props.loaderClassName} />
-                )}
+                    {this.state.connectionOrError && !isErrorLike(this.state.connectionOrError) && (
+                        <ConnectionNodes
+                            connection={this.state.connectionOrError}
+                            loading={this.state.loading}
+                            connectionQuery={this.state.connectionQuery}
+                            first={this.state.first}
+                            query={this.state.query}
+                            noun={this.props.noun}
+                            pluralNoun={this.props.pluralNoun}
+                            listComponent={this.props.listComponent}
+                            listClassName={this.props.listClassName}
+                            summaryClassName={this.props.summaryClassName}
+                            headComponent={this.props.headComponent}
+                            headComponentProps={this.props.headComponentProps}
+                            footComponent={this.props.footComponent}
+                            showMoreClassName={this.props.showMoreClassName}
+                            nodeComponent={this.props.nodeComponent}
+                            nodeComponentProps={this.props.nodeComponentProps}
+                            noShowMore={this.props.noShowMore}
+                            noSummaryIfAllNodesVisible={this.props.noSummaryIfAllNodesVisible}
+                            onShowMore={this.onClickShowMore}
+                            emptyElement={this.props.emptyElement}
+                            totalCountSummaryComponent={this.props.totalCountSummaryComponent}
+                            withCenteredSummary={this.props.withCenteredSummary}
+                            ariaLabelFunction={this.props.ariaLabelFunction}
+                        />
+                    )}
+
+                    {this.state.loading && (
+                        <ConnectionLoading compact={this.props.compact} className={this.props.loaderClassName} />
+                    )}
+                </ContentWrapperComponent>
             </ConnectionContainer>
         )
     }
@@ -568,43 +645,48 @@ export class FilteredConnection<
         this.queryInputChanges.next(event.currentTarget.value)
     }
 
-    private onDidSelectValue = (filter: FilteredConnectionFilter, value: FilteredConnectionFilterValue): void => {
+    private onDidSelectFilterValue = (filter: Filter, value: FilterOption['value'] | undefined): void => {
         if (this.props.filters === undefined) {
             return
         }
-        const values = new Map(this.state.activeValues)
-        values.set(filter.id, value)
-        this.activeValuesChanges.next(values)
+        this.activeFilterValuesChanges.next({ ...this.state.activeFilterValues, [filter.id]: value })
     }
 
     private onClickShowMore = (): void => {
         this.showMoreClicks.next()
     }
 
-    private buildArgs = (values: Map<string, FilteredConnectionFilterValue>): FilteredConnectionArgs => {
-        let args: FilteredConnectionArgs = {}
-        for (const key of values.keys()) {
-            const value = values.get(key)
-            if (value === undefined) {
-                continue
-            }
-            args = { ...args, ...value.args }
+    private buildArgs = buildFilterArgs
+}
+
+/**
+ * @template TFilterKeys The IDs of all filters ({@link Filter.id} values).
+ * @template TFilterArgs The type of option args ({@link Filter.options} {@link FilterOption.args} values).
+ */
+export function buildFilterArgs<
+    TFilterKeys extends string = string,
+    TFilterArgs extends BasicFilterArgs = BasicFilterArgs
+>(filters: Filter<TFilterKeys, TFilterArgs>[], filterValues: FilterValues<TFilterKeys>): Partial<TFilterArgs> {
+    let args = {} as TFilterArgs
+    for (const [filterID, value] of Object.entries(filterValues)) {
+        if (value === undefined) {
+            continue
         }
-        return args
+        const filter = filters.find(f => f.id === filterID)
+        if (filter) {
+            const valueArgs = filter.options.find(opt => opt.value === value)?.args
+            args = { ...args, ...valueArgs }
+        }
     }
+    return args
 }
 
 /**
  * Resets the `FilteredConnection` URL query string parameters to the defaults
- *
  * @param parameters the current URL search parameters
  */
 export const resetFilteredConnectionURLQuery = (parameters: URLSearchParams): void => {
     parameters.delete('visible')
     parameters.delete('first')
     parameters.delete('after')
-}
-
-export interface FilteredConnectionArgs {
-    [name: string]: string | number | boolean
 }

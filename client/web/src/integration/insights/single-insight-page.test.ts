@@ -1,12 +1,12 @@
 import assert from 'assert'
 
 import delay from 'delay'
+import { afterEach, beforeEach, describe, it } from 'mocha'
 
-import { createDriverForTest, Driver } from '@sourcegraph/shared/src/testing/driver'
+import { createDriverForTest, type Driver } from '@sourcegraph/shared/src/testing/driver'
 import { afterEachSaveScreenshotIfFailed } from '@sourcegraph/shared/src/testing/screenshotReporter'
 
-import { createWebIntegrationTestContext, WebIntegrationTestContext } from '../context'
-import { percySnapshotWithVariants } from '../utils'
+import { createWebIntegrationTestContext, type WebIntegrationTestContext } from '../context'
 
 import { MIGRATION_TO_GQL_INSIGHT_DATA_FIXTURE } from './fixtures/calculated-insights'
 import { createJITMigrationToGQLInsightMetadataFixture } from './fixtures/insights-metadata'
@@ -35,7 +35,6 @@ describe('Code insights single insight page', () => {
     async function takeChartSnapshot(name: string): Promise<void> {
         await driver.page.waitForSelector('svg circle')
         await delay(500)
-        await percySnapshotWithVariants(driver.page, name)
     }
 
     it('is styled correctly with common backend insights', async () => {
@@ -114,6 +113,7 @@ describe('Code insights single insight page', () => {
 
         assert.deepStrictEqual(variables.seriesDisplayOptions, {
             limit: 2,
+            numSamples: null,
             sortOptions: {
                 direction: 'ASC',
                 mode: 'LEXICOGRAPHICAL',

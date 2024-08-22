@@ -1,22 +1,20 @@
 import * as React from 'react'
 
 import classNames from 'classnames'
-import { RouteComponentProps } from 'react-router'
 import { Subject, Subscription } from 'rxjs'
 import { catchError, mergeMap, tap } from 'rxjs/operators'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { Form } from '@sourcegraph/branded/src/components/Form'
 import { asError, logger } from '@sourcegraph/common'
-import * as GQL from '@sourcegraph/shared/src/schema'
-import { Button, Link, Alert, Label, H2, Text } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Button, Link, Label, H2, Text, ErrorAlert, Form } from '@sourcegraph/wildcard'
 
 import { EmailInput, UsernameInput } from '../auth/SignInSignUpCommon'
-import { CopyableText } from '../components/CopyableText'
 import { PageTitle } from '../components/PageTitle'
-import { eventLogger } from '../tracking/eventLogger'
+import type { CreateUserResult } from '../graphql-operations'
 
 import { createUser } from './backend'
+import { AccountCreatedAlert } from './components/AccountCreatedAlert'
 
 import styles from './SiteAdminCreateUserPage.module.scss'
 
@@ -27,17 +25,19 @@ interface State {
     /**
      * The result of creating the user.
      */
-    createUserResult?: GQL.ICreateUserResult
+    createUserResult?: CreateUserResult['createUser']
 
     // Form
     username: string
     email: string
 }
 
+interface Props extends TelemetryV2Props {}
+
 /**
  * A page with a form to create a user account.
  */
-export class SiteAdminCreateUserPage extends React.Component<RouteComponentProps<{}>, State> {
+export class SiteAdminCreateUserPage extends React.Component<Props, State> {
     public state: State = {
         loading: false,
         username: '',
@@ -48,7 +48,8 @@ export class SiteAdminCreateUserPage extends React.Component<RouteComponentProps
     private subscriptions = new Subscription()
 
     public componentDidMount(): void {
-        eventLogger.logViewEvent('SiteAdminCreateUser')
+        EVENT_LOGGER.logViewEvent('SiteAdminCreateUser')
+        this.props.telemetryRecorder.recordEvent('admin.users.create', 'view')
 
         this.subscriptions.add(
             this.submits
@@ -106,22 +107,15 @@ export class SiteAdminCreateUserPage extends React.Component<RouteComponentProps
                     <Link to="/help/admin/auth">User authentication</Link> in the Sourcegraph documentation.
                 </Text>
                 {this.state.createUserResult ? (
-                    <Alert variant="success">
-                        <Text>
-                            Account created for <strong>{this.state.username}</strong>.
-                        </Text>
-                        {this.state.createUserResult.resetPasswordURL !== null ? (
-                            <>
-                                <Text>You must manually send this password reset link to the new user:</Text>
-                                <CopyableText text={this.state.createUserResult.resetPasswordURL} size={40} />
-                            </>
-                        ) : (
-                            <Text>The user must authenticate using a configured authentication provider.</Text>
-                        )}
+                    <AccountCreatedAlert
+                        username={this.state.username}
+                        email={this.state.email}
+                        resetPasswordURL={this.state.createUserResult.resetPasswordURL}
+                    >
                         <Button className="mt-2" onClick={this.dismissAlert} autoFocus={true} variant="primary">
                             Create another user
                         </Button>
-                    </Alert>
+                    </AccountCreatedAlert>
                 ) : (
                     <Form onSubmit={this.onSubmit} className="site-admin-create-user-page__form">
                         <div className={classNames('form-group', styles.formGroup)}>
@@ -149,7 +143,11 @@ export class SiteAdminCreateUserPage extends React.Component<RouteComponentProps
                                 aria-describedby="site-admin-create-user-page__form-email-help"
                             />
                             <small id="site-admin-create-user-page__form-email-help" className="form-text text-muted">
-                                Optional verified email for the user.
+                                Optional email for the user{' '}
+                                {window.context.emailEnabled
+                                    ? 'that must be verified by the user'
+                                    : 'that will be marked as verified'}
+                                .
                             </small>
                         </div>
                         {this.state.errorDescription && (

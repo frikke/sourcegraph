@@ -1,20 +1,57 @@
 {
-  "TestRepo": {
+  "All-Projects": {
    "description": "",
-   "id": "TestRepo",
+   "id": "All-Projects",
    "name": "",
    "parent": "",
    "state": "ACTIVE",
    "branches": null,
-   "labels": null
+   "labels": null,
+   "http_url_to_repo": "",
+   "ssh_url_to_repo": ""
   },
-  "apps/analytics-etl": {
+  "All-Users": {
    "description": "",
-   "id": "apps%2Fanalytics-etl",
+   "id": "All-Users",
    "name": "",
    "parent": "",
    "state": "ACTIVE",
    "branches": null,
-   "labels": null
+   "labels": null,
+   "http_url_to_repo": "",
+   "ssh_url_to_repo": ""
+  },
+  "beatrix": {
+   "description": "",
+   "id": "beatrix",
+   "name": "",
+   "parent": "",
+   "state": "ACTIVE",
+   "branches": null,
+   "labels": null,
+   "http_url_to_repo": "",
+   "ssh_url_to_repo": ""
+  },
+  "idan-temp": {
+   "description": "",
+   "id": "idan-temp",
+   "name": "",
+   "parent": "",
+   "state": "ACTIVE",
+   "branches": null,
+   "labels": null,
+   "http_url_to_repo": "",
+   "ssh_url_to_repo": ""
+  },
+  "k8s-gerrit": {
+   "description": "",
+   "id": "k8s-gerrit",
+   "name": "",
+   "parent": "",
+   "state": "ACTIVE",
+   "branches": null,
+   "labels": null,
+   "http_url_to_repo": "",
+   "ssh_url_to_repo": ""
   }
  }

@@ -3,22 +3,23 @@ package jobutil
 import (
 	"context"
 	"fmt"
-	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
-	otlog "github.com/opentracing/opentracing-go/log"
+	"github.com/grafana/regexp"
+	"go.opentelemetry.io/otel/attribute"
 
-	"github.com/sourcegraph/sourcegraph/cmd/searcher/protocol"
 	"github.com/sourcegraph/sourcegraph/internal/endpoint"
+	"github.com/sourcegraph/sourcegraph/internal/grpc/defaults"
 	"github.com/sourcegraph/sourcegraph/internal/search"
 	"github.com/sourcegraph/sourcegraph/internal/search/job"
 	"github.com/sourcegraph/sourcegraph/internal/search/query"
 	"github.com/sourcegraph/sourcegraph/internal/search/result"
 	"github.com/sourcegraph/sourcegraph/internal/search/searcher"
 	"github.com/sourcegraph/sourcegraph/internal/search/streaming"
-	"github.com/sourcegraph/sourcegraph/internal/trace"
+	"github.com/sourcegraph/sourcegraph/internal/searcher/protocol"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 // NewFileContainsFilterJob creates a filter job to post-filter results for the
@@ -35,13 +36,17 @@ import (
 // an unindexed search for each streamed diff match. However, we cannot pre-filter
 // because then are not checking whether the file contains the requested content
 // at the commit of the diff match.
-func NewFileContainsFilterJob(includePatterns []string, originalPattern query.Node, caseSensitive bool, child job.Job) job.Job {
+func NewFileContainsFilterJob(includePatterns []string, originalPattern query.Node, caseSensitive bool, child job.Job) (job.Job, error) {
 	includeMatchers := make([]*regexp.Regexp, 0, len(includePatterns))
 	for _, pattern := range includePatterns {
 		if !caseSensitive {
 			pattern = "(?i:" + pattern + ")"
 		}
-		includeMatchers = append(includeMatchers, regexp.MustCompile(pattern))
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to regexp.Compile(%q) for file:contains.content() include patterns", pattern)
+		}
+		includeMatchers = append(includeMatchers, re)
 	}
 
 	originalPatternStrings := patternsInTree(originalPattern)
@@ -50,7 +55,11 @@ func NewFileContainsFilterJob(includePatterns []string, originalPattern query.No
 		if !caseSensitive {
 			originalPatternString = "(?i:" + originalPatternString + ")"
 		}
-		originalPatternMatchers = append(originalPatternMatchers, regexp.MustCompile(originalPatternString))
+		re, err := regexp.Compile(originalPatternString)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to regexp.Compile(%q) for file:contains.content() original patterns", originalPatternString)
+		}
+		originalPatternMatchers = append(originalPatternMatchers, re)
 	}
 
 	return &fileContainsFilterJob{
@@ -59,7 +68,7 @@ func NewFileContainsFilterJob(includePatterns []string, originalPattern query.No
 		includeMatchers:         includeMatchers,
 		originalPatternMatchers: originalPatternMatchers,
 		child:                   child,
-	}
+	}, nil
 }
 
 type fileContainsFilterJob struct {
@@ -85,14 +94,14 @@ func (j *fileContainsFilterJob) Run(ctx context.Context, clients job.RuntimeClie
 	defer func() { finish(alert, err) }()
 
 	filteredStream := streaming.StreamFunc(func(event streaming.SearchEvent) {
-		event = j.filterEvent(ctx, clients.SearcherURLs, event)
+		event = j.filterEvent(ctx, clients.SearcherURLs, clients.SearcherGRPCConnectionCache, event)
 		stream.Send(event)
 	})
 
 	return j.child.Run(ctx, clients, filteredStream)
 }
 
-func (j *fileContainsFilterJob) filterEvent(ctx context.Context, searcherURLs *endpoint.Map, event streaming.SearchEvent) streaming.SearchEvent {
+func (j *fileContainsFilterJob) filterEvent(ctx context.Context, searcherURLs *endpoint.Map, searcherGRPCConnectionCache *defaults.ConnectionCache, event streaming.SearchEvent) streaming.SearchEvent {
 	// Don't filter out files with zero chunks because if the file contained
 	// a result, we still want to return a match for the file even if it
 	// has no matched ranges left.
@@ -102,7 +111,7 @@ func (j *fileContainsFilterJob) filterEvent(ctx context.Context, searcherURLs *e
 		case *result.FileMatch:
 			filtered = append(filtered, j.filterFileMatch(v))
 		case *result.CommitMatch:
-			cm := j.filterCommitMatch(ctx, searcherURLs, v)
+			cm := j.filterCommitMatch(ctx, searcherURLs, searcherGRPCConnectionCache, v)
 			if cm != nil {
 				filtered = append(filtered, cm)
 			}
@@ -151,7 +160,7 @@ func matchesAny(val string, matchers []*regexp.Regexp) bool {
 	return false
 }
 
-func (j *fileContainsFilterJob) filterCommitMatch(ctx context.Context, searcherURLs *endpoint.Map, cm *result.CommitMatch) result.Match {
+func (j *fileContainsFilterJob) filterCommitMatch(ctx context.Context, searcherURLs *endpoint.Map, searcherGRPCConnectionCache *defaults.ConnectionCache, cm *result.CommitMatch) result.Match {
 	// Skip any commit matches -- we only handle diff matches
 	if cm.DiffPreview == nil {
 		return nil
@@ -164,30 +173,32 @@ func (j *fileContainsFilterJob) filterCommitMatch(ctx context.Context, searcherU
 
 	// For each pattern specified by file:contains.content(), run a search at
 	// the commit to ensure that the file does, in fact, contain that content.
-	// We cannot do this all at once because searcher does not support complex patterns.
-	// Additionally, we cannot do this in advance because we don't know which commit
-	// we are searching at until we get a result.
+	// We cannot do this in advance because we don't know which commit we are
+	// searching at until we get a result.
+	//
+	// Note: now that searcher supports 'or' patterns, we could combine this into a single query.
 	matchedFileCounts := make(map[string]int)
 	for _, includePattern := range j.includePatterns {
 		patternInfo := search.TextPatternInfo{
-			Pattern:               includePattern,
+			Query: &protocol.PatternNode{
+				Value:    includePattern,
+				IsRegExp: true,
+			},
 			IsCaseSensitive:       j.caseSensitive,
-			IsRegExp:              true,
 			FileMatchLimit:        99999999,
 			Index:                 query.No,
-			IncludePatterns:       []string{query.UnionRegExps(fileNames)},
+			IncludePaths:          []string{query.UnionRegExps(fileNames)},
 			PatternMatchesContent: true,
 		}
 
-		onMatch := func(fms []*protocol.FileMatch) {
-			for _, fm := range fms {
-				matchedFileCounts[fm.Path] += 1
-			}
+		onMatch := func(fm *protocol.FileMatch) {
+			matchedFileCounts[fm.Path] += 1
 		}
 
 		_, err := searcher.Search(
 			ctx,
 			searcherURLs,
+			searcherGRPCConnectionCache,
 			cm.Repo.Name,
 			cm.Repo.ID,
 			"",
@@ -195,8 +206,8 @@ func (j *fileContainsFilterJob) filterCommitMatch(ctx context.Context, searcherU
 			false,
 			&patternInfo,
 			time.Hour,
-			nil,
 			search.Features{},
+			0, // we don't care about the actual content, so don't fetch extra lines
 			onMatch,
 		)
 		if err != nil {
@@ -210,8 +221,10 @@ func (j *fileContainsFilterJob) filterCommitMatch(ctx context.Context, searcherU
 
 func (j *fileContainsFilterJob) removeUnmatchedFileDiffs(cm *result.CommitMatch, matchedFileCounts map[string]int) result.Match {
 	// Ensure the matched ranges are sorted by start offset
-	sort.Slice(cm.DiffPreview.MatchedRanges, func(i, j int) bool {
-		return cm.DiffPreview.MatchedRanges[i].Start.Offset < cm.DiffPreview.MatchedRanges[j].End.Offset
+	slices.SortFunc(cm.DiffPreview.MatchedRanges, func(a, b result.Range) int {
+		// TODO(keegancsmith) I changed this from b.End to b.Start since that
+		// matches the comment above.
+		return a.Start.Compare(b.Start)
 	})
 
 	// Convert each file diff to a string so we know how much we are removing if we drop that file
@@ -286,7 +299,7 @@ func (j *fileContainsFilterJob) Children() []job.Describer {
 	return []job.Describer{j.child}
 }
 
-func (j *fileContainsFilterJob) Fields(v job.Verbosity) (res []otlog.Field) {
+func (j *fileContainsFilterJob) Attributes(v job.Verbosity) (res []attribute.KeyValue) {
 	switch v {
 	case job.VerbosityMax:
 		fallthrough
@@ -295,13 +308,13 @@ func (j *fileContainsFilterJob) Fields(v job.Verbosity) (res []otlog.Field) {
 		for _, re := range j.originalPatternMatchers {
 			originalPatternStrings = append(originalPatternStrings, re.String())
 		}
-		res = append(res, trace.Strings("originalPatterns", originalPatternStrings))
+		res = append(res, attribute.StringSlice("originalPatterns", originalPatternStrings))
 
 		filterStrings := make([]string, 0, len(j.includeMatchers))
 		for _, re := range j.includeMatchers {
 			filterStrings = append(filterStrings, re.String())
 		}
-		res = append(res, trace.Strings("filterPatterns", filterStrings))
+		res = append(res, attribute.StringSlice("filterPatterns", filterStrings))
 	}
 	return res
 }

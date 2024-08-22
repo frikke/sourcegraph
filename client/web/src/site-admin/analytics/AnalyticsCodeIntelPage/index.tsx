@@ -2,9 +2,10 @@ import React, { useMemo, useEffect, useState } from 'react'
 
 import classNames from 'classnames'
 import { groupBy, sortBy, startCase, sumBy } from 'lodash'
-import { RouteComponentProps } from 'react-router'
 
 import { useQuery } from '@sourcegraph/http-client'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
 import {
     Card,
     H2,
@@ -13,30 +14,30 @@ import {
     AnchorLink,
     H4,
     LineChart,
-    Series,
+    type Series,
     BarChart,
     LegendList,
     LegendItem,
     Link,
 } from '@sourcegraph/wildcard'
 
-import { CodeIntelStatisticsResult, CodeIntelStatisticsVariables } from '../../../graphql-operations'
-import { eventLogger } from '../../../tracking/eventLogger'
+import type { CodeIntelStatisticsResult, CodeIntelStatisticsVariables } from '../../../graphql-operations'
 import { AnalyticsPageTitle } from '../components/AnalyticsPageTitle'
 import { ChartContainer } from '../components/ChartContainer'
 import { HorizontalSelect } from '../components/HorizontalSelect'
 import { TimeSavedCalculatorGroup } from '../components/TimeSavedCalculatorGroup'
 import { ToggleSelect } from '../components/ToggleSelect'
-import { ValueLegendList, ValueLegendListProps } from '../components/ValueLegendList'
+import { ValueLegendList, type ValueLegendListProps } from '../components/ValueLegendList'
 import { useChartFilters } from '../useChartFilters'
-import { formatNumber, StandardDatum } from '../utils'
+import { formatNumber, type StandardDatum } from '../utils'
 
 import { CODEINTEL_STATISTICS } from './queries'
 
 import styles from './index.module.scss'
 
-export const AnalyticsCodeIntelPage: React.FunctionComponent<RouteComponentProps<{}>> = () => {
-    const { dateRange, aggregation, grouping } = useChartFilters({ name: 'CodeIntel' })
+interface Props extends TelemetryV2Props {}
+export const AnalyticsCodeIntelPage: React.FC<Props> = ({ telemetryRecorder }) => {
+    const { dateRange, aggregation, grouping } = useChartFilters({ name: 'CodeIntel', telemetryRecorder })
     const { data, error, loading } = useQuery<CodeIntelStatisticsResult, CodeIntelStatisticsVariables>(
         CODEINTEL_STATISTICS,
         {
@@ -47,8 +48,9 @@ export const AnalyticsCodeIntelPage: React.FunctionComponent<RouteComponentProps
         }
     )
     useEffect(() => {
-        eventLogger.logPageView('AdminAnalyticsCodeIntel')
-    }, [])
+        EVENT_LOGGER.logPageView('AdminAnalyticsCodeIntel')
+        telemetryRecorder.recordEvent('admin.analytics.codeIntel', 'view')
+    }, [telemetryRecorder])
 
     type Kind = 'inApp' | 'codeHost' | 'crossRepo' | 'precise'
 
@@ -114,8 +116,7 @@ export const AnalyticsCodeIntelPage: React.FunctionComponent<RouteComponentProps
         ]
         const legends: ValueLegendListProps['items'] = [
             {
-                value:
-                    referenceClicks.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: referenceClicks.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description: aggregation.selected === 'count' ? 'References' : 'Users using references',
                 color: 'var(--cyan)',
                 tooltip:
@@ -124,8 +125,7 @@ export const AnalyticsCodeIntelPage: React.FunctionComponent<RouteComponentProps
                         : "The number of users who clicked 'References'. in code navigation hovers to view usages of an item.",
             },
             {
-                value:
-                    definitionClicks.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: definitionClicks.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description: aggregation.selected === 'count' ? 'Definitions' : 'Users using definitions',
                 color: 'var(--orange)',
                 tooltip:
@@ -185,6 +185,7 @@ export const AnalyticsCodeIntelPage: React.FunctionComponent<RouteComponentProps
                         'Compiler-accurate code navigation takes users to the correct result as defined by SCIP, and does so cross repository. The reduction in false positives produced by other search engines represents significant additional time savings.',
                 },
             ],
+            telemetryRecorder,
         }
 
         return [stats, legends, calculatorProps]
@@ -196,6 +197,7 @@ export const AnalyticsCodeIntelPage: React.FunctionComponent<RouteComponentProps
         kindToMinPerItem.crossRepo,
         kindToMinPerItem.inApp,
         kindToMinPerItem.precise,
+        telemetryRecorder,
     ])
 
     if (error) {
@@ -231,9 +233,10 @@ export const AnalyticsCodeIntelPage: React.FunctionComponent<RouteComponentProps
         go: 'https://github.com/sourcegraph/lsif-go',
         rust: 'https://github.com/rust-analyzer/rust-analyzer',
         scala: 'https://github.com/sourcegraph/lsif-java',
-        cpp: 'https://github.com/sourcegraph/lsif-clang',
+        cpp: 'https://github.com/sourcegraph/scip-clang',
         csharp: 'https://github.com/tcz717/LsifDotnet',
-        dart: 'https://github.com/sourcegraph/lsif-dart',
+        dart: 'https://github.com/Workiva/scip-dart',
+        php: 'https://github.com/davidrjenni/scip-php',
         haskell: 'https://github.com/mpickering/hie-lsif',
         kotlin: 'https://github.com/sourcegraph/lsif-java',
     }
@@ -357,7 +360,7 @@ export const AnalyticsCodeIntelPage: React.FunctionComponent<RouteComponentProps
                                 <b>{repos.preciseCodeIntelCount}</b> of your <b>{repos.count}</b> repositories have
                                 precise code navigation.{' '}
                                 <AnchorLink
-                                    to="/help/code_navigation/explanations/precise_code_intelligence"
+                                    to="/help/code_navigation/explanations/precise_code_navigation"
                                     target="_blank"
                                 >
                                     Learn how to improve precise code navigation coverage.
@@ -435,11 +438,14 @@ export const AnalyticsCodeIntelPage: React.FunctionComponent<RouteComponentProps
 
 const color = (precision: string): string => {
     switch (precision) {
-        case 'precise':
+        case 'precise': {
             return 'rgb(255, 184, 109)'
-        case 'search-based':
+        }
+        case 'search-based': {
             return 'rgb(155, 211, 255)'
-        default:
+        }
+        default: {
             return 'gray'
+        }
     }
 }

@@ -1,19 +1,17 @@
-import { AuthenticatedUser } from '../../../auth'
+import type { AuthenticatedUser } from '../../../auth'
 import {
-    CodeMonitorFields,
     EventStatus,
-    ListCodeMonitors,
-    MonitorTriggerEventsResult,
+    type CodeMonitorFields,
+    type ListCodeMonitors,
+    type MonitorTriggerEventsResult,
 } from '../../../graphql-operations'
 
 export const mockUser: AuthenticatedUser = {
     __typename: 'User',
     id: 'userID',
     username: 'username',
-    email: 'user@me.com',
     siteAdmin: true,
     databaseID: 0,
-    tags: [],
     url: '',
     avatarURL: '',
     displayName: 'display name',
@@ -23,10 +21,12 @@ export const mockUser: AuthenticatedUser = {
         __typename: 'OrgConnection',
         nodes: [],
     },
+    hasVerifiedEmail: true,
     session: { __typename: 'Session', canSignOut: true },
     tosAccepted: true,
-    searchable: true,
-    emails: [],
+    emails: [{ email: 'user@me.com', isPrimary: true, verified: true }],
+    latestSettings: null,
+    permissions: { nodes: [] },
 }
 
 export const mockCodeMonitorFields: CodeMonitorFields = {
@@ -35,6 +35,11 @@ export const mockCodeMonitorFields: CodeMonitorFields = {
     description: 'Test code monitor',
     enabled: true,
     trigger: { id: 'test-0', query: 'test' },
+    owner: {
+        id: 'test-0',
+        namespaceName: 'bob',
+        url: 'bob/profile',
+    },
     actions: {
         nodes: [
             {
@@ -48,13 +53,13 @@ export const mockCodeMonitorFields: CodeMonitorFields = {
     },
 }
 
-export const mockCodeMonitor = {
+export const mockCodeMonitor: { node: CodeMonitorFields } = {
     node: {
         __typename: 'Monitor',
         id: 'foo0',
         description: 'Test code monitor',
         enabled: true,
-        owner: { id: 'test-id', namespaceName: 'test-user' },
+        owner: { id: 'test-id', namespaceName: 'test-user', url: '/user/test-user' },
         actions: {
             nodes: [
                 {
@@ -62,7 +67,7 @@ export const mockCodeMonitor = {
                     id: 'test-action-0',
                     enabled: true,
                     includeResults: false,
-                    recipients: { nodes: [{ id: 'baz-0', url: '/user/test' }] },
+                    recipients: { nodes: [{ id: 'baz-0' }] },
                 },
                 {
                     __typename: 'MonitorSlackWebhook',
@@ -94,6 +99,11 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
             ],
         },
         trigger: { id: 'test-0', query: 'test' },
+        owner: {
+            id: 'test-0',
+            namespaceName: 'bob',
+            url: 'bob/profile',
+        },
     },
     {
         id: 'foo1',
@@ -111,6 +121,11 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
             ],
         },
         trigger: { id: 'test-1', query: 'test' },
+        owner: {
+            id: 'test-0',
+            namespaceName: 'bob',
+            url: 'bob/profile',
+        },
     },
     {
         id: 'foo2',
@@ -135,6 +150,11 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
             ],
         },
         trigger: { id: 'test-2', query: 'test' },
+        owner: {
+            id: 'test-1',
+            namespaceName: 'jimbert',
+            url: 'jimbert/profile',
+        },
     },
     {
         id: 'foo3',
@@ -159,6 +179,11 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
             ],
         },
         trigger: { id: 'test-3', query: 'test' },
+        owner: {
+            id: 'test-1',
+            namespaceName: 'jimbert',
+            url: 'jimbert/profile',
+        },
     },
     {
         id: 'foo4',
@@ -176,6 +201,11 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
             ],
         },
         trigger: { id: 'test-4', query: 'test' },
+        owner: {
+            id: 'test-2',
+            namespaceName: 'evilcorp',
+            url: 'evilcorp/profile',
+        },
     },
     {
         id: 'foo5',
@@ -193,6 +223,11 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
             ],
         },
         trigger: { id: 'test-5', query: 'test' },
+        owner: {
+            id: 'test-2',
+            namespaceName: 'evilcorp',
+            url: 'evilcorp/profile',
+        },
     },
     {
         id: 'foo6',
@@ -210,6 +245,11 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
             ],
         },
         trigger: { id: 'test-6', query: 'test' },
+        owner: {
+            id: 'test-3',
+            namespaceName: 'silvat',
+            url: 'silvat/profile',
+        },
     },
     {
         id: 'foo7',
@@ -227,6 +267,11 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
             ],
         },
         trigger: { id: 'test-7', query: 'test' },
+        owner: {
+            id: 'test-3',
+            namespaceName: 'silvat',
+            url: 'silvat/profile',
+        },
     },
     {
         id: 'foo9',
@@ -244,6 +289,11 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
             ],
         },
         trigger: { id: 'test-9', query: 'test' },
+        owner: {
+            id: 'test-4',
+            namespaceName: 'mero',
+            url: 'mero/profile',
+        },
     },
     {
         id: 'foo10',
@@ -261,6 +311,11 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
             ],
         },
         trigger: { id: 'test-0', query: 'test' },
+        owner: {
+            id: 'test-4',
+            namespaceName: 'mero',
+            url: 'mero/profile',
+        },
     },
     {
         id: 'foo11',
@@ -278,6 +333,11 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
             ],
         },
         trigger: { id: 'test-1', query: 'test' },
+        owner: {
+            id: 'test-4',
+            namespaceName: 'mero',
+            url: 'mero/profile',
+        },
     },
     {
         id: 'foo12',
@@ -295,6 +355,11 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
             ],
         },
         trigger: { id: 'test-2', query: 'test' },
+        owner: {
+            id: 'test-5',
+            namespaceName: 'cantoid',
+            url: 'cantoid/profile',
+        },
     },
 ]
 
@@ -303,7 +368,7 @@ export const mockCodeMonitorNodes: ListCodeMonitors['nodes'] = [
 export const mockAuthenticatedUser: AuthenticatedUser = {
     id: 'userID',
     username: 'username',
-    email: 'user@me.com',
+    emails: [{ email: 'user@me.com', isPrimary: true, verified: true }],
     siteAdmin: true,
 } as AuthenticatedUser
 
@@ -335,6 +400,7 @@ export const mockLogs: MonitorTriggerEventsResult = {
                                         nodes: [
                                             {
                                                 __typename: 'MonitorEmail',
+                                                id: 'm1',
                                                 events: {
                                                     __typename: 'MonitorActionEventConnection',
                                                     nodes: [],
@@ -342,6 +408,7 @@ export const mockLogs: MonitorTriggerEventsResult = {
                                             },
                                             {
                                                 __typename: 'MonitorSlackWebhook',
+                                                id: 'm2',
                                                 events: {
                                                     __typename: 'MonitorActionEventConnection',
                                                     nodes: [
@@ -371,6 +438,7 @@ export const mockLogs: MonitorTriggerEventsResult = {
                                         nodes: [
                                             {
                                                 __typename: 'MonitorEmail',
+                                                id: 'm3',
                                                 events: {
                                                     __typename: 'MonitorActionEventConnection',
                                                     nodes: [],
@@ -378,6 +446,7 @@ export const mockLogs: MonitorTriggerEventsResult = {
                                             },
                                             {
                                                 __typename: 'MonitorSlackWebhook',
+                                                id: 'm4',
                                                 events: {
                                                     __typename: 'MonitorActionEventConnection',
                                                     nodes: [
@@ -407,6 +476,7 @@ export const mockLogs: MonitorTriggerEventsResult = {
                                         nodes: [
                                             {
                                                 __typename: 'MonitorEmail',
+                                                id: 'm5',
                                                 events: {
                                                     __typename: 'MonitorActionEventConnection',
                                                     nodes: [],
@@ -414,6 +484,7 @@ export const mockLogs: MonitorTriggerEventsResult = {
                                             },
                                             {
                                                 __typename: 'MonitorSlackWebhook',
+                                                id: 'm6',
                                                 events: {
                                                     __typename: 'MonitorActionEventConnection',
                                                     nodes: [
@@ -478,6 +549,7 @@ export const mockLogs: MonitorTriggerEventsResult = {
                                         nodes: [
                                             {
                                                 __typename: 'MonitorSlackWebhook',
+                                                id: 'm7',
                                                 events: {
                                                     __typename: 'MonitorActionEventConnection',
                                                     nodes: [
@@ -523,6 +595,7 @@ export const mockLogs: MonitorTriggerEventsResult = {
                                         nodes: [
                                             {
                                                 __typename: 'MonitorEmail',
+                                                id: 'm8',
                                                 events: {
                                                     __typename: 'MonitorActionEventConnection',
                                                     nodes: [],
@@ -530,6 +603,7 @@ export const mockLogs: MonitorTriggerEventsResult = {
                                             },
                                             {
                                                 __typename: 'MonitorSlackWebhook',
+                                                id: 'm9',
                                                 events: {
                                                     __typename: 'MonitorActionEventConnection',
                                                     nodes: [
@@ -545,6 +619,7 @@ export const mockLogs: MonitorTriggerEventsResult = {
                                             },
                                             {
                                                 __typename: 'MonitorWebhook',
+                                                id: 'm10',
                                                 events: {
                                                     __typename: 'MonitorActionEventConnection',
                                                     nodes: [],
@@ -582,6 +657,7 @@ export const mockLogs: MonitorTriggerEventsResult = {
                                         nodes: [
                                             {
                                                 __typename: 'MonitorEmail',
+                                                id: 'm11',
                                                 events: {
                                                     __typename: 'MonitorActionEventConnection',
                                                     nodes: [],
@@ -589,6 +665,7 @@ export const mockLogs: MonitorTriggerEventsResult = {
                                             },
                                             {
                                                 __typename: 'MonitorSlackWebhook',
+                                                id: 'm12',
                                                 events: {
                                                     __typename: 'MonitorActionEventConnection',
                                                     nodes: [

@@ -13,14 +13,22 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sourcegraph/log/logtest"
+	"github.com/sourcegraph/zoekt"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
+	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/database/dbmocks"
 	"github.com/sourcegraph/sourcegraph/internal/database/dbtest"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc"
+	"github.com/sourcegraph/sourcegraph/internal/gitserver"
+	"github.com/sourcegraph/sourcegraph/internal/gitserver/protocol"
+	"github.com/sourcegraph/sourcegraph/internal/observation"
 	"github.com/sourcegraph/sourcegraph/internal/timeutil"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
+	"github.com/sourcegraph/sourcegraph/lib/pointers"
+	"github.com/sourcegraph/sourcegraph/schema"
 )
 
 func TestStatusMessages(t *testing.T) {
@@ -31,8 +39,10 @@ func TestStatusMessages(t *testing.T) {
 	logger := logtest.Scoped(t)
 	ctx := context.Background()
 
-	db := database.NewDB(logger, dbtest.NewDB(logger, t))
+	db := database.NewDB(logger, dbtest.NewDB(t))
 	store := NewStore(logtest.Scoped(t), db)
+
+	mockGitserverClient := gitserver.NewMockClient()
 
 	extSvc := &types.ExternalService{
 		ID:          1,
@@ -44,18 +54,44 @@ func TestStatusMessages(t *testing.T) {
 	require.NoError(t, err)
 
 	testCases := []struct {
-		name  string
-		repos types.Repos
+		testSetup func()
+		name      string
+		repos     types.Repos
 		// maps repoName to CloneStatus
-		cloneStatus      map[string]types.CloneStatus
+		cloneStatus map[string]types.CloneStatus
+		// indexed is list of repo names that are indexed
+		indexed          []string
 		gitserverFailure map[string]bool
 		sourcerErr       error
 		res              []StatusMessage
 		err              string
 	}{
 		{
-			name:        "site-admin: all cloned",
+			testSetup: func() {
+				conf.Mock(&conf.Unified{
+					SiteConfiguration: schema.SiteConfiguration{
+						DisableAutoGitUpdates: true,
+					},
+				})
+			},
+			name: "disableAutoGitUpdates set to true",
+			res: []StatusMessage{
+				{
+					GitUpdatesDisabled: &GitUpdatesDisabled{
+						Message: "Repositories will not be cloned or updated.",
+					},
+				},
+				{
+					NoRepositoriesDetected: &NoRepositoriesDetected{
+						Message: "No repositories have been added to Sourcegraph.",
+					},
+				},
+			},
+		},
+		{
+			name:        "site-admin: all cloned and indexed",
 			cloneStatus: map[string]types.CloneStatus{"foobar": types.CloneStatusCloned},
+			indexed:     []string{"foobar"},
 			repos:       []*types.Repo{{Name: "foobar"}},
 			res:         nil,
 		},
@@ -69,6 +105,9 @@ func TestStatusMessages(t *testing.T) {
 						Message: "1 repository enqueued for cloning.",
 					},
 				},
+				{
+					Indexing: &IndexingProgress{NotIndexed: 1},
+				},
 			},
 		},
 		{
@@ -81,6 +120,9 @@ func TestStatusMessages(t *testing.T) {
 						Message: "1 repository currently cloning...",
 					},
 				},
+				{
+					Indexing: &IndexingProgress{NotIndexed: 1},
+				},
 			},
 		},
 		{
@@ -92,6 +134,9 @@ func TestStatusMessages(t *testing.T) {
 					Cloning: &CloningProgress{
 						Message: "1 repository enqueued for cloning. 1 repository currently cloning...",
 					},
+				},
+				{
+					Indexing: &IndexingProgress{NotIndexed: 2},
 				},
 			},
 		},
@@ -113,47 +158,26 @@ func TestStatusMessages(t *testing.T) {
 				"repo-5": types.CloneStatusCloned,
 				"repo-6": types.CloneStatusCloned,
 			},
+			indexed: []string{"repo-6"},
 			res: []StatusMessage{
 				{
 					Cloning: &CloningProgress{
 						Message: "2 repositories enqueued for cloning. 2 repositories currently cloning...",
 					},
 				},
-			},
-		},
-		{
-			name:        "site-admin: subset cloned",
-			repos:       []*types.Repo{{Name: "foobar"}, {Name: "barfoo"}},
-			cloneStatus: map[string]types.CloneStatus{"foobar": types.CloneStatusCloned},
-			res: []StatusMessage{
 				{
-					Cloning: &CloningProgress{
-						Message: "1 repository enqueued for cloning.",
-					},
+					Indexing: &IndexingProgress{Indexed: 1, NotIndexed: 5},
 				},
 			},
 		},
 		{
-			name:  "site-admin: more cloned than stored",
-			repos: []*types.Repo{{Name: "foobar"}},
-			cloneStatus: map[string]types.CloneStatus{
-				"foobar": types.CloneStatusCloned,
-				"barfoo": types.CloneStatusCloned,
-			},
-			res: nil,
-		},
-		{
-			name:  "site-admin: cloned different than stored",
-			repos: []*types.Repo{{Name: "foobar"}, {Name: "barfoo"}},
-			cloneStatus: map[string]types.CloneStatus{
-				"one":   types.CloneStatusCloned,
-				"two":   types.CloneStatusCloned,
-				"three": types.CloneStatusCloned,
-			},
+			name:       "site-admin: no repos detected",
+			repos:      []*types.Repo{},
+			sourcerErr: nil,
 			res: []StatusMessage{
 				{
-					Cloning: &CloningProgress{
-						Message: "2 repositories enqueued for cloning.",
+					NoRepositoriesDetected: &NoRepositoriesDetected{
+						Message: "No repositories have been added to Sourcegraph.",
 					},
 				},
 			},
@@ -165,6 +189,7 @@ func TestStatusMessages(t *testing.T) {
 				"foobar": types.CloneStatusCloned,
 				"barfoo": types.CloneStatusCloned,
 			},
+			indexed:          []string{"foobar", "barfoo"},
 			gitserverFailure: map[string]bool{"foobar": true},
 			res: []StatusMessage{
 				{
@@ -181,6 +206,7 @@ func TestStatusMessages(t *testing.T) {
 				"foobar": types.CloneStatusCloned,
 				"barfoo": types.CloneStatusCloned,
 			},
+			indexed:          []string{"foobar", "barfoo"},
 			gitserverFailure: map[string]bool{"foobar": true, "barfoo": true},
 			res: []StatusMessage{
 				{
@@ -202,13 +228,66 @@ func TestStatusMessages(t *testing.T) {
 				},
 			},
 		},
+		{
+			testSetup: func() {
+				conf.Mock(&conf.Unified{
+					SiteConfiguration: schema.SiteConfiguration{
+						GitserverDiskUsageWarningThreshold: pointers.Ptr(10),
+					},
+				})
+
+				mockGitserverClient.SystemsInfoFunc.SetDefaultReturn([]protocol.SystemInfo{
+					{
+						Address:     "gitserver-0",
+						PercentUsed: 75.10345,
+					},
+				}, nil)
+
+			},
+			name:        "site-admin: gitserver disk threshold reached (configured threshold)",
+			cloneStatus: map[string]types.CloneStatus{"foobar": types.CloneStatusCloned},
+			indexed:     []string{"foobar"},
+			repos:       []*types.Repo{{Name: "foobar"}},
+			res: []StatusMessage{
+				{
+					GitserverDiskThresholdReached: &GitserverDiskThresholdReached{
+						Message: "The disk usage on gitserver \"gitserver-0\" is over 10% (75.10% used).",
+					},
+				},
+			},
+		},
+		{
+			testSetup: func() {
+				mockGitserverClient.SystemsInfoFunc.SetDefaultReturn([]protocol.SystemInfo{
+					{
+						Address:     "gitserver-0",
+						PercentUsed: 95.10345,
+					},
+				}, nil)
+
+			},
+			name:        "site-admin: gitserver disk threshold reached (default threshold)",
+			cloneStatus: map[string]types.CloneStatus{"foobar": types.CloneStatusCloned},
+			indexed:     []string{"foobar"},
+			repos:       []*types.Repo{{Name: "foobar"}},
+			res: []StatusMessage{
+				{
+					GitserverDiskThresholdReached: &GitserverDiskThresholdReached{
+						Message: "The disk usage on gitserver \"gitserver-0\" is over 90% (95.10% used).",
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
 		tc := tc
-		ctx := context.Background()
 
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.testSetup != nil {
+				tc.testSetup()
+			}
+
 			stored := tc.repos.Clone()
 			for _, r := range stored {
 				r.ExternalRepo = api.ExternalRepoSpec{
@@ -222,6 +301,8 @@ func TestStatusMessages(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Cleanup(func() {
+				conf.Mock(nil)
+
 				ids := make([]api.RepoID, 0, len(stored))
 				for _, r := range stored {
 					ids = append(ids, r.ID)
@@ -254,6 +335,18 @@ func TestStatusMessages(t *testing.T) {
 				})
 				require.NoError(t, err)
 			}
+			for _, repoName := range tc.indexed {
+				id := uint32(idMapping[api.RepoName(repoName)])
+				if id == 0 {
+					continue
+				}
+				err := db.ZoektRepos().UpdateIndexStatuses(ctx, zoekt.ReposMap{
+					id: {
+						Branches: []zoekt.RepositoryBranch{{Name: "main", Version: "d34db33f"}},
+					},
+				})
+				require.NoError(t, err)
+			}
 
 			// Set up ownership of repos
 			for _, repo := range stored {
@@ -273,25 +366,28 @@ func TestStatusMessages(t *testing.T) {
 
 			clock := timeutil.NewFakeClock(time.Now(), 0)
 			syncer := &Syncer{
-				Logger: logger,
-				Store:  store,
-				Now:    clock.Now,
+				ObsvCtx: observation.TestContextTB(t),
+				Store:   store,
+				Now:     clock.Now,
 			}
 
-			mockDB := database.NewMockDBFrom(db)
+			mockDB := dbmocks.NewMockDBFrom(db)
 			if tc.sourcerErr != nil {
 				sourcer := NewFakeSourcer(tc.sourcerErr, NewFakeSource(extSvc, nil))
 				syncer.Sourcer = sourcer
 
-				err = syncer.SyncExternalService(ctx, extSvc.ID, time.Millisecond)
+				noopRecorder := func(ctx context.Context, progress SyncProgress, final bool) error {
+					return nil
+				}
+				err = syncer.SyncExternalService(ctx, extSvc.ID, time.Millisecond, noopRecorder)
 				// In prod, SyncExternalService is kicked off by a worker queue. Any error
 				// returned will be stored in the external_service_sync_jobs table, so we fake
 				// that here.
 				if err != nil {
-					externalServices := database.NewMockExternalServiceStore()
+					externalServices := dbmocks.NewMockExternalServiceStore()
 					externalServices.GetLatestSyncErrorsFunc.SetDefaultReturn(
-						map[int64]string{
-							extSvc.ID: err.Error(),
+						[]*database.SyncError{
+							{ServiceID: extSvc.ID, Message: err.Error()},
 						},
 						nil,
 					)
@@ -299,11 +395,20 @@ func TestStatusMessages(t *testing.T) {
 				}
 			}
 
+			if len(tc.repos) < 1 && tc.sourcerErr == nil {
+				externalServices := dbmocks.NewMockExternalServiceStore()
+				externalServices.GetLatestSyncErrorsFunc.SetDefaultReturn(
+					[]*database.SyncError{},
+					nil,
+				)
+				mockDB.ExternalServicesFunc.SetDefaultReturn(externalServices)
+			}
+
 			if tc.err == "" {
 				tc.err = "<nil>"
 			}
 
-			res, err := FetchStatusMessages(ctx, mockDB)
+			res, err := FetchStatusMessages(ctx, mockDB, mockGitserverClient)
 			assert.Equal(t, tc.err, fmt.Sprint(err))
 			assert.Equal(t, tc.res, res)
 		})

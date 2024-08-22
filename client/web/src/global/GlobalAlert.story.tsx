@@ -1,12 +1,14 @@
-import { Meta, Story } from '@storybook/react'
+import type { Meta, StoryFn } from '@storybook/react'
 
-import { BrandedStory } from '@sourcegraph/branded/src/components/BrandedStory'
-import webStyles from '@sourcegraph/web/src/SourcegraphWebApp.scss'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 import { H1, H2, Code, Text } from '@sourcegraph/wildcard'
+import { BrandedStory } from '@sourcegraph/wildcard/src/stories'
 
 import { AlertType } from '../graphql-operations'
 
 import { GlobalAlert } from './GlobalAlert'
+
+import webStyles from '../SourcegraphWebApp.scss'
 
 const config: Meta = {
     title: 'web/GlobalAlert',
@@ -19,15 +21,12 @@ const config: Meta = {
 
     parameters: {
         component: GlobalAlert,
-        chromatic: {
-            disableSnapshot: false,
-        },
     },
 }
 
 export default config
 
-export const GlobalAlerts: Story = () => (
+export const GlobalAlerts: StoryFn = () => (
     <div>
         <H1>Global Alert</H1>
         <Text>
@@ -35,11 +34,16 @@ export const GlobalAlerts: Story = () => (
         </Text>
         <H2>Variants</H2>
         {Object.values(AlertType).map(type => (
-            <GlobalAlert key={type} alert={{ message: 'Something happened!', isDismissibleWithKey: null, type }} />
+            <GlobalAlert
+                key={type}
+                alert={{ message: 'Something happened!', isDismissibleWithKey: null, type }}
+                telemetryRecorder={noOpTelemetryRecorder}
+            />
         ))}
         <H2>Dismissible</H2>
         <GlobalAlert
             alert={{ message: 'You can dismiss me', isDismissibleWithKey: 'dismiss-key', type: AlertType.INFO }}
+            telemetryRecorder={noOpTelemetryRecorder}
         />
     </div>
 )

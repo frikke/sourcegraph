@@ -1,0 +1,24 @@
+fragment FileDiff_Diff on FileDiff {
+    mostRelevantFile {
+        canonicalURL # key field
+        url
+        path
+    }
+    newFile {
+        canonicalURL # key field
+        path
+        binary
+    }
+    oldFile {
+        canonicalURL # key field
+        path
+        binary
+    }
+    stat {
+        added
+        deleted
+    }
+    hunks {
+        ...FileDiffHunks_Hunk
+    }
+}

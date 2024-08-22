@@ -6,8 +6,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/envvar"
+	"github.com/sourcegraph/sourcegraph/internal/dotcom"
 )
 
 func TestParseAuthorizationHeader(t *testing.T) {
@@ -47,12 +48,22 @@ func TestParseAuthorizationHeader(t *testing.T) {
 	}
 
 	t.Run("disable sudo token for dotcom", func(t *testing.T) {
-		envvar.MockSourcegraphDotComMode(true)
-		defer envvar.MockSourcegraphDotComMode(false)
+		dotcom.MockSourcegraphDotComMode(t, true)
 
 		_, _, err := ParseAuthorizationHeader(`token-sudo token="tok==", user="alice"`)
 		got := fmt.Sprintf("%v", err)
 		want := "use of access tokens with sudo scope is disabled"
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Fatalf("Mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("empty token does not raise sudo error on dotcom", func(t *testing.T) {
+		dotcom.MockSourcegraphDotComMode(t, true)
+
+		_, _, err := ParseAuthorizationHeader(`token`)
+		got := fmt.Sprintf("%v", err)
+		want := "no token value in the HTTP Authorization request header"
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Fatalf("Mismatch (-want +got):\n%s", diff)
 		}
@@ -91,6 +102,32 @@ func TestParseHTTPCredentials(t *testing.T) {
 			if !reflect.DeepEqual(params, test.params) {
 				t.Errorf("got params %+v, want %+v", params, test.params)
 			}
+		})
+	}
+}
+
+func TestParseBearerHeader(t *testing.T) {
+	tests := map[string]struct {
+		token string
+		err   bool
+	}{
+		"Bearer tok":     {token: "tok", err: false},
+		"bearer tok":     {token: "tok", err: false},
+		"BeARER token":   {token: "token", err: false},
+		"Bearer tok tok": {token: "tok tok", err: false},
+		"Bearer ":        {token: "", err: false},
+		"Bearer":         {token: "", err: true},
+		"tok":            {token: "", err: true},
+	}
+	for input, test := range tests {
+		t.Run(input, func(t *testing.T) {
+			token, err := ParseBearerHeader(input)
+			if test.err {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, test.token, token)
 		})
 	}
 }

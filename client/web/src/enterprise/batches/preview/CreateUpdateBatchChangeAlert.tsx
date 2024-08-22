@@ -1,15 +1,15 @@
 import React, { useCallback, useContext, useState } from 'react'
 
 import classNames from 'classnames'
-import * as H from 'history'
+import { useNavigate } from 'react-router-dom'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
 import { isErrorLike } from '@sourcegraph/common'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { Alert, Button, Code, Link, Tooltip } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Alert, Button, Code, Link, Tooltip, ErrorAlert } from '@sourcegraph/wildcard'
 
-import { BatchSpecFields } from '../../../graphql-operations'
-import { eventLogger } from '../../../tracking/eventLogger'
+import type { BatchSpecFields } from '../../../graphql-operations'
 import { MultiSelectContext } from '../MultiSelectContext'
 
 import { applyBatchChange, createBatchChange } from './backend'
@@ -17,17 +17,18 @@ import { BatchChangePreviewContext } from './BatchChangePreviewContext'
 
 import styles from './CreateUpdateBatchChangeAlert.module.scss'
 
-export interface CreateUpdateBatchChangeAlertProps extends TelemetryProps {
+export interface CreateUpdateBatchChangeAlertProps extends TelemetryProps, TelemetryV2Props {
     specID: string
     toBeArchived: number
     batchChange: BatchSpecFields['appliesToBatchChange']
     viewerCanAdminister: boolean
-    history: H.History
 }
 
 export const CreateUpdateBatchChangeAlert: React.FunctionComponent<
     React.PropsWithChildren<CreateUpdateBatchChangeAlertProps>
-> = ({ specID, toBeArchived, batchChange, viewerCanAdminister, history, telemetryService }) => {
+> = ({ specID, toBeArchived, batchChange, viewerCanAdminister, telemetryService, telemetryRecorder }) => {
+    const navigate = useNavigate()
+
     const batchChangeID = batchChange?.id
 
     // `BatchChangePreviewContext` is responsible for managing the overrideable
@@ -68,19 +69,34 @@ export const CreateUpdateBatchChangeAlert: React.FunctionComponent<
                 : await createBatchChange({ batchSpec: specID, publicationStates })
 
             if (toBeArchived > 0) {
-                history.push(`${batchChange.url}?archivedCount=${toBeArchived}&archivedBy=${specID}`)
+                navigate(`${batchChange.url}?archivedCount=${toBeArchived}&archivedBy=${specID}`)
             } else {
-                history.push(batchChange.url)
+                navigate(batchChange.url)
             }
             telemetryService.logViewEvent(`BatchChangeDetailsPageAfter${batchChangeID ? 'Create' : 'Update'}`)
+            if (batchChangeID) {
+                telemetryRecorder.recordEvent('batchChange.detailsAfterUpdate', 'view')
+            } else {
+                telemetryRecorder.recordEvent('batchChange.detailsAfterCreate', 'view')
+            }
         } catch (error) {
             setIsLoading(error)
         }
-    }, [canApply, specID, setIsLoading, history, batchChangeID, telemetryService, toBeArchived, publicationStates])
+    }, [
+        canApply,
+        specID,
+        setIsLoading,
+        navigate,
+        batchChangeID,
+        telemetryService,
+        telemetryRecorder,
+        toBeArchived,
+        publicationStates,
+    ])
 
     return (
         <>
-            <Alert className="mb-3 d-block d-md-flex align-items-center body-lead" variant="info">
+            <Alert className="mb-3 d-block d-md-flex align-items-center body-lead" variant="info" aria-live="off">
                 <div className={classNames(styles.createUpdateBatchChangeAlertCopy, 'flex-grow-1 mr-3')}>
                     {batchChange ? (
                         <>
@@ -105,9 +121,11 @@ export const CreateUpdateBatchChangeAlert: React.FunctionComponent<
                             )}
                             onClick={() => {
                                 if (batchChange) {
-                                    eventLogger.log('batch_change_execution_preview:apply_update:clicked')
+                                    EVENT_LOGGER.log('batch_change_execution_preview:apply_update:clicked')
+                                    telemetryRecorder.recordEvent('batchChange.execution.updateAndApply', 'click')
                                 } else {
-                                    eventLogger.log('batch_change_execution_preview:apply:clicked')
+                                    EVENT_LOGGER.log('batch_change_execution_preview:apply:clicked')
+                                    telemetryRecorder.recordEvent('batchChange.execution.createAndApply', 'click')
                                 }
                                 return onApply()
                             }}

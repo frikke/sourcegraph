@@ -3,8 +3,8 @@ import { ApolloError } from '@apollo/client'
 import { gql, useQuery } from '@sourcegraph/http-client'
 
 import {
-    CodeIntelligenceConfigurationPolicyFields,
-    CodeIntelligenceConfigurationPolicyResult,
+    type CodeIntelligenceConfigurationPolicyFields,
+    type CodeIntelligenceConfigurationPolicyResult,
     GitObjectType,
 } from '../../../../graphql-operations'
 
@@ -39,6 +39,7 @@ const emptyPolicy: CodeIntelligenceConfigurationPolicyFields = {
     retentionDurationHours: null,
     retainIntermediateCommits: false,
     indexingEnabled: false,
+    syntacticIndexingEnabled: false,
     indexCommitMaxAgeHours: null,
     indexIntermediateCommits: false,
 }

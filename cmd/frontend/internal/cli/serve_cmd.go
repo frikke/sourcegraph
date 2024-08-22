@@ -3,70 +3,57 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
-	"log"
+	"log" //nolint:logging // TODO move all logging to sourcegraph/log
 	"net/http"
-	"net/url"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
-	"github.com/getsentry/sentry-go"
+	"github.com/go-logr/stdr"
 	"github.com/graph-gophers/graphql-go"
-	"github.com/inconshreveable/log15"
-	"github.com/keegancsmith/tmpfriend"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/throttled/throttled/v2/store/redigostore"
-	"go.opentelemetry.io/otel"
-
-	oce "github.com/sourcegraph/sourcegraph/cmd/frontend/oneclickexport"
-
+	"github.com/graph-gophers/graphql-go/relay"
 	sglog "github.com/sourcegraph/log"
+	"github.com/throttled/throttled/v2"
+	"github.com/throttled/throttled/v2/store/redigostore"
 
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/enterprise"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/envvar"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/globals"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/graphqlbackend"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/app/ui"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/app/updatecheck"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/bg"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/cli/loghandlers"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/highlight"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/httpapi"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/siteid"
-	"github.com/sourcegraph/sourcegraph/internal/adminanalytics"
-	"github.com/sourcegraph/sourcegraph/internal/authz"
-	"github.com/sourcegraph/sourcegraph/internal/check"
+	"github.com/sourcegraph/sourcegraph/internal/api"
+	"github.com/sourcegraph/sourcegraph/internal/authz/providers"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/conf/conftypes"
 	"github.com/sourcegraph/sourcegraph/internal/conf/deploy"
 	"github.com/sourcegraph/sourcegraph/internal/database"
 	connections "github.com/sourcegraph/sourcegraph/internal/database/connections/live"
-	"github.com/sourcegraph/sourcegraph/internal/debugserver"
+	"github.com/sourcegraph/sourcegraph/internal/database/migration/store"
 	"github.com/sourcegraph/sourcegraph/internal/encryption/keyring"
 	"github.com/sourcegraph/sourcegraph/internal/env"
+	"github.com/sourcegraph/sourcegraph/internal/extsvc"
+	"github.com/sourcegraph/sourcegraph/internal/gitserver"
 	"github.com/sourcegraph/sourcegraph/internal/goroutine"
-	"github.com/sourcegraph/sourcegraph/internal/hostname"
+	internalgrpc "github.com/sourcegraph/sourcegraph/internal/grpc"
+	"github.com/sourcegraph/sourcegraph/internal/grpc/defaults"
 	"github.com/sourcegraph/sourcegraph/internal/httpserver"
-	"github.com/sourcegraph/sourcegraph/internal/logging"
 	"github.com/sourcegraph/sourcegraph/internal/observation"
 	"github.com/sourcegraph/sourcegraph/internal/oobmigration"
-	"github.com/sourcegraph/sourcegraph/internal/profiler"
+	"github.com/sourcegraph/sourcegraph/internal/ratelimit"
 	"github.com/sourcegraph/sourcegraph/internal/redispool"
+	"github.com/sourcegraph/sourcegraph/internal/service"
 	"github.com/sourcegraph/sourcegraph/internal/sysreq"
-	"github.com/sourcegraph/sourcegraph/internal/trace"
-	"github.com/sourcegraph/sourcegraph/internal/tracer"
-	"github.com/sourcegraph/sourcegraph/internal/users"
+	"github.com/sourcegraph/sourcegraph/internal/updatecheck"
 	"github.com/sourcegraph/sourcegraph/internal/version"
 	"github.com/sourcegraph/sourcegraph/internal/version/upgradestore"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 var (
-	traceFields    = env.Get("SRC_LOG_TRACE", "HTTP", "space separated list of trace logs to show. Options: all, HTTP, build, github")
-	traceThreshold = env.Get("SRC_LOG_TRACE_THRESHOLD", "", "show traces that take longer than this")
-
-	printLogo, _ = strconv.ParseBool(env.Get("LOGO", "false", "print Sourcegraph logo upon startup"))
+	printLogo = env.MustGetBool("LOGO", false, "print Sourcegraph logo upon startup")
 
 	httpAddr = env.Get("SRC_HTTP_ADDR", func() string {
 		if env.InsecureDev {
@@ -76,80 +63,42 @@ var (
 	}(), "HTTP listen address for app and HTTP API")
 	httpAddrInternal = envvar.HTTPAddrInternal
 
-	nginxAddr = env.Get("SRC_NGINX_HTTP_ADDR", "", "HTTP listen address for nginx reverse proxy to SRC_HTTP_ADDR. Has preference over SRC_HTTP_ADDR for ExternalURL.")
-
 	// dev browser extension ID. You can find this by going to chrome://extensions
 	devExtension = "chrome-extension://bmfbcejdknlknpncfpeloejonjoledha"
 	// production browser extension ID. This is found by viewing our extension in the chrome store.
 	prodExtension = "chrome-extension://dgjhfomjieaadpoljlnidmbgkdffpack"
 )
 
-// defaultExternalURL returns the default external URL of the application.
-func defaultExternalURL(nginxAddr, httpAddr string) *url.URL {
-	addr := nginxAddr
-	if addr == "" {
-		addr = httpAddr
-	}
-
-	var hostPort string
-	if strings.HasPrefix(addr, ":") {
-		// Prepend localhost if HTTP listen addr is just a port.
-		hostPort = "127.0.0.1" + addr
-	} else {
-		hostPort = addr
-	}
-
-	return &url.URL{Scheme: "http", Host: hostPort}
-}
-
 // InitDB initializes and returns the global database connection and sets the
 // version of the frontend in our versions table.
 func InitDB(logger sglog.Logger) (*sql.DB, error) {
-	obsCtx := observation.TestContext
-	obsCtx.Logger = logger
-	sqlDB, err := connections.EnsureNewFrontendDB("", "frontend", &obsCtx)
+	sqlDB, err := connections.EnsureNewFrontendDB(observation.ContextWithLogger(logger, &observation.TestContext), "", "frontend")
 	if err != nil {
 		return nil, errors.Errorf("failed to connect to frontend database: %s", err)
 	}
 
-	if err := upgradestore.New(database.NewDB(logger, sqlDB)).UpdateServiceVersion(context.Background(), "frontend", version.Version()); err != nil {
+	if err := upgradestore.New(database.NewDB(logger, sqlDB)).UpdateServiceVersion(context.Background(), version.Version()); err != nil {
 		return nil, err
 	}
 
 	return sqlDB, nil
 }
 
+type LazyDebugserverEndpoint struct {
+	GlobalRateLimiterState       http.Handler
+	ListAuthzProvidersEndpoint   http.Handler
+	GitserverReposStatusEndpoint http.Handler
+}
+
+type SetupFunc func(database.DB, conftypes.UnifiedWatchable) enterprise.Services
+
 // Main is the main entrypoint for the frontend server program.
-func Main(enterpriseSetupHook func(db database.DB, c conftypes.UnifiedWatchable) enterprise.Services) error {
-	ctx := context.Background()
+func Main(ctx context.Context, observationCtx *observation.Context, ready service.ReadyFunc, debugserverEndpoints *LazyDebugserverEndpoint, enterpriseSetupHook SetupFunc, enterpriseMigratorHook store.RegisterMigratorsUsingConfAndStoreFactoryFunc) error {
+	logger := observationCtx.Logger
 
-	log.SetFlags(0)
-	log.SetPrefix("")
-
-	liblog := sglog.Init(sglog.Resource{
-		Name:       env.MyName,
-		Version:    version.Version(),
-		InstanceID: hostname.Get(),
-	}, sglog.NewSentrySinkWith(
-		sglog.SentrySink{
-			ClientOptions: sentry.ClientOptions{SampleRate: 0.2},
-		},
-	)) // Experimental: DevX is observing how sampling affects the errors signal
-	defer liblog.Sync()
-
-	hc := &check.HealthChecker{Checks: []check.Check{
-		checkCanReachGitserver,
-		checkCanReachSearcher,
-	}}
-	hc.Init()
-
-	logger := sglog.Scoped("server", "the frontend server program")
-	ready := make(chan struct{})
-	go debugserver.NewServerRoutine(ready, debugserver.Endpoint{
-		Name:    "Health Checks",
-		Path:    "/aggregate-checks",
-		Handler: check.NewAggregateHealthCheckHandler(check.DefaultEndpointProvider),
-	}).Start()
+	if err := tryAutoUpgrade(ctx, observationCtx, ready, enterpriseMigratorHook); err != nil {
+		return errors.Wrap(err, "frontend.tryAutoUpgrade")
+	}
 
 	sqlDB, err := InitDB(logger)
 	if err != nil {
@@ -157,18 +106,22 @@ func Main(enterpriseSetupHook func(db database.DB, c conftypes.UnifiedWatchable)
 	}
 	db := database.NewDB(logger, sqlDB)
 
+	// Wait for redis-store to have started up, for about 5 seconds. This is to prevent
+	// the frontend from starting up before redis-store is ready when all requests would
+	// still fail because we cannot validate sessions. If it takes longer than 5 seconds,
+	// we'll just continue and expect redis will eventually come up.
+	waitForRedis(logger, redispool.Store)
+
+	// Used by opentelemetry logging
+	stdr.SetVerbosity(10)
+
 	if os.Getenv("SRC_DISABLE_OOBMIGRATION_VALIDATION") != "" {
-		log15.Warn("Skipping out-of-band migrations check")
+		logger.Warn("Skipping out-of-band migrations check")
 	} else {
-		observationContext := &observation.Context{
-			Logger:     logger,
-			Tracer:     &trace.Tracer{TracerProvider: otel.GetTracerProvider()},
-			Registerer: prometheus.DefaultRegisterer,
-		}
-		outOfBandMigrationRunner := oobmigration.NewRunnerWithDB(db, oobmigration.RefreshInterval, observationContext)
+		outOfBandMigrationRunner := oobmigration.NewRunnerWithDB(observationCtx, db, oobmigration.RefreshInterval)
 
 		if err := outOfBandMigrationRunner.SynchronizeMetadata(ctx); err != nil {
-			return errors.Wrap(err, "failed to synchronized out of band migration metadata")
+			return errors.Wrap(err, "failed to synchronize out of band migration metadata")
 		}
 
 		if err := oobmigration.ValidateOutOfBandMigrationRunner(ctx, db, outOfBandMigrationRunner); err != nil {
@@ -176,14 +129,15 @@ func Main(enterpriseSetupHook func(db database.DB, c conftypes.UnifiedWatchable)
 		}
 	}
 
+	highlight.Init()
+
 	// override site config first
 	if err := overrideSiteConfig(ctx, logger, db); err != nil {
 		return errors.Wrap(err, "failed to apply site config overrides")
 	}
-	globals.ConfigurationServerFrontendOnly = conf.InitConfigurationServerFrontendOnly(newConfigurationSource(logger, db))
-	conf.Init()
+
+	configurationServer := conf.InitConfigurationServerFrontendOnly(newConfigurationSource(logger, db))
 	conf.MustValidateDefaults()
-	go conf.Watch(liblog.Update(conf.GetLogSinks))
 
 	// now we can init the keyring, as it depends on site config
 	if err := keyring.Init(ctx); err != nil {
@@ -200,20 +154,10 @@ func Main(enterpriseSetupHook func(db database.DB, c conftypes.UnifiedWatchable)
 		return errors.Wrap(err, "failed to override external service config")
 	}
 
-	// Filter trace logs
-	d, _ := time.ParseDuration(traceThreshold)
-	logging.Init(logging.Filter(loghandlers.Trace(strings.Fields(traceFields), d)))
-	tracer.Init(sglog.Scoped("tracer", "internal tracer package"), conf.DefaultClient())
-	profiler.Init()
-
 	// Run enterprise setup hook
-	enterprise := enterpriseSetupHook(db, conf.DefaultClient())
+	enterpriseServices := enterpriseSetupHook(db, conf.DefaultClient())
 
-	authz.DefaultSubRepoPermsChecker, err = authz.NewSubRepoPermsClient(db.SubRepoPerms())
-	if err != nil {
-		return errors.Wrap(err, "Failed to create sub-repo client")
-	}
-	ui.InitRouter(db, enterprise.CodeIntelResolver)
+	ui.InitRouter(db, configurationServer)
 
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
@@ -253,40 +197,24 @@ func Main(enterpriseSetupHook func(db database.DB, c conftypes.UnifiedWatchable)
 
 	printConfigValidation(logger)
 
-	cleanup := tmpfriend.SetupOrNOOP()
-	defer cleanup()
-
 	// Don't proceed if system requirements are missing, to avoid
 	// presenting users with a half-working experience.
 	if err := checkSysReqs(context.Background(), os.Stderr); err != nil {
 		return err
 	}
 
-	siteid.Init(db)
-
-	globals.WatchExternalURL(defaultExternalURL(nginxAddr, httpAddr))
-	globals.WatchPermissionsUserMapping()
-
+	// Single shot
 	goroutine.Go(func() { bg.CheckRedisCacheEvictionPolicy() })
-	goroutine.Go(func() { bg.DeleteOldCacheDataInRedis() })
-	goroutine.Go(func() { bg.DeleteOldEventLogsInPostgres(context.Background(), db) })
-	goroutine.Go(func() { bg.DeleteOldSecurityEventLogsInPostgres(context.Background(), db) })
-	goroutine.Go(func() { updatecheck.Start(logger, db) })
-	goroutine.Go(func() { adminanalytics.StartAnalyticsCacheRefresh(context.Background(), db) })
-	goroutine.Go(func() { users.StartUpdateAggregatedUsersStatisticsTable(context.Background(), db) })
+	goroutine.Go(func() { bg.UpdatePermissions(ctx, logger, db) })
 
-	schema, err := graphqlbackend.NewSchema(db,
-		enterprise.BatchChangesResolver,
-		enterprise.CodeIntelResolver,
-		enterprise.InsightsResolver,
-		enterprise.AuthzResolver,
-		enterprise.CodeMonitorsResolver,
-		enterprise.LicenseResolver,
-		enterprise.DotcomResolver,
-		enterprise.SearchContextsResolver,
-		enterprise.NotebooksResolver,
-		enterprise.ComputeResolver,
-		enterprise.InsightsAggregationResolver,
+	// Recurring
+	goroutine.Go(func() { updatecheck.Start(logger, db) })
+
+	schema, err := graphqlbackend.NewSchema(
+		db,
+		gitserver.NewClient("graphql.schemaresolver"),
+		configurationServer,
+		[]graphqlbackend.OptionalResolver{enterpriseServices.OptionalResolver},
 	)
 	if err != nil {
 		return err
@@ -297,12 +225,12 @@ func Main(enterpriseSetupHook func(db database.DB, c conftypes.UnifiedWatchable)
 		return err
 	}
 
-	server, err := makeExternalAPI(db, schema, enterprise, rateLimitWatcher)
+	server, err := makeExternalAPI(db, logger, schema, enterpriseServices, rateLimitWatcher)
 	if err != nil {
 		return err
 	}
 
-	internalAPI, err := makeInternalAPI(schema, db, enterprise, rateLimitWatcher, hc)
+	internalAPI, err := makeInternalAPI(db, logger, schema, enterpriseServices, rateLimitWatcher)
 	if err != nil {
 		return err
 	}
@@ -312,44 +240,121 @@ func Main(enterpriseSetupHook func(db database.DB, c conftypes.UnifiedWatchable)
 		routines = append(routines, internalAPI)
 	}
 
-	oce.GlobalExporter = oce.NewDataExporter(db, logger)
+	debugserverEndpoints.GlobalRateLimiterState = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		info, err := ratelimit.GetGlobalLimiterState(r.Context())
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to read rate limiter state: %q", err.Error()), http.StatusInternalServerError)
+			return
+		}
+		resp, err := json.MarshalIndent(info, "", "  ")
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to marshal rate limiter state: %q", err.Error()), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(resp)
+	})
+	debugserverEndpoints.GitserverReposStatusEndpoint = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		repo := r.FormValue("repo")
+		if repo == "" {
+			http.Error(w, "missing 'repo' param", http.StatusBadRequest)
+			return
+		}
+
+		status, err := db.GitserverRepos().GetByName(r.Context(), api.RepoName(repo))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("fetching repository status: %q", err), http.StatusInternalServerError)
+			return
+		}
+
+		resp, err := json.MarshalIndent(status, "", "  ")
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to marshal status: %q", err.Error()), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(resp)
+	})
+	debugserverEndpoints.ListAuthzProvidersEndpoint = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		type providerInfo struct {
+			ServiceType        string `json:"service_type"`
+			ServiceID          string `json:"service_id"`
+			ExternalServiceURL string `json:"external_service_url"`
+		}
+
+		providers, _, _, _ := providers.ProvidersFromConfig(ctx, conf.Get(), db)
+		infos := make([]providerInfo, len(providers))
+		for i, p := range providers {
+			_, id := extsvc.DecodeURN(p.URN())
+
+			// Note that the ID marshalling below replicates code found in `graphqlbackend`.
+			// We cannot import that package's code into this one (see /dev/check/go-dbconn-import.sh).
+			infos[i] = providerInfo{
+				ServiceType:        p.ServiceType(),
+				ServiceID:          p.ServiceID(),
+				ExternalServiceURL: fmt.Sprintf("%s/site-admin/external-services/%s", conf.ExternalURLParsed(), relay.MarshalID("ExternalService", id)),
+			}
+		}
+
+		resp, err := json.MarshalIndent(infos, "", "  ")
+		if err != nil {
+			http.Error(w, "failed to marshal infos: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(resp)
+	})
 
 	if printLogo {
 		// This is not a log entry and is usually disabled
 		println(fmt.Sprintf("\n\n%s\n\n", logoColor))
 	}
-	logger.Info(fmt.Sprintf("✱ Sourcegraph is ready at: %s", globals.ExternalURL()))
-	close(ready)
+	logger.Info(fmt.Sprintf("✱ Sourcegraph is ready at: %s", conf.ExternalURLParsed()))
+	ready()
 
-	goroutine.MonitorBackgroundRoutines(context.Background(), routines...)
-	return nil
+	return goroutine.MonitorBackgroundRoutines(context.Background(), routines...)
 }
 
-func makeExternalAPI(db database.DB, schema *graphql.Schema, enterprise enterprise.Services, rateLimiter graphqlbackend.LimitWatcher) (goroutine.BackgroundRoutine, error) {
+func makeExternalAPI(db database.DB, logger sglog.Logger, schema *graphql.Schema, enterprise enterprise.Services, rateLimiter graphqlbackend.LimitWatcher) (goroutine.BackgroundRoutine, error) {
 	listener, err := httpserver.NewListener(httpAddr)
 	if err != nil {
 		return nil, err
 	}
 
 	// Create the external HTTP handler.
-	externalHandler := newExternalHTTPHandler(
+	externalHandler, err := newExternalHTTPHandler(
 		db,
 		schema,
 		rateLimiter,
 		&httpapi.Handlers{
-			GitHubWebhook:                   enterprise.GitHubWebhook,
-			GitLabWebhook:                   enterprise.GitLabWebhook,
-			BitbucketServerWebhook:          enterprise.BitbucketServerWebhook,
-			BitbucketCloudWebhook:           enterprise.BitbucketCloudWebhook,
+			GitHubSyncWebhook:               enterprise.ReposGithubWebhook,
+			GitLabSyncWebhook:               enterprise.ReposGitLabWebhook,
+			BitbucketServerSyncWebhook:      enterprise.ReposBitbucketServerWebhook,
+			BitbucketCloudSyncWebhook:       enterprise.ReposBitbucketCloudWebhook,
+			PermissionsGitHubWebhook:        enterprise.PermissionsGitHubWebhook,
+			BatchesGitHubWebhook:            enterprise.BatchesGitHubWebhook,
+			BatchesGitLabWebhook:            enterprise.BatchesGitLabWebhook,
+			BatchesBitbucketServerWebhook:   enterprise.BatchesBitbucketServerWebhook,
+			BatchesBitbucketCloudWebhook:    enterprise.BatchesBitbucketCloudWebhook,
+			BatchesAzureDevOpsWebhook:       enterprise.BatchesAzureDevOpsWebhook,
 			BatchesChangesFileGetHandler:    enterprise.BatchesChangesFileGetHandler,
 			BatchesChangesFileExistsHandler: enterprise.BatchesChangesFileExistsHandler,
 			BatchesChangesFileUploadHandler: enterprise.BatchesChangesFileUploadHandler,
+			SCIMHandler:                     enterprise.SCIMHandler,
 			NewCodeIntelUploadHandler:       enterprise.NewCodeIntelUploadHandler,
 			NewComputeStreamHandler:         enterprise.NewComputeStreamHandler,
+			CodeInsightsDataExportHandler:   enterprise.CodeInsightsDataExportHandler,
+			SearchJobsDataExportHandler:     enterprise.SearchJobsDataExportHandler,
+			SearchJobsLogsHandler:           enterprise.SearchJobsLogsHandler,
+			NewDotcomLicenseCheckHandler:    enterprise.NewDotcomLicenseCheckHandler,
+			NewChatCompletionsStreamHandler: enterprise.NewChatCompletionsStreamHandler,
+			NewCodeCompletionsHandler:       enterprise.NewCodeCompletionsHandler,
 		},
 		enterprise.NewExecutorProxyHandler,
-		enterprise.NewGitHubAppSetupHandler,
 	)
+	if err != nil {
+		return nil, errors.Errorf("create external HTTP handler: %v", err)
+	}
 	httpServer := &http.Server{
 		Handler:      externalHandler,
 		ReadTimeout:  75 * time.Second,
@@ -357,11 +362,17 @@ func makeExternalAPI(db database.DB, schema *graphql.Schema, enterprise enterpri
 	}
 
 	server := httpserver.New(listener, httpServer, makeServerOptions()...)
-	log15.Debug("HTTP running", "on", httpAddr)
+	logger.Debug("HTTP running", sglog.String("on", httpAddr))
 	return server, nil
 }
 
-func makeInternalAPI(schema *graphql.Schema, db database.DB, enterprise enterprise.Services, rateLimiter graphqlbackend.LimitWatcher, healthCheckHandler http.Handler) (goroutine.BackgroundRoutine, error) {
+func makeInternalAPI(
+	db database.DB,
+	logger sglog.Logger,
+	schema *graphql.Schema,
+	enterprise enterprise.Services,
+	rateLimiter graphqlbackend.LimitWatcher,
+) (goroutine.BackgroundRoutine, error) {
 	if httpAddrInternal == "" {
 		return nil, nil
 	}
@@ -371,15 +382,20 @@ func makeInternalAPI(schema *graphql.Schema, db database.DB, enterprise enterpri
 		return nil, err
 	}
 
+	grpcServer := defaults.NewServer(logger)
+
 	// The internal HTTP handler does not include the auth handlers.
 	internalHandler := newInternalHTTPHandler(
 		schema,
 		db,
+		grpcServer,
 		enterprise.NewCodeIntelUploadHandler,
+		enterprise.RankingService,
 		enterprise.NewComputeStreamHandler,
 		rateLimiter,
-		healthCheckHandler,
 	)
+	internalHandler = internalgrpc.MultiplexHandlers(grpcServer, internalHandler)
+
 	httpServer := &http.Server{
 		Handler:     internalHandler,
 		ReadTimeout: 75 * time.Second,
@@ -390,7 +406,7 @@ func makeInternalAPI(schema *graphql.Schema, db database.DB, enterprise enterpri
 	}
 
 	server := httpserver.New(listener, httpServer, makeServerOptions()...)
-	log15.Debug("HTTP (internal) running", "on", httpAddrInternal)
+	logger.Debug("HTTP (internal) running", sglog.String("on", httpAddrInternal))
 	return server, nil
 }
 
@@ -418,10 +434,39 @@ func isAllowedOrigin(origin string, allowedOrigins []string) bool {
 }
 
 func makeRateLimitWatcher() (*graphqlbackend.BasicLimitWatcher, error) {
-	ratelimitStore, err := redigostore.New(redispool.Cache, "gql:rl:", 0)
+	var store throttled.GCRAStoreCtx
+	var err error
+	pool := redispool.Cache.Pool()
+	store, err = redigostore.NewCtx(pool, "gql:rl:", 0)
 	if err != nil {
 		return nil, err
 	}
 
-	return graphqlbackend.NewBasicLimitWatcher(sglog.Scoped("BasicLimitWatcher", "basic rate-limiter"), ratelimitStore), nil
+	return graphqlbackend.NewBasicLimitWatcher(sglog.Scoped("BasicLimitWatcher"), store), nil
+}
+
+// GetInternalAddr returns the address of the internal HTTP API server.
+func GetInternalAddr() string {
+	return httpAddrInternal
+}
+
+// waitForRedis waits up to a certain timeout for Redis to become reachable, to reduce the
+// likelihood of the HTTP handlers starting to serve requests while Redis (and therefore session
+// data) is still unavailable. After the timeout has elapsed, if Redis is still unreachable, it
+// continues anyway (because that's probably better than the site not coming up at all).
+func waitForRedis(logger sglog.Logger, kv redispool.KeyValue) {
+	const timeout = 5 * time.Second
+	deadline := time.Now().Add(timeout)
+	var err error
+	for {
+		time.Sleep(150 * time.Millisecond)
+		err = kv.Ping()
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			logger.Warn("Redis (used for session store) failed to become reachable. Will continue trying to establish connection in background.", sglog.Duration("timeout", timeout), sglog.Error(err))
+			return
+		}
+	}
 }

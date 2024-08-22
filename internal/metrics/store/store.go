@@ -5,7 +5,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/gomodule/redigo/redis"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
@@ -18,16 +17,6 @@ const DefaultMetricsExpiry = 30
 
 type Store interface {
 	prometheus.Gatherer
-}
-
-func NewDefaultStore() Store {
-	return &defaultStore{}
-}
-
-type defaultStore struct{}
-
-func (*defaultStore) Gather() ([]*dto.MetricFamily, error) {
-	return prometheus.DefaultGatherer.Gather()
 }
 
 type DistributedStore interface {
@@ -48,11 +37,10 @@ type distributedStore struct {
 }
 
 func (d *distributedStore) Gather() ([]*dto.MetricFamily, error) {
-	reConn := redispool.Cache.Get()
-	defer reConn.Close()
+	cache := redispool.Cache
 
 	// First, list all the keys for which we hold metrics.
-	keys, err := redis.Values(reConn.Do("KEYS", d.prefix+"*"))
+	keys, err := cache.Keys(d.prefix + "*")
 	if err != nil {
 		return nil, errors.Wrap(err, "listing entries from redis")
 	}
@@ -62,7 +50,7 @@ func (d *distributedStore) Gather() ([]*dto.MetricFamily, error) {
 	}
 
 	// Then bulk retrieve all the metrics blobs for all the instances.
-	encodedMetrics, err := redis.Strings(reConn.Do("MGET", keys...))
+	encodedMetrics, err := cache.MGet(keys).Strings()
 	if err != nil {
 		return nil, errors.Wrap(err, "retrieving blobs from redis")
 	}
@@ -72,7 +60,7 @@ func (d *distributedStore) Gather() ([]*dto.MetricFamily, error) {
 	mfs := []*dto.MetricFamily{}
 	for _, metrics := range encodedMetrics {
 		// Decode each metrics blob separately.
-		dec := expfmt.NewDecoder(strings.NewReader(metrics), expfmt.FmtText)
+		dec := expfmt.NewDecoder(strings.NewReader(metrics), expfmt.NewFormat(expfmt.TypeTextPlain))
 		for {
 			var mf dto.MetricFamily
 			if err := dec.Decode(&mf); err != nil {
@@ -90,9 +78,11 @@ func (d *distributedStore) Gather() ([]*dto.MetricFamily, error) {
 }
 
 func (d *distributedStore) Ingest(instance string, mfs []*dto.MetricFamily) error {
+	cache := redispool.Cache
+
 	// First, encode the metrics to text format so we can store them.
 	var enc bytes.Buffer
-	encoder := expfmt.NewEncoder(&enc, expfmt.FmtText)
+	encoder := expfmt.NewEncoder(&enc, expfmt.NewFormat(expfmt.TypeTextPlain))
 
 	for _, a := range mfs {
 		if err := encoder.Encode(a); err != nil {
@@ -102,13 +92,10 @@ func (d *distributedStore) Ingest(instance string, mfs []*dto.MetricFamily) erro
 
 	encodedMetrics := enc.String()
 
-	reConn := redispool.Cache.Get()
-	defer reConn.Close()
-
 	// Store the metrics and set an expiry on the key, if we haven't retrieved
 	// an updated set of metric data, we consider the host down and prune it
 	// from the gatherer.
-	err := reConn.Send("SETEX", d.prefix+instance, d.expiry, encodedMetrics)
+	err := cache.SetEx(d.prefix+instance, d.expiry, encodedMetrics)
 	if err != nil {
 		return errors.Wrap(err, "writing metrics blob to redis")
 	}

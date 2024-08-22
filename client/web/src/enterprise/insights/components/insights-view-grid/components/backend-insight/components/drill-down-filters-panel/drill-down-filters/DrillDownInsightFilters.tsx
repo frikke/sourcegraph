@@ -1,24 +1,36 @@
-import { FunctionComponent, useMemo, useState } from 'react'
+import { type FunctionComponent, useMemo, useState } from 'react'
 
 import { useApolloClient } from '@apollo/client'
 import { mdiArrowExpand, mdiArrowCollapse, mdiPlus } from '@mdi/js'
 import classNames from 'classnames'
 import { isEqual, noop } from 'lodash'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { Button, Icon, Link, H4 } from '@sourcegraph/wildcard'
+import { SeriesSortDirection, SeriesSortMode } from '@sourcegraph/shared/src/graphql-operations'
+import {
+    Button,
+    Icon,
+    Link,
+    H4,
+    ErrorAlert,
+    useField,
+    type FormChangeEvent,
+    type SubmissionResult,
+    useForm,
+    FORM_ERROR,
+} from '@sourcegraph/wildcard'
 
 import { LoaderButton } from '../../../../../../../../../components/LoaderButton'
-import { SeriesSortDirection, SeriesSortMode } from '../../../../../../../../../graphql-operations'
-import { useField } from '../../../../../../form/hooks/useField'
-import { FormChangeEvent, SubmissionResult, useForm, FORM_ERROR } from '../../../../../../form/hooks/useForm'
 import { SortFilterSeriesPanel } from '../../sort-filter-series-panel/SortFilterSeriesPanel'
 import { DrillDownInput, LabelWithReset } from '../drill-down-input/DrillDownInput'
 import { FilterCollapseSection, FilterPreviewPill } from '../filter-collapse-section/FilterCollapseSection'
 import { DrillDownSearchContextFilter } from '../search-context/DrillDownSearchContextFilter'
 
-import { getSerializedRepositoriesFilter, getSerializedSearchContextFilter, getSortPreview, validRegexp } from './utils'
-import { createSearchContextValidator, getFilterInputStatus } from './validators'
+import {
+    getSerializedRepositoriesFilter,
+    getSerializedSearchContextFilter,
+    getSerializedSortAndLimitFilter,
+} from './utils'
+import { createSearchContextValidator, getFilterInputStatus, REPO_FILTER_VALIDATORS } from './validators'
 
 import styles from './DrillDownInsightFilters.module.scss'
 
@@ -39,7 +51,8 @@ export interface DrillDownFiltersFormValues {
     includeRepoRegexp: string
     excludeRepoRegexp: string
     seriesDisplayOptions: {
-        limit: string
+        numSamples: number | null
+        limit: number | null
         sortOptions: {
             mode: SeriesSortMode
             direction: SeriesSortDirection
@@ -53,6 +66,8 @@ interface DrillDownInsightFilters {
     originalValues: DrillDownFiltersFormValues
 
     visualMode: FilterSectionVisualMode
+
+    isNumSamplesFilterAvailable: boolean
 
     className?: string
 
@@ -76,6 +91,7 @@ export const DrillDownInsightFilters: FunctionComponent<DrillDownInsightFilters>
         originalValues,
         className,
         visualMode,
+        isNumSamplesFilterAvailable,
         onFiltersChange,
         onFilterSave,
         onCreateInsightRequest,
@@ -103,13 +119,13 @@ export const DrillDownInsightFilters: FunctionComponent<DrillDownInsightFilters>
     const includeRegex = useField({
         name: 'includeRepoRegexp',
         formApi: formAPI,
-        validators: { sync: validRegexp },
+        validators: { sync: REPO_FILTER_VALIDATORS },
     })
 
     const excludeRegex = useField({
         name: 'excludeRepoRegexp',
         formApi: formAPI,
-        validators: { sync: validRegexp },
+        validators: { sync: REPO_FILTER_VALIDATORS },
     })
 
     const seriesDisplayOptionsField = useField({
@@ -133,7 +149,14 @@ export const DrillDownInsightFilters: FunctionComponent<DrillDownInsightFilters>
         contexts.input.onChange('')
         includeRegex.input.onChange('')
         excludeRegex.input.onChange('')
-        seriesDisplayOptionsField.input.onChange(originalValues.seriesDisplayOptions)
+        seriesDisplayOptionsField.input.onChange({
+            limit: null,
+            numSamples: null,
+            sortOptions: {
+                mode: SeriesSortMode.RESULT_COUNT,
+                direction: SeriesSortDirection.DESC,
+            },
+        })
     }
 
     const isHorizontalMode = visualMode === FilterSectionVisualMode.HorizontalSections
@@ -146,6 +169,7 @@ export const DrillDownInsightFilters: FunctionComponent<DrillDownInsightFilters>
 
                 <FilterPreviewPill text={getSerializedSearchContextFilter(contexts.input.value, true)} />
                 <FilterPreviewPill text={getSerializedRepositoriesFilter(currentRepositoriesFilters)} />
+                <FilterPreviewPill text={getSerializedSortAndLimitFilter(seriesDisplayOptionsField.input.value)} />
 
                 <Button
                     variant="link"
@@ -196,13 +220,14 @@ export const DrillDownInsightFilters: FunctionComponent<DrillDownInsightFilters>
                     open={isHorizontalMode || activeSection === FilterSection.SortFilter}
                     title="Sort & Limit"
                     aria-label="sort and limit filter section"
-                    preview={getSortPreview(seriesDisplayOptionsField.input.value)}
+                    preview={getSerializedSortAndLimitFilter(seriesDisplayOptionsField.input.value)}
                     hasActiveFilter={!isEqual(originalValues.seriesDisplayOptions, values.seriesDisplayOptions)}
                     withSeparators={!isHorizontalMode}
                     onOpenChange={opened => handleCollapseState(FilterSection.SortFilter, opened)}
                 >
                     <SortFilterSeriesPanel
                         value={seriesDisplayOptionsField.input.value}
+                        isNumSamplesFilterAvailable={isNumSamplesFilterAvailable}
                         onChange={seriesDisplayOptionsField.input.onChange}
                     />
                 </FilterCollapseSection>
@@ -340,9 +365,16 @@ export const DrillDownInsightFilters: FunctionComponent<DrillDownInsightFilters>
 }
 
 export function hasActiveFilters(filters: DrillDownFiltersFormValues): boolean {
-    const { excludeRepoRegexp, includeRepoRegexp, context } = filters
+    const { excludeRepoRegexp, includeRepoRegexp, context, seriesDisplayOptions } = filters
 
-    return [excludeRepoRegexp, includeRepoRegexp, context].some(hasActiveUnaryFilter)
+    const { numSamples, sortOptions, limit } = seriesDisplayOptions
+    const hasDisplayOptionChanged =
+        numSamples !== null ||
+        limit !== null ||
+        sortOptions.mode !== SeriesSortMode.RESULT_COUNT ||
+        sortOptions.direction !== SeriesSortDirection.DESC
+
+    return [excludeRepoRegexp, includeRepoRegexp, context].some(hasActiveUnaryFilter) || hasDisplayOptionChanged
 }
 
 const hasActiveUnaryFilter = (filter: string): boolean => filter.trim() !== ''

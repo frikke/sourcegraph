@@ -1,39 +1,40 @@
 package policies
 
 import (
-	"sync"
-
+	"github.com/sourcegraph/sourcegraph/internal/codeintel/policies/internal/background"
+	repomatcher "github.com/sourcegraph/sourcegraph/internal/codeintel/policies/internal/background/repository_matcher"
 	"github.com/sourcegraph/sourcegraph/internal/codeintel/policies/internal/store"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/gitserver"
+	"github.com/sourcegraph/sourcegraph/internal/goroutine"
 	"github.com/sourcegraph/sourcegraph/internal/observation"
 )
 
-var (
-	svc     *Service
-	svcOnce sync.Once
-)
-
-// GetService creates or returns an already-initialized policies service.
-// If the service is not yet initialized, it will use the provided dependencies.
-func GetService(
+func NewService(
+	observationCtx *observation.Context,
 	db database.DB,
 	uploadSvc UploadService,
-	gitserver GitserverClient,
+	gitserverClient gitserver.Client,
 ) *Service {
-	svcOnce.Do(func() {
-		store := store.New(db, scopedContext("store"))
-
-		svc = newService(
-			store,
-			uploadSvc,
-			gitserver,
-			scopedContext("service"),
-		)
-	})
-
-	return svc
+	return newService(
+		scopedContext("service", observationCtx),
+		store.New(scopedContext("store", observationCtx), db),
+		db.Repos(),
+		uploadSvc,
+		gitserverClient,
+	)
 }
 
-func scopedContext(component string) *observation.Context {
-	return observation.ScopedContext("codeintel", "policies", component)
+var RepositoryMatcherConfigInst = &repomatcher.Config{}
+
+func NewRepositoryMatcherRoutines(observationCtx *observation.Context, service *Service) []goroutine.BackgroundRoutine {
+	return background.PolicyMatcherJobs(
+		scopedContext("repository-matcher", observationCtx),
+		service.store,
+		RepositoryMatcherConfigInst,
+	)
+}
+
+func scopedContext(component string, parent *observation.Context) *observation.Context {
+	return observation.ScopedContext("codeintel", "policies", component, parent)
 }

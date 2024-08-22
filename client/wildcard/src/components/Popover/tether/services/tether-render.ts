@@ -10,7 +10,7 @@ import {
 } from './tether-browser'
 import { getLayout } from './tether-layout'
 import { getState } from './tether-state'
-import { Tether } from './types'
+import type { Tether } from './types'
 
 /**
  * Main entry point for tooltip element position calculations. It mutates tooltip
@@ -28,6 +28,9 @@ export function render(tether: Tether, eventTarget: HTMLElement | null, preserve
     if (!positions.points.has(eventTarget as Element) && !preserveSize) {
         setMaxSize(tether.element, null)
     }
+
+    // Restore pointer events
+    setStyle(tether.element, 'pointer-events', 'all')
 
     // Restore visibility for correct measure in layout service
     setVisibility(tether.element, true)

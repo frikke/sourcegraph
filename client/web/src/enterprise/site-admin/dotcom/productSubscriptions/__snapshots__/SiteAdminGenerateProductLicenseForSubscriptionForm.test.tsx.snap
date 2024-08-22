@@ -1,157 +1,73 @@
-// Jest Snapshot v1, https://goo.gl/fbAQLP
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`SiteAdminGenerateProductLicenseForSubscriptionForm renders 1`] = `
-<DocumentFragment>
+exports[`SiteAdminGenerateProductLicenseForSubscriptionForm > renders 1`] = `
+<body>
   <div
-    class="site-admin-generate-product-license-for-subscription-form"
-  >
-    <form
-      class=""
+    aria-hidden="true"
+  />
+  <reach-portal>
+    <div
+      data-focus-guard="true"
+      style="width: 1px; height: 0px; padding: 0px; overflow: hidden; position: fixed; top: 1px; left: 1px;"
+      tabindex="0"
+    />
+    <div
+      data-focus-guard="true"
+      style="width: 1px; height: 0px; padding: 0px; overflow: hidden; position: fixed; top: 1px; left: 1px;"
+      tabindex="1"
+    />
+    <div
+      data-focus-lock-disabled="false"
     >
-      <div
-        class="form-group"
-      >
-        <label
-          class="label"
-          for="site-admin-create-product-subscription-page__tags"
-        >
-          Tags
-        </label>
+      <div>
         <div
-          class="container loader-input loaderInput form-control"
+          data-reach-dialog-overlay=""
         >
-          <input
-            class="form-control with-invalid-icon"
-            id="site-admin-create-product-subscription-page__tags"
-            list="knownPlans"
-            type="text"
-            value=""
-          />
-        </div>
-        <datalist
-          id="knownPlans"
-        >
-          <option
-            value="true-up"
-          />
-          <option
-            value="trial"
-          />
-          <option
-            value="starter,trial"
-          />
-          <option
-            value="starter,true-up"
-          />
-          <option
-            value="dev"
-          />
-        </datalist>
-        <small
-          class="form-text text-muted"
-        >
-          Tags restrict a license. Please refer to 
-          <a
-            class="anchorLink"
-            href="https://handbook.sourcegraph.com/ce/license_keys#how-to-create-a-license-key-for-a-new-prospect-or-new-customer"
+          <div
+            aria-labelledby="generateLicense"
+            aria-modal="true"
+            class="modal center modal"
+            data-reach-dialog-content=""
+            role="dialog"
+            tabindex="-1"
           >
-            How to create a license key for a new prospect or new customer
-          </a>
-           for a complete guide.
-        </small>
-      </div>
-      <div
-        class="form-group"
-      >
-        <label
-          class="label"
-          for="site-admin-create-product-subscription-page__userCount"
-        >
-          Users
-        </label>
-        <div
-          class="container loader-input loaderInput"
-        >
-          <input
-            class="form-control with-invalid-icon"
-            id="site-admin-create-product-subscription-page__userCount"
-            min="1"
-            type="number"
-            value="1"
-          />
+            <h3
+              class="h3 flex-shrink-0"
+              id="generateLicense"
+            >
+              Generate new Sourcegraph license
+            </h3>
+            <div
+              aria-live="polite"
+              class="alert alertInfo flex-shrink-0"
+              role="alert"
+            >
+              Please read the
+               
+              <a
+                class="anchorLink"
+                href="https://handbook.sourcegraph.com/ce/license_keys#how-to-create-a-license-key-for-a-new-prospect-or-new-customer"
+                rel="noopener"
+                target="_blank"
+              >
+                guide for how to create a license key for a new prospect or new customer.
+              </a>
+            </div>
+            <button
+              class="btn btnSecondary"
+              type="button"
+            >
+              Acknowledge information
+            </button>
+          </div>
         </div>
       </div>
-      <div
-        class="form-group"
-      >
-        <label
-          class="label"
-          for="site-admin-create-product-subscription-page__validDays"
-        >
-          Valid for (days)
-        </label>
-        <div
-          class="container loader-input loaderInput"
-        >
-          <input
-            class="form-control with-invalid-icon"
-            id="site-admin-create-product-subscription-page__validDays"
-            max="2000"
-            min="1"
-            type="number"
-            value="1"
-          />
-        </div>
-        <small
-          class="form-text text-muted"
-        >
-          <span>
-            Valid until Jan 3, 2006, 11:59:59 PM (1 day remaining)
-          </span>
-        </small>
-        <small
-          class="form-text text-muted d-block mt-1"
-        >
-          Set to 
-          <button
-            class="btn btnLink btnSm p-0 mr-2"
-            type="button"
-          >
-            7 days
-          </button>
-          <button
-            class="btn btnLink btnSm p-0 mr-2"
-            type="button"
-          >
-            14 days
-          </button>
-          <button
-            class="btn btnLink btnSm p-0 mr-2"
-            type="button"
-          >
-            30 days
-          </button>
-          <button
-            class="btn btnLink btnSm p-0 mr-2"
-            type="button"
-          >
-            60 days
-          </button>
-          <button
-            class="btn btnLink btnSm p-0 mr-2"
-            type="button"
-          >
-            1 year
-          </button>
-        </small>
-      </div>
-      <button
-        class="btn btnPrimary"
-        type="submit"
-      >
-        Generate license
-      </button>
-    </form>
-  </div>
-</DocumentFragment>
+    </div>
+    <div
+      data-focus-guard="true"
+      style="width: 1px; height: 0px; padding: 0px; overflow: hidden; position: fixed; top: 1px; left: 1px;"
+      tabindex="0"
+    />
+  </reach-portal>
+</body>
 `;

@@ -1,27 +1,27 @@
-import { Observable } from 'rxjs'
+import type { Observable } from 'rxjs'
 import { map } from 'rxjs/operators'
 
 import { dataOrThrowErrors, gql } from '@sourcegraph/http-client'
 
 import { requestGraphQL } from '../backend/graphql'
 import {
-    CreateNotebookResult,
-    CreateNotebookStarResult,
-    CreateNotebookStarVariables,
-    CreateNotebookVariables,
-    DeleteNotebookResult,
-    DeleteNotebookStarResult,
-    DeleteNotebookStarVariables,
-    DeleteNotebookVariables,
-    FetchNotebookResult,
-    FetchNotebookVariables,
-    ListNotebooksResult,
-    ListNotebooksVariables,
-    Maybe,
-    NotebookFields,
-    Scalars,
-    UpdateNotebookResult,
-    UpdateNotebookVariables,
+    type CreateNotebookResult,
+    type CreateNotebookStarResult,
+    type CreateNotebookStarVariables,
+    type CreateNotebookVariables,
+    type DeleteNotebookResult,
+    type DeleteNotebookStarResult,
+    type DeleteNotebookStarVariables,
+    type DeleteNotebookVariables,
+    type FetchNotebookResult,
+    type FetchNotebookVariables,
+    type ListNotebooksResult,
+    type ListNotebooksVariables,
+    type Maybe,
+    type NotebookFields,
+    type Scalars,
+    type UpdateNotebookResult,
+    type UpdateNotebookVariables,
     NotebooksOrderBy,
 } from '../graphql-operations'
 
@@ -49,6 +49,7 @@ const notebooksFragment = gql`
         stars {
             totalCount
         }
+        patternType
         blocks {
             ... on MarkdownBlock {
                 __typename
@@ -88,11 +89,6 @@ const notebooksFragment = gql`
                     symbolContainerName
                     symbolKind
                 }
-            }
-            ... on ComputeBlock {
-                __typename
-                id
-                computeInput
             }
         }
     }
@@ -199,6 +195,9 @@ const createNotebookMutation = gql`
 `
 
 export function createNotebook(variables: CreateNotebookVariables): Observable<NotebookFields> {
+    // Remove any null blocks. This is caused by deleted block types.
+    variables.notebook.blocks = variables.notebook.blocks.filter(block => block)
+
     return requestGraphQL<CreateNotebookResult, CreateNotebookVariables>(createNotebookMutation, variables).pipe(
         map(dataOrThrowErrors),
         map(data => data.createNotebook)
@@ -215,6 +214,9 @@ const updateNotebookMutation = gql`
 `
 
 export function updateNotebook(variables: UpdateNotebookVariables): Observable<NotebookFields> {
+    // Remove any null blocks. This is caused by deleted block types.
+    variables.notebook.blocks = variables.notebook.blocks.filter(block => block)
+
     return requestGraphQL<UpdateNotebookResult, UpdateNotebookVariables>(updateNotebookMutation, variables).pipe(
         map(dataOrThrowErrors),
         map(data => data.updateNotebook)

@@ -1,0 +1,48 @@
+exclude: (^.*\.snap$)|(^internal/database/.*\.json)|(^internal/database/.*\.md)|(^migrations/[^/]+/squashed\.sql)
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-yaml
+        exclude: 'pnpm-lock.yaml'
+      - id: end-of-file-fixer
+  - repo: https://github.com/keith/pre-commit-buildifier
+    rev: 7.1.2
+    hooks:
+      - id: buildifier
+      - id: buildifier-lint
+  - repo: local
+    hooks:
+    - id: check-tokens
+      name: check-tokens
+      description: 'Check for common tokens being committed'
+      entry: ./dev/check-tokens.sh
+      language: script
+      'types': [text]
+      args: []
+      require_serial: false
+    - id: shellcheck
+      name: shellcheck
+      description: 'Run shellcheck'
+      entry: ./dev/check/shellcheck.sh
+      language: script
+      # TODO: adapt shellcheck.sh to only operate on passed-in files,
+      # and fallback to git ls-files when empty
+      pass_filenames: false
+      files: '.*\.(sh|bash)'
+      stages: [pre-push]
+    - id: shfmt
+      name: shfmt
+      description: 'Run shfmt'
+      entry: ./dev/check/shfmt.sh
+      language: script
+      # TODO: adapt shfmt.sh to only operate on passed-in files,
+      # and fallback to git ls-files when empty
+      pass_filenames: false
+      files: '.*\.(sh|bash)'
+      stages: [pre-push]
+    - id: forbidcommit
+      name: forbidcommit
+      description: 'Prevent commits with a FORBIDCOMMIT string in the diff'
+      entry: ./dev/forbidcommit.sh
+      language: script

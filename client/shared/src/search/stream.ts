@@ -1,13 +1,20 @@
 import { fetchEventSource } from '@microsoft/fetch-event-source'
-/* eslint-disable id-length */
-import { Observable, fromEvent, Subscription, OperatorFunction, pipe, Subscriber, Notification } from 'rxjs'
+import {
+    fromEvent,
+    type Notification,
+    Observable,
+    type OperatorFunction,
+    pipe,
+    type Subscriber,
+    Subscription,
+} from 'rxjs'
 import { defaultIfEmpty, map, materialize, scan, switchMap } from 'rxjs/operators'
-import { AggregableBadge } from 'sourcegraph'
 
-import { asError, ErrorLike, isErrorLike } from '@sourcegraph/common'
+import { asError, type ErrorLike, isErrorLike } from '@sourcegraph/common'
 
-import { SearchPatternType } from '../graphql-operations'
-import { SymbolKind } from '../schema'
+import type { SearchPatternType, SymbolKind } from '../graphql-operations'
+
+import { SearchMode } from './types'
 
 // The latest supported version of our search syntax. Users should never be able to determine the search version.
 // The version is set based on the release tag of the instance.
@@ -29,7 +36,7 @@ export type SearchEvent =
     | { type: 'error'; data: ErrorLike }
     | { type: 'done'; data: {} }
 
-export type SearchMatch = ContentMatch | RepositoryMatch | CommitMatch | SymbolMatch | PathMatch
+export type SearchMatch = ContentMatch | RepositoryMatch | CommitMatch | SymbolMatch | PathMatch | OwnerMatch
 
 export interface PathMatch {
     type: 'path'
@@ -40,6 +47,8 @@ export interface PathMatch {
     repoLastFetched?: string
     branches?: string[]
     commit?: string
+    language?: string
+    debug?: string
 }
 
 export interface ContentMatch {
@@ -51,9 +60,11 @@ export interface ContentMatch {
     repoLastFetched?: string
     branches?: string[]
     commit?: string
-    lineMatches: LineMatch[]
+    lineMatches?: LineMatch[]
     chunkMatches?: ChunkMatch[]
     hunks?: DecoratedHunk[]
+    language?: string
+    debug?: string
 }
 
 export interface DecoratedHunk {
@@ -79,17 +90,23 @@ export interface Location {
     column: number
 }
 
-interface LineMatch {
+export interface LineMatch {
     line: string
     lineNumber: number
     offsetAndLengths: number[][]
-    aggregableBadges?: AggregableBadge[]
 }
 
-interface ChunkMatch {
+export interface ChunkMatch {
     content: string
     contentStart: Location
     ranges: Range[]
+
+    /**
+     * Indicates that content has been truncated.
+     *
+     * This can only be true when maxLineLength search option is non-zero.
+     */
+    contentTruncated?: boolean
 }
 
 export interface SymbolMatch {
@@ -101,6 +118,8 @@ export interface SymbolMatch {
     branches?: string[]
     commit?: string
     symbols: MatchedSymbol[]
+    language?: string
+    debug?: string
 }
 
 export interface MatchedSymbol {
@@ -116,7 +135,6 @@ type MarkdownText = string
 /**
  * Our batch based client requests generic fields from GraphQL to represent repo and commit/diff matches.
  * We currently are only using it for commit. To simplify the PoC we are keeping this interface for commits.
- *
  * @see GQL.IGenericSearchResultInterface
  */
 export interface CommitMatch {
@@ -127,6 +145,8 @@ export interface CommitMatch {
     message: string
     authorName: string
     authorDate: string
+    committerName: string
+    committerDate: string
     repoStars?: number
     repoLastFetched?: string
 
@@ -147,6 +167,34 @@ export interface RepositoryMatch {
     private?: boolean
     branches?: string[]
     descriptionMatches?: Range[]
+    metadata?: Record<string, string | undefined>
+    topics?: string[]
+}
+
+export type OwnerMatch = PersonMatch | TeamMatch
+
+export interface BaseOwnerMatch {
+    handle?: string
+    email?: string
+}
+
+export interface PersonMatch extends BaseOwnerMatch {
+    type: 'person'
+    handle?: string
+    email?: string
+    user?: {
+        username: string
+        displayName?: string
+        avatarURL?: string
+    }
+}
+
+export interface TeamMatch extends BaseOwnerMatch {
+    type: 'team'
+    name: string
+    displayName?: string
+    handle?: string
+    email?: string
 }
 
 /**
@@ -154,6 +202,8 @@ export interface RepositoryMatch {
  * Should be replaced when a new ones come in.
  */
 export interface Progress {
+    // No more progress to be tracked
+    done?: boolean
     /**
      * The number of repositories matching the repo: filter. Is set once they
      * are resolved.
@@ -190,7 +240,8 @@ export interface Skipped {
      * - shard-timeout :: we ran out of time before searching a shard/repository.
      * - repository-cloning :: we could not search a repository because it is not cloned.
      * - repository-missing :: we could not search a repository because it is not cloned and we failed to find it on the remote code host.
-     * - excluded-fork :: we did not search a repository because it is a fork.
+     * - backend-missing :: we may be missing results due to a backend being transiently down.
+     * - repository-fork :: we did not search a repository because it is a fork.
      * - excluded-archive :: we did not search a repository because it is archived.
      * - display :: we hit the display limit, so we stopped sending results from the backend.
      */
@@ -201,7 +252,8 @@ export interface Skipped {
         | 'shard-timedout'
         | 'repository-cloning'
         | 'repository-missing'
-        | 'excluded-fork'
+        | 'repository-fork'
+        | 'backend-missing'
         | 'excluded-archive'
         | 'display'
         | 'error'
@@ -228,13 +280,27 @@ export interface Filter {
     value: string
     label: string
     count: number
-    limitHit: boolean
-    kind: 'file' | 'repo' | 'lang' | 'utility'
+    exhaustive: boolean
+    kind: 'file' | 'repo' | 'lang' | 'utility' | 'author' | 'commit date' | 'symbol type' | 'type'
 }
 
-export type AlertKind = 'smart-search-additional-results' | 'smart-search-pure-results'
+export const TELEMETRY_FILTER_TYPES = {
+    file: 1,
+    repo: 2,
+    lang: 3,
+    utility: 4,
+    author: 5,
+    'commit date': 6,
+    'symbol type': 7,
+    type: 8,
+    snippet: 9,
+    count: 10,
+}
 
-interface Alert {
+export type SmartSearchAlertKind = 'smart-search-additional-results' | 'smart-search-pure-results'
+export type AlertKind = SmartSearchAlertKind | 'unowned-results'
+
+export interface Alert {
     title: string
     description?: string | null
     kind?: AlertKind | null
@@ -244,7 +310,7 @@ interface Alert {
 // Same key values from internal/search/alert.go
 export type AnnotationName = 'ResultCount'
 
-interface ProposedQuery {
+export interface ProposedQuery {
     description?: string | null
     annotations?: { name: AnnotationName; value: string }[]
     query: string
@@ -295,35 +361,40 @@ export const switchAggregateSearchResults: OperatorFunction<SearchEvent, Aggrega
             switch (newEvent.kind) {
                 case 'N': {
                     switch (newEvent.value?.type) {
-                        case 'matches':
+                        case 'matches': {
                             return {
                                 ...results,
                                 // Matches are additive
                                 results: results.results.concat(newEvent.value.data),
                             }
+                        }
 
-                        case 'progress':
+                        case 'progress': {
                             return {
                                 ...results,
                                 // Progress updates replace
                                 progress: newEvent.value.data,
                             }
+                        }
 
-                        case 'filters':
+                        case 'filters': {
                             return {
                                 ...results,
                                 // New filter results replace all previous ones
                                 filters: newEvent.value.data,
                             }
+                        }
 
-                        case 'alert':
+                        case 'alert': {
                             return {
                                 ...results,
                                 alert: newEvent.value.data,
                             }
+                        }
 
-                        default:
+                        default: {
                             return results
+                        }
                     }
                 }
                 case 'E': {
@@ -345,13 +416,15 @@ export const switchAggregateSearchResults: OperatorFunction<SearchEvent, Aggrega
                         state: 'error',
                     }
                 }
-                case 'C':
+                case 'C': {
                     return {
                         ...results,
                         state: 'complete',
                     }
-                default:
+                }
+                default: {
                     return results
+                }
             }
         },
         emptyAggregateResults
@@ -430,13 +503,39 @@ export const messageHandlers: MessageHandlers = {
 
 export interface StreamSearchOptions {
     version: string
+    /**
+     * TODO(stefan): "patternType" should be an optional parameter. Both Stream API and the GQL API don't require it.
+     * In the UI, we sometimes prefer to remove the "patternType:" filter from the query for better readability.
+     * "patternType" should be used to set the patternType of a query for those cases. Use "version" to
+     * define the default patternType instead.
+     */
     patternType: SearchPatternType
     caseSensitive: boolean
     trace: string | undefined
+    featureOverrides?: string[]
+    searchMode?: SearchMode
     sourcegraphURL?: string
-    decorationKinds?: string[]
-    decorationContextLines?: number
+    chunkMatches?: boolean
+    enableRepositoryMetadata?: boolean
+    zoektSearchOptions?: string
+
+    /**
+     * Limits the number of matches sent down. Note: this is different to the
+     * count: in the query. The search will continue once we hit displayLimit
+     * and updated filters and statistics will continue to stream down.
+     *
+     * If unset all results are streamed down.
+     */
     displayLimit?: number
+
+    /**
+     * Truncates content strings such that no line is longer than
+     * maxLineLength. This is used to prevent sending large previews down to
+     * the browser which can cause high CPU and network usage.
+     *
+     * If unset full Content strings are sent.
+     */
+    maxLineLen?: number
 }
 
 function initiateSearchStream(
@@ -446,29 +545,41 @@ function initiateSearchStream(
         patternType,
         caseSensitive,
         trace,
-        decorationKinds,
-        decorationContextLines,
+        zoektSearchOptions,
+        featureOverrides,
+        searchMode = SearchMode.Precise,
         displayLimit = 1500,
+        maxLineLen,
         sourcegraphURL = '',
+        chunkMatches = false,
     }: StreamSearchOptions,
     messageHandlers: MessageHandlers
 ): Observable<SearchEvent> {
     return new Observable<SearchEvent>(observer => {
         const subscriptions = new Subscription()
-
+        const queryParam = `${query} ${caseSensitive ? 'case:yes' : ''}`
         const parameters = [
-            ['q', `${query} ${caseSensitive ? 'case:yes' : ''}`],
+            ['q', queryParam],
             ['v', version],
             ['t', patternType as string],
-            ['dl', '0'],
-            ['dk', (decorationKinds || ['html']).join('|')],
-            ['dc', (decorationContextLines || '1').toString()],
+            ['sm', searchMode.toString()],
             ['display', displayLimit.toString()],
+            ['cm', chunkMatches ? 't' : 'f'],
         ]
         if (trace) {
             parameters.push(['trace', trace])
         }
-        const parameterEncoded = parameters.map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&')
+        if (maxLineLen) {
+            parameters.push(['max-line-len', maxLineLen.toString()])
+        }
+        for (const value of featureOverrides || []) {
+            parameters.push(['feat', value])
+        }
+
+        if (zoektSearchOptions) {
+            parameters.push(['zoekt-search-opts', zoektSearchOptions])
+        }
+        const parameterEncoded = parameters.map(([key, value]) => key + '=' + encodeURIComponent(value)).join('&')
 
         const eventSource = new EventSource(`${sourcegraphURL}/search/stream?${parameterEncoded}`)
         subscriptions.add(() => eventSource.close())
@@ -488,7 +599,6 @@ function initiateSearchStream(
 /**
  * Initiates a streaming search.
  * This is a type safe wrapper around Sourcegraph's streaming search API (using Server Sent Events). The observable will emit each event returned from the backend.
- *
  * @param queryObservable is an observables that resolves to a query string
  * @param options contains the search query and the necessary context to perform the search (version, patternType, caseSensitive, etc.)
  * @param messageHandlers provide handler functions for each possible `SearchEvent` type
@@ -532,7 +642,8 @@ export function getRevision(branches?: string[], version?: string): string {
 
 export function getFileMatchUrl(fileMatch: ContentMatch | SymbolMatch | PathMatch): string {
     const revision = getRevision(fileMatch.branches, fileMatch.commit)
-    return `/${fileMatch.repository}${revision ? '@' + revision : ''}/-/blob/${fileMatch.path}`
+    const encodedFilePath = fileMatch.path.split('/').map(encodeURIComponent).join('/')
+    return `/${fileMatch.repository}${revision ? '@' + revision : ''}/-/blob/${encodedFilePath}`
 }
 
 export function getRepoMatchLabel(repoMatch: RepositoryMatch): string {
@@ -550,16 +661,46 @@ export function getCommitMatchUrl(commitMatch: CommitMatch): string {
     return '/' + encodeURI(commitMatch.repository) + '/-/commit/' + commitMatch.oid
 }
 
+export function getOwnerMatchUrl(ownerMatch: OwnerMatch, ignoreUnknownPerson: boolean = false): string {
+    if (ownerMatch.type === 'person' && ownerMatch.user) {
+        return '/users/' + encodeURI(ownerMatch.user.username)
+    }
+    if (ownerMatch.type === 'team') {
+        return '/teams/' + encodeURI(ownerMatch.name)
+    }
+    if (ownerMatch.email) {
+        return `mailto:${ownerMatch.email}`
+    }
+
+    if (ignoreUnknownPerson) {
+        return ''
+    }
+    // Unknown person with only a handle.
+    // We can't ignore this person and return an empty string, we
+    // need some unique dummy data here because this is used
+    // as the key in the virtual list. We can't use the index.
+    // In the future we may be able to link to the
+    // person's profile page in the external code host.
+    return '/unknown-person/' + encodeURI(ownerMatch.handle || 'unknown')
+}
+
 export function getMatchUrl(match: SearchMatch): string {
     switch (match.type) {
         case 'path':
         case 'content':
-        case 'symbol':
+        case 'symbol': {
             return getFileMatchUrl(match)
-        case 'commit':
+        }
+        case 'commit': {
             return getCommitMatchUrl(match)
-        case 'repo':
+        }
+        case 'repo': {
             return getRepoMatchUrl(match)
+        }
+        case 'person':
+        case 'team': {
+            return getOwnerMatchUrl(match)
+        }
     }
 }
 

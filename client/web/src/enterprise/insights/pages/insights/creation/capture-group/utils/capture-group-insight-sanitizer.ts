@@ -1,27 +1,27 @@
 import { FilterType, resolveFilter } from '@sourcegraph/shared/src/search/query/filters'
 import { scanSearchQuery } from '@sourcegraph/shared/src/search/query/scanner'
-import { Filter } from '@sourcegraph/shared/src/search/query/token'
+import type { Filter } from '@sourcegraph/shared/src/search/query/token'
 
 import { SeriesSortDirection, SeriesSortMode } from '../../../../../../../graphql-operations'
-import { getSanitizedRepositories } from '../../../../../components'
-import { InsightExecutionType, InsightType, MinimalCaptureGroupInsightData } from '../../../../../core'
-import { MAX_NUMBER_OF_SERIES } from '../../../../../core/backend/gql-backend/methods/get-backend-insight-data/deserializators'
-import { CaptureGroupFormFields } from '../types'
+import { InsightType, type MinimalCaptureGroupInsightData } from '../../../../../core'
+import type { CaptureGroupFormFields } from '../types'
 
 export function getSanitizedCaptureGroupInsight(values: CaptureGroupFormFields): MinimalCaptureGroupInsightData {
     return {
         title: values.title.trim(),
         query: getSanitizedCaptureQuery(values.groupSearchQuery.trim()),
         type: InsightType.CaptureGroup,
-        executionType: InsightExecutionType.Backend,
         step: { [values.step]: +values.stepValue },
-        repositories: values.allRepos ? [] : getSanitizedRepositories(values.repositories),
+        repoQuery: values.repoMode === 'search-query' ? values.repoQuery.query : '',
+        repositories: values.repoMode === 'urls-list' ? values.repositories : [],
+
         filters: {
             includeRepoRegexp: '',
             excludeRepoRegexp: '',
             context: '',
             seriesDisplayOptions: {
-                limit: `${MAX_NUMBER_OF_SERIES}`,
+                limit: null,
+                numSamples: null,
                 sortOptions: {
                     direction: SeriesSortDirection.DESC,
                     mode: SeriesSortMode.RESULT_COUNT,
@@ -29,7 +29,6 @@ export function getSanitizedCaptureGroupInsight(values: CaptureGroupFormFields):
             },
         },
         dashboards: [],
-        seriesDisplayOptions: {},
     }
 }
 

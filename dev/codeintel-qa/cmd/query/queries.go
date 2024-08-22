@@ -18,23 +18,9 @@ func buildQueries() <-chan queryFunc {
 	go func() {
 		defer close(fns)
 
-		for _, testCase := range testCases {
-			// Definition returns defintion
-			fns <- makeTestFunc("def -> def", queryDefinitions, testCase.Definition, []Location{testCase.Definition})
-
-			// References return definition
-			for _, reference := range testCase.References {
-				fns <- makeTestFunc("refs -> def", queryDefinitions, reference, []Location{testCase.Definition})
-			}
-
-			// Definition returns references
-			fns <- makeTestFunc("def -> refs", queryReferences, testCase.Definition, testCase.References)
-
-			// References return references
-			if queryReferencesOfReferences {
-				for _, reference := range testCase.References {
-					fns <- makeTestFunc("refs -> refs", queryReferences, reference, testCase.References)
-				}
+		for _, generator := range testCaseGenerators {
+			for _, testCase := range generator() {
+				fns <- testCase
 			}
 		}
 	}()
@@ -57,6 +43,7 @@ func makeTestFunc(name string, f testFunc, source Location, expectedLocations []
 
 		if checkQueryResult {
 			sortLocations(locations)
+			sortLocations(expectedLocations)
 
 			if allowDirtyInstance {
 				// We allow other upload records to exist on the instance, so we might have

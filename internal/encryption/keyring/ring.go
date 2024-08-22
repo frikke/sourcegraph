@@ -2,11 +2,9 @@ package keyring
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"github.com/sourcegraph/sourcegraph/internal/conf"
-	"github.com/sourcegraph/sourcegraph/internal/conf/conftypes"
 	"github.com/sourcegraph/sourcegraph/internal/encryption"
 	"github.com/sourcegraph/sourcegraph/internal/encryption/awskms"
 	"github.com/sourcegraph/sourcegraph/internal/encryption/cache"
@@ -51,13 +49,6 @@ func Init(ctx context.Context) error {
 		mu.Unlock()
 	}
 
-	conf.ContributeValidator(func(cfg conftypes.SiteConfigQuerier) conf.Problems {
-		if _, err := NewRing(ctx, cfg.SiteConfig().EncryptionKeys); err != nil {
-			return conf.Problems{conf.NewSiteProblem(fmt.Sprintf("Invalid encryption.keys config: %s", err))}
-		}
-		return nil
-	})
-
 	conf.Watch(func() {
 		newConfig := conf.Get().EncryptionKeys
 		if newConfig == config {
@@ -99,8 +90,22 @@ func NewRing(ctx context.Context, keyConfig *schema.EncryptionKeys) (*Ring, erro
 		}
 	}
 
+	if keyConfig.GitHubAppKey != nil {
+		r.GitHubAppKey, err = NewKey(ctx, keyConfig.GitHubAppKey, keyConfig)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if keyConfig.UserExternalAccountKey != nil {
 		r.UserExternalAccountKey, err = NewKey(ctx, keyConfig.UserExternalAccountKey, keyConfig)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if keyConfig.WebhookKey != nil {
+		r.WebhookKey, err = NewKey(ctx, keyConfig.WebhookKey, keyConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -113,14 +118,25 @@ func NewRing(ctx context.Context, keyConfig *schema.EncryptionKeys) (*Ring, erro
 		}
 	}
 
+	if keyConfig.ExecutorSecretKey != nil {
+		r.ExecutorSecretKey, err = NewKey(ctx, keyConfig.ExecutorSecretKey, keyConfig)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &r, nil
 }
 
 type Ring struct {
 	BatchChangesCredentialKey encryption.Key
 	ExternalServiceKey        encryption.Key
+	GitHubAppKey              encryption.Key
+	OutboundWebhookKey        encryption.Key
 	UserExternalAccountKey    encryption.Key
+	WebhookKey                encryption.Key
 	WebhookLogKey             encryption.Key
+	ExecutorSecretKey         encryption.Key
 }
 
 func NewKey(ctx context.Context, k *schema.EncryptionKey, config *schema.EncryptionKeys) (encryption.Key, error) {

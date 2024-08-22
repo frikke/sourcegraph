@@ -1,86 +1,82 @@
-import React from 'react'
+import type { FC } from 'react'
 
-import { Switch, Route, useRouteMatch } from 'react-router'
+import { Routes, Route } from 'react-router-dom'
 
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { useExperimentalFeatures } from '@sourcegraph/shared/src/settings/settings'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import { lazyComponent } from '@sourcegraph/shared/src/util/lazyComponent'
-
-import { AuthenticatedUser } from '../../../../../auth'
-import { useExperimentalFeatures } from '../../../../../stores'
 
 import { InsightCreationPageType } from './InsightCreationPage'
 
 const IntroCreationLazyPage = lazyComponent(() => import('./intro/IntroCreationPage'), 'IntroCreationPage')
 const InsightCreationLazyPage = lazyComponent(() => import('./InsightCreationPage'), 'InsightCreationPage')
 
-interface CreationRoutesProps extends TelemetryProps {
-    /**
-     * Authenticated user info, Used to decide where code insight will appears
-     * in personal dashboard (private) or in organisation dashboard (public)
-     */
-    authenticatedUser: AuthenticatedUser
-}
+interface CreationRoutesProps extends TelemetryProps, TelemetryV2Props {}
 
 /**
  * Code insight sub-router for the creation area/routes.
  * Renders code insights creation routes (insight creation UI pages, creation intro page)
  */
-export const CreationRoutes: React.FunctionComponent<React.PropsWithChildren<CreationRoutesProps>> = props => {
-    const { telemetryService } = props
+export const CreationRoutes: FC<CreationRoutesProps> = props => {
+    const { telemetryService, telemetryRecorder } = props
 
-    const match = useRouteMatch()
-    const { codeInsightsCompute } = useExperimentalFeatures()
+    const codeInsightsCompute = useExperimentalFeatures(settings => settings.codeInsightsCompute)
 
     return (
-        <Switch>
+        <Routes>
             <Route
-                exact={true}
-                path={`${match.url}`}
-                render={() => <IntroCreationLazyPage telemetryService={telemetryService} />}
+                index={true}
+                element={
+                    <IntroCreationLazyPage telemetryService={telemetryService} telemetryRecorder={telemetryRecorder} />
+                }
             />
 
             <Route
-                path={`${match.url}/search`}
-                render={() => (
+                path="search"
+                element={
                     <InsightCreationLazyPage
                         mode={InsightCreationPageType.Search}
                         telemetryService={telemetryService}
+                        telemetryRecorder={telemetryRecorder}
                     />
-                )}
+                }
             />
 
             <Route
-                path={`${match.url}/capture-group`}
-                render={() => (
+                path="capture-group"
+                element={
                     <InsightCreationLazyPage
                         mode={InsightCreationPageType.CaptureGroup}
                         telemetryService={telemetryService}
+                        telemetryRecorder={telemetryRecorder}
                     />
-                )}
+                }
             />
 
             <Route
-                path={`${match.url}/lang-stats`}
-                exact={true}
-                render={() => (
+                path="lang-stats"
+                element={
                     <InsightCreationLazyPage
                         mode={InsightCreationPageType.LangStats}
                         telemetryService={telemetryService}
+                        telemetryRecorder={telemetryRecorder}
                     />
-                )}
+                }
             />
 
             {codeInsightsCompute && (
                 <Route
-                    path={`${match.url}/group-results`}
-                    render={() => (
+                    path="group-results"
+                    element={
                         <InsightCreationLazyPage
                             mode={InsightCreationPageType.Compute}
                             telemetryService={telemetryService}
+                            telemetryRecorder={telemetryRecorder}
                         />
-                    )}
+                    }
                 />
             )}
-        </Switch>
+        </Routes>
     )
 }

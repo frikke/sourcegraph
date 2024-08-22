@@ -1,23 +1,33 @@
 import * as React from 'react'
 
-import classNames from 'classnames'
-import { useLocation } from 'react-router-dom-v5-compat'
+import { mdiArrowLeftBoldBoxOutline } from '@mdi/js'
+import { useLocation } from 'react-router-dom'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { Form } from '@sourcegraph/branded/src/components/Form'
-import { asError, ErrorLike, isErrorLike, logger } from '@sourcegraph/common'
-import { Button, Link, LoadingSpinner, Alert, Text, Input } from '@sourcegraph/wildcard'
+import { asError, type ErrorLike, isErrorLike, logger } from '@sourcegraph/common'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import {
+    Button,
+    Link,
+    LoadingSpinner,
+    Alert,
+    Text,
+    Input,
+    ErrorAlert,
+    Form,
+    Container,
+    Icon,
+} from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../auth'
-import { HeroPage } from '../components/HeroPage'
+import type { AuthenticatedUser } from '../auth'
+import { LoaderButton } from '../components/LoaderButton'
 import { PageTitle } from '../components/PageTitle'
-import { eventLogger } from '../tracking/eventLogger'
+import type { SourcegraphContext } from '../jscontext'
 
-import { SourcegraphIcon } from './icons'
+import { AuthPageWrapper } from './AuthPageWrapper'
 import { PasswordInput } from './SignInSignUpCommon'
 
 import styles from './ResetPasswordPage.module.scss'
-import signInSignUpCommonStyles from './SignInSignUpCommon.module.scss'
 
 interface ResetPasswordInitFormState {
     /** The user's email input value. */
@@ -34,7 +44,7 @@ interface ResetPasswordInitFormState {
  * A form where the user can initiate the reset-password flow. This is the 1st step in the
  * reset-password flow; ResetPasswordCodePage is the 2nd step.
  */
-class ResetPasswordInitForm extends React.PureComponent<{}, ResetPasswordInitFormState> {
+class ResetPasswordInitForm extends React.PureComponent<TelemetryV2Props, ResetPasswordInitFormState> {
     public state: ResetPasswordInitFormState = {
         email: '',
         submitOrError: undefined,
@@ -44,17 +54,12 @@ class ResetPasswordInitForm extends React.PureComponent<{}, ResetPasswordInitFor
         if (this.state.submitOrError === null) {
             return (
                 <>
-                    <div
-                        className={classNames('border rounded p-4 mb-3', signInSignUpCommonStyles.signinSignupForm)}
-                        data-testid="reset-password-page-form"
-                    >
-                        <Text alignment="left" className="mb-0">
-                            Check your email for a link to reset your password.
-                        </Text>
-                    </div>
-                    <span className="form-text text-muted">
+                    <Container className="w-100 mb-3" data-testid="reset-password-page-form">
+                        <Text className="mb-0">Check your email for a link to reset your password.</Text>
+                    </Container>
+                    <Text className="text-center">
                         <Link to="/sign-in">Return to sign in</Link>
-                    </span>
+                    </Text>
                 </>
             )
         }
@@ -64,45 +69,34 @@ class ResetPasswordInitForm extends React.PureComponent<{}, ResetPasswordInitFor
                 {isErrorLike(this.state.submitOrError) && (
                     <ErrorAlert className="mt-2" error={this.state.submitOrError} />
                 )}
-                <Form
-                    className={classNames(
-                        'border rounded p-4 mb-3',
-                        signInSignUpCommonStyles.signinSignupForm,
-                        styles.form
-                    )}
-                    data-testid="reset-password-page-form"
-                    onSubmit={this.handleSubmitResetPasswordInit}
-                >
-                    <Input
-                        onChange={this.onEmailFieldChange}
-                        value={this.state.email}
-                        type="email"
-                        name="email"
-                        autoFocus={true}
-                        spellCheck={false}
-                        required={true}
-                        autoComplete="email"
-                        disabled={this.state.submitOrError === 'loading'}
-                        className="form-group"
-                        label={
-                            <Text className="text-left">
-                                Enter your account email address and we will send you a password reset link
-                            </Text>
-                        }
-                    />
-                    <Button
-                        className="mt-4"
-                        type="submit"
-                        disabled={this.state.submitOrError === 'loading'}
-                        variant="primary"
-                        display="block"
-                    >
-                        {this.state.submitOrError === 'loading' ? <LoadingSpinner /> : 'Send reset password link'}
-                    </Button>
-                </Form>
-                <span className="form-text text-muted">
+                <Container className="w-100 mb-3">
+                    <Form data-testid="reset-password-page-form" onSubmit={this.handleSubmitResetPasswordInit}>
+                        <Input
+                            onChange={this.onEmailFieldChange}
+                            value={this.state.email}
+                            type="email"
+                            name="email"
+                            autoFocus={true}
+                            spellCheck={false}
+                            required={true}
+                            autoComplete="email"
+                            disabled={this.state.submitOrError === 'loading'}
+                            className="form-group"
+                            label="Enter your account email address and we will send you a password reset link"
+                        />
+                        <Button
+                            type="submit"
+                            disabled={this.state.submitOrError === 'loading'}
+                            variant="primary"
+                            display="block"
+                        >
+                            {this.state.submitOrError === 'loading' ? <LoadingSpinner /> : 'Send reset password link'}
+                        </Button>
+                    </Form>
+                </Container>
+                <Text className="text-center">
                     <Link to="/sign-in">Return to sign in</Link>
-                </span>
+                </Text>
             </>
         )
     }
@@ -114,6 +108,7 @@ class ResetPasswordInitForm extends React.PureComponent<{}, ResetPasswordInitFor
     private handleSubmitResetPasswordInit = (event: React.FormEvent<HTMLFormElement>): void => {
         event.preventDefault()
         this.setState({ submitOrError: 'loading' })
+        this.props.telemetryRecorder.recordEvent('auth.resetPassword.init', 'submit')
         fetch('/-/reset-password-init', {
             credentials: 'same-origin',
             method: 'POST',
@@ -144,9 +139,11 @@ class ResetPasswordInitForm extends React.PureComponent<{}, ResetPasswordInitFor
     }
 }
 
-interface ResetPasswordCodeFormProps {
+interface ResetPasswordCodeFormProps extends TelemetryV2Props {
     userID: number
     code: string
+    email: string | null
+    emailVerifyCode: string | null
 }
 
 interface ResetPasswordCodeFormState {
@@ -167,50 +164,48 @@ class ResetPasswordCodeForm extends React.PureComponent<ResetPasswordCodeFormPro
     }
 
     public render(): JSX.Element | null {
+        const { email } = this.props
+
         if (this.state.submitOrError === null) {
             return (
                 <Alert variant="success">
-                    Your password was reset. <Link to="/sign-in">Sign in with your new password</Link> to continue.
+                    Your password was reset. <Link to={`/sign-in?email=${email}`}>Sign in with your new password</Link>{' '}
+                    to continue.
                 </Alert>
             )
         }
 
         return (
             <>
-                {isErrorLike(this.state.submitOrError) && (
-                    <ErrorAlert className="mt-2" error={this.state.submitOrError} />
-                )}
-                <Form
-                    className={classNames(
-                        'border rounded p-4 mb-3',
-                        signInSignUpCommonStyles.signinSignupForm,
-                        styles.form
-                    )}
-                    data-testid="reset-password-page-form"
-                    onSubmit={this.handleSubmitResetPassword}
-                >
-                    <PasswordInput
-                        name="password"
-                        onChange={this.onPasswordFieldChange}
-                        value={this.state.password}
-                        className="form-group"
-                        label={<Text alignment="left">Enter a new password for your account.</Text>}
-                        required={true}
-                        autoFocus={true}
-                        autoComplete="new-password"
-                        placeholder=" "
-                        disabled={this.state.submitOrError === 'loading'}
-                    />
-                    <Button
-                        className="mt-4"
-                        display="block"
-                        type="submit"
-                        disabled={this.state.submitOrError === 'loading'}
-                        variant="primary"
-                    >
-                        {this.state.submitOrError === 'loading' ? <LoadingSpinner /> : 'Reset password'}
-                    </Button>
-                </Form>
+                {isErrorLike(this.state.submitOrError) && <ErrorAlert error={this.state.submitOrError} />}
+                <Container className="w-100">
+                    <Link to="/password-reset">
+                        <Icon className="mr-1" aria-hidden={true} svgPath={mdiArrowLeftBoldBoxOutline} />
+                        Raise request for a different account
+                    </Link>
+                    <Text className="mt-1 text-center text-muted font-weight-bold mb-3">{email}</Text>
+                    <Form data-testid="reset-password-page-form" onSubmit={this.handleSubmitResetPassword}>
+                        <PasswordInput
+                            name="password"
+                            onChange={this.onPasswordFieldChange}
+                            value={this.state.password}
+                            className="form-group"
+                            required={true}
+                            autoFocus={true}
+                            autoComplete="new-password"
+                            placeholder=" "
+                            disabled={this.state.submitOrError === 'loading'}
+                            label="Enter a new password for your account"
+                        />
+                        <LoaderButton
+                            display="block"
+                            type="submit"
+                            variant="primary"
+                            loading={this.state.submitOrError === 'loading'}
+                            label="Reset Password"
+                        />
+                    </Form>
+                </Container>
             </>
         )
     }
@@ -221,6 +216,7 @@ class ResetPasswordCodeForm extends React.PureComponent<ResetPasswordCodeFormPro
 
     private handleSubmitResetPassword = (event: React.FormEvent<HTMLFormElement>): void => {
         event.preventDefault()
+        this.props.telemetryRecorder.recordEvent('auth.resetPassword', 'submit')
         this.setState({ submitOrError: 'loading' })
         fetch('/-/reset-password-code', {
             credentials: 'same-origin',
@@ -233,6 +229,8 @@ class ResetPasswordCodeForm extends React.PureComponent<ResetPasswordCodeFormPro
                 userID: this.props.userID,
                 code: this.props.code,
                 password: this.state.password,
+                email: this.props.email,
+                emailVerifyCode: this.props.emailVerifyCode,
             }),
         })
             .then(async response => {
@@ -248,8 +246,9 @@ class ResetPasswordCodeForm extends React.PureComponent<ResetPasswordCodeFormPro
     }
 }
 
-interface ResetPasswordPageProps {
+interface ResetPasswordPageProps extends TelemetryV2Props {
     authenticatedUser: AuthenticatedUser | null
+    context: Pick<SourcegraphContext, 'xhrHeaders' | 'sourcegraphDotComMode' | 'resetPasswordEnabled'>
 }
 
 /**
@@ -260,24 +259,35 @@ export const ResetPasswordPage: React.FunctionComponent<ResetPasswordPageProps> 
     const location = useLocation()
 
     React.useEffect(() => {
-        eventLogger.logViewEvent('ResetPassword', false)
-    }, [])
+        EVENT_LOGGER.logViewEvent('ResetPassword', false)
+        props.telemetryRecorder.recordEvent('auth.resetPassword', 'view')
+    }, [props.telemetryRecorder])
 
     let body: JSX.Element
     if (props.authenticatedUser) {
         body = <Alert variant="danger">Authenticated users may not perform password reset.</Alert>
-    } else if (window.context.resetPasswordEnabled) {
+    } else if (props.context.resetPasswordEnabled) {
         const searchParameters = new URLSearchParams(location.search)
         if (searchParameters.has('code') || searchParameters.has('userID')) {
             const code = searchParameters.get('code')
             const userID = parseInt(searchParameters.get('userID') || '', 10)
+            const email = searchParameters.get('email')
+            const emailVerifyCode = searchParameters.get('emailVerifyCode')
             if (code && !isNaN(userID)) {
-                body = <ResetPasswordCodeForm code={code} userID={userID} />
+                body = (
+                    <ResetPasswordCodeForm
+                        code={code}
+                        userID={userID}
+                        email={email}
+                        emailVerifyCode={emailVerifyCode}
+                        telemetryRecorder={props.telemetryRecorder}
+                    />
+                )
             } else {
                 body = <Alert variant="danger">The password reset link you followed is invalid.</Alert>
             }
         } else {
-            body = <ResetPasswordInitForm />
+            body = <ResetPasswordInitForm telemetryRecorder={props.telemetryRecorder} />
         }
     } else {
         body = (
@@ -290,13 +300,13 @@ export const ResetPasswordPage: React.FunctionComponent<ResetPasswordPageProps> 
     return (
         <>
             <PageTitle title="Reset your password" />
-            <HeroPage
-                icon={SourcegraphIcon}
-                iconLinkTo={window.context.sourcegraphDotComMode ? '/search' : undefined}
-                iconClassName="bg-transparent"
+            <AuthPageWrapper
                 title="Reset your password"
-                body={<div className={classNames('mt-4', signInSignUpCommonStyles.signinPageContainer)}>{body}</div>}
-            />
+                sourcegraphDotComMode={props.context.sourcegraphDotComMode}
+                className={styles.wrapper}
+            >
+                {body}
+            </AuthPageWrapper>
         </>
     )
 }

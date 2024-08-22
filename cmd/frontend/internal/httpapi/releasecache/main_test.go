@@ -4,12 +4,12 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/dnaeon/go-vcr/cassette"
 	"github.com/dnaeon/go-vcr/recorder"
+	"github.com/grafana/regexp"
 
 	"github.com/sourcegraph/sourcegraph/internal/httpcli"
 	"github.com/sourcegraph/sourcegraph/internal/httptestutil"
@@ -30,10 +30,9 @@ func TestMain(m *testing.M) {
 }
 
 func newClientFactory(t testing.TB, name string) (*httpcli.Factory, func(testing.TB)) {
-	cassette := filepath.Join("testdata", strings.ReplaceAll(name, " ", "-"))
-	rec := newRecorder(t, cassette, update(name))
-	mw := httpcli.NewMiddleware(httpcli.GitHubProxyRedirectMiddleware)
-	return httpcli.NewFactory(mw, httptestutil.NewRecorderOpt(rec)),
+	cassetteName := filepath.Join("testdata", strings.ReplaceAll(name, " ", "-"))
+	rec := newRecorder(t, cassetteName, update(name))
+	return httpcli.NewFactory(httpcli.NewMiddleware(), httptestutil.NewRecorderOpt(rec)),
 		func(t testing.TB) { save(t, rec) }
 }
 

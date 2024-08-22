@@ -1,9 +1,9 @@
 import { useCallback } from 'react'
 
 import { gql, useMutation } from '@sourcegraph/http-client'
-import { FeedbackPromptSubmitEventHandler } from '@sourcegraph/wildcard'
+import type { FeedbackPromptSubmitEventHandler } from '@sourcegraph/wildcard'
 
-import { SubmitHappinessFeedbackResult, SubmitHappinessFeedbackVariables } from '../graphql-operations'
+import type { SubmitHappinessFeedbackResult, SubmitHappinessFeedbackVariables } from '../graphql-operations'
 
 interface UseHandleSubmitFeedbackState {
     handleSubmitFeedback: FeedbackPromptSubmitEventHandler
@@ -31,10 +31,10 @@ export const useHandleSubmitFeedback = ({
     )
 
     const handleSubmitFeedback = useCallback(
-        async (text: string, rating: number) => {
+        async (text: string) => {
             const { data, errors } = await submitFeedback({
                 variables: {
-                    input: { score: rating, feedback: `${textPrefix}${text}`, currentPath: routeMatch },
+                    input: { feedback: `${textPrefix}${text}`, currentPath: routeMatch },
                 },
             })
 

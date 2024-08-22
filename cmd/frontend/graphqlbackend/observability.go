@@ -7,7 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
@@ -25,7 +25,7 @@ func (r *schemaResolver) TriggerObservabilityTestAlert(ctx context.Context, args
 	Level string
 }) (*EmptyResponse, error) {
 	// 🚨 SECURITY: Do not allow arbitrary users to set off alerts.
-	if err := backend.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
+	if err := auth.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
 		return nil, err
 	}
 
@@ -43,10 +43,10 @@ func (r *schemaResolver) TriggerObservabilityTestAlert(ctx context.Context, args
 	metric.With(nil).Set(1)
 
 	// reset the metric after some amount of time
-	go func(m *prometheus.GaugeVec) {
+	go func() {
 		time.Sleep(1 * time.Minute)
-		m.With(nil).Set(0)
-	}(metric)
+		metric.With(nil).Set(0)
+	}()
 
 	return &EmptyResponse{}, nil
 }

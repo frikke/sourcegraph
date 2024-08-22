@@ -4,45 +4,101 @@ import (
 	"context"
 
 	"github.com/graph-gophers/graphql-go"
+	"github.com/graph-gophers/graphql-go/relay"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/database"
-	gql "github.com/sourcegraph/sourcegraph/internal/services/executors/transport/graphql"
+	"github.com/sourcegraph/sourcegraph/internal/gqlutil"
 )
 
-func (r *schemaResolver) Executors(ctx context.Context, args *struct {
+func unmarshalExecutorID(id graphql.ID) (executorID int64, err error) {
+	err = relay.UnmarshalSpec(id, &executorID)
+	return
+}
+
+type ExecutorsListArgs struct {
 	Query  *string
 	Active *bool
-	First  *int32
+	First  int32
 	After  *string
-}) (*gql.ExecutorPaginatedResolver, error) {
+}
+
+func (r *schemaResolver) Executors(ctx context.Context, args ExecutorsListArgs) (*executorConnectionResolver, error) {
 	// 🚨 SECURITY: Only site-admins may view executor details
-	if err := backend.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
+	if err := auth.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
 		return nil, err
 	}
 
-	executors, err := r.CodeIntelResolver.ExecutorResolver().Executors(ctx, args.Query, args.Active, args.First, args.After)
+	offset, err := gqlutil.DecodeIntCursor(args.After)
 	if err != nil {
 		return nil, err
 	}
 
-	return executors, nil
+	var executorConnection *executorConnectionResolver
+	err = r.db.WithTransact(ctx, func(tx database.DB) error {
+		opts := database.ExecutorStoreListOptions{
+			Offset: offset,
+			Limit:  int(args.First),
+		}
+		if args.Query != nil {
+			opts.Query = *args.Query
+		}
+		if args.Active != nil {
+			opts.Active = *args.Active
+		}
+		execs, err := tx.Executors().List(ctx, opts)
+		if err != nil {
+			return err
+		}
+		totalCount, err := tx.Executors().Count(ctx, opts)
+		if err != nil {
+			return err
+		}
+
+		resolvers := make([]*ExecutorResolver, 0, len(execs))
+		for _, executor := range execs {
+			resolvers = append(resolvers, &ExecutorResolver{executor: executor})
+		}
+
+		nextOffset := gqlutil.NextOffset(offset, len(execs), totalCount)
+
+		executorConnection = &executorConnectionResolver{
+			resolvers:  resolvers,
+			totalCount: totalCount,
+			nextOffset: nextOffset,
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return executorConnection, nil
 }
 
 func (r *schemaResolver) AreExecutorsConfigured() bool {
-	return conf.Get().ExecutorsAccessToken != ""
+	return conf.ExecutorsAccessToken() != ""
 }
 
-func executorByID(ctx context.Context, db database.DB, gqlID graphql.ID, r *schemaResolver) (*gql.ExecutorResolver, error) {
-	if err := backend.CheckCurrentUserIsSiteAdmin(ctx, db); err != nil {
+func executorByID(ctx context.Context, db database.DB, gqlID graphql.ID) (*ExecutorResolver, error) {
+	if err := auth.CheckCurrentUserIsSiteAdmin(ctx, db); err != nil {
 		return nil, err
 	}
 
-	executor, err := r.CodeIntelResolver.ExecutorResolver().Executor(ctx, gqlID)
+	id, err := unmarshalExecutorID(gqlID)
 	if err != nil {
 		return nil, err
 	}
 
-	return executor, nil
+	executor, ok, err := db.Executors().GetByID(ctx, int(id))
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	return NewExecutorResolver(executor), nil
 }

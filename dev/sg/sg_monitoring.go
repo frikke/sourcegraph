@@ -2,11 +2,12 @@ package main
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
+	"github.com/grafana/regexp"
 	"github.com/urfave/cli/v2"
 
+	"github.com/sourcegraph/sourcegraph/dev/sg/internal/category"
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/std"
 	"github.com/sourcegraph/sourcegraph/dev/sg/root"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
@@ -18,14 +19,14 @@ import (
 var monitoringCommand = &cli.Command{
 	Name:  "monitoring",
 	Usage: "Sourcegraph's monitoring generator (dashboards, alerts, etc)",
-	Description: `Learn more about the Sourcegraph monitoring generator here: https://docs.sourcegraph.com/dev/background-information/observability/monitoring-generator
+	Description: `Learn more about the Sourcegraph monitoring generator here: https://docs-legacy.sourcegraph.com/dev/background-information/observability/monitoring-generator
 
 Also refer to the generated reference documentation available for site admins:
 
 - https://docs.sourcegraph.com/admin/observability/dashboards
 - https://docs.sourcegraph.com/admin/observability/alerts
 `,
-	Category: CategoryDev,
+	Category: category.Dev,
 	Subcommands: []*cli.Command{
 		monitoringcmd.Generate("sg monitoring", func() string {
 			root, _ := root.RepositoryRoot()
@@ -157,7 +158,7 @@ func dashboardsFromArgs(args cli.Args) (dashboards definitions.Dashboards, err e
 		dashboards = definitions.Default()
 	} else {
 		for _, arg := range args.Slice() {
-			d := definitions.Default().GetByName(args.First())
+			d := definitions.Default().GetByName(arg)
 			if d == nil {
 				return nil, errors.Newf("Dashboard %q not found", arg)
 			}

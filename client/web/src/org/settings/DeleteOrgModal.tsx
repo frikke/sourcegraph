@@ -2,58 +2,62 @@ import React, { useCallback, useEffect, useState } from 'react'
 
 import { gql, useMutation } from '@apollo/client'
 import { mdiClose } from '@mdi/js'
-import { useHistory } from 'react-router'
-import { RouteComponentProps } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
 import { Button, Input, LoadingSpinner, Modal, Icon, H3, Text } from '@sourcegraph/wildcard'
 
-import { eventLogger } from '../../tracking/eventLogger'
-import { OrgAreaPageProps } from '../area/OrgArea'
+import type { OrgAreaRouteContext } from '../area/OrgArea'
 
-interface DeleteOrgModalProps extends OrgAreaPageProps, RouteComponentProps<{}> {
+interface DeleteOrgModalProps extends OrgAreaRouteContext {
     isOpen: boolean
     toggleDeleteModal: () => void
 }
 
-const HARD_DELETE_ORG_MUTATION = gql`
-    mutation DeleteOrganization($organization: ID!, $hard: Boolean) {
-        deleteOrganization(organization: $organization, hard: $hard) {
+const DELETE_ORG_MUTATION = gql`
+    mutation DeleteOrganization($organization: ID!) {
+        deleteOrganization(organization: $organization) {
             alwaysNil
         }
     }
 `
 
+const deleteLabelId = 'deleteOrgId'
+
 export const DeleteOrgModal: React.FunctionComponent<React.PropsWithChildren<DeleteOrgModalProps>> = props => {
-    const { org, isOpen, toggleDeleteModal } = props
-    const deleteLabelId = 'deleteOrgId'
+    const { org, isOpen, toggleDeleteModal, telemetryRecorder } = props
+
+    const navigate = useNavigate()
     const [orgNameInput, setOrgNameInput] = useState('')
     const [orgNamesMatch, setOrgNamesMatch] = useState<boolean>()
-    const history = useHistory()
 
     useEffect(() => {
         setOrgNameInput(orgNameInput)
     }, [setOrgNameInput, orgNameInput])
 
-    const [deleteOrganization, { loading }] = useMutation(HARD_DELETE_ORG_MUTATION)
+    const [deleteOrganization, { loading }] = useMutation(DELETE_ORG_MUTATION)
 
     const onOrgChangeName = useCallback<React.ChangeEventHandler<HTMLInputElement>>(
         event => {
             setOrgNameInput(event.currentTarget.value)
             setOrgNamesMatch(event.currentTarget.value === org.name)
+            telemetryRecorder.recordEvent('org.name', 'change')
         },
-        [org]
+        [org, telemetryRecorder]
     )
 
     const deleteOrg = useCallback(async () => {
         try {
             await deleteOrganization({ variables: { organization: org.id, hard: true } })
-            history.push({
+            telemetryRecorder.recordEvent('org', 'delete')
+            navigate({
                 pathname: '/settings',
             })
         } catch {
-            eventLogger.log('OrgDeletionFailed')
+            EVENT_LOGGER.log('OrgDeletionFailed')
+            telemetryRecorder.recordEvent('org', 'deleteFailed')
         }
-    }, [org, deleteOrganization, history])
+    }, [org, deleteOrganization, navigate, telemetryRecorder])
 
     return (
         <Modal

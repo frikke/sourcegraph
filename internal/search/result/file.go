@@ -3,12 +3,16 @@ package result
 import (
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/sourcegraph/log"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/search/filter"
 	"github.com/sourcegraph/sourcegraph/internal/types"
+	"github.com/sourcegraph/sourcegraph/lib/codeintel/languages"
 )
 
 // File represents all the information we need to identify a file in a repository
@@ -20,20 +24,64 @@ type File struct {
 	Repo     types.MinimalRepo `json:"-"`
 	CommitID api.CommitID      `json:"-"`
 	Path     string
+
+	// A language, as determined by lib/codeintel/languages.
+	// May be empty, indicating a precise language is not known
+	// for this file, in which case we should fall back to
+	// language detection on the file name.
+	PreciseLanguage string
+}
+
+// Languages returns the most likely language for the file.
+// In the case that the file has PreciseLanguage set, it uses that.
+// Otherwise, it falls back to language matching on the path.
+// It will return an empty string in the case language matching fails.
+func (f *File) Languages() []string {
+	if f.PreciseLanguage != "" {
+		return []string{f.PreciseLanguage}
+	}
+
+	// cannot error because it's given a nil content fetcher
+	candidates, _ := languages.GetLanguages(f.Path, nil)
+	return candidates
+}
+
+func (f *File) MostLikelyLanguage() string {
+	if f.PreciseLanguage != "" {
+		return f.PreciseLanguage
+	}
+
+	// cannot error because it's given a nil content fetcher
+	candidates, _ := languages.GetLanguages(f.Path, nil)
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return ""
 }
 
 func (f *File) URL() *url.URL {
-	var path strings.Builder
-	path.Grow(len("/@/-/blob/") + len(f.Repo.Name) + len(f.Path) + 20)
-	path.WriteRune('/')
-	path.WriteString(string(f.Repo.Name))
-	if f.InputRev != nil && len(*f.InputRev) > 0 {
-		path.WriteRune('@')
-		path.WriteString(*f.InputRev)
+	return f.url(false)
+}
+
+func (f *File) URLAtCommit() *url.URL {
+	return f.url(true)
+}
+
+func (f *File) url(atCommit bool) *url.URL {
+	var urlPath strings.Builder
+	urlPath.Grow(len("/@/-/blob/") + len(f.Repo.Name) + len(f.Path) + 20)
+	urlPath.WriteRune('/')
+	urlPath.WriteString(string(f.Repo.Name))
+	if atCommit {
+		urlPath.WriteRune('@')
+		urlPath.WriteString(string(f.CommitID))
+	} else if f.InputRev != nil && len(*f.InputRev) > 0 {
+		urlPath.WriteRune('@')
+		urlPath.WriteString(*f.InputRev)
 	}
-	path.WriteString("/-/blob/")
-	path.WriteString(f.Path)
-	return &url.URL{Path: path.String()}
+	urlPath.WriteString("/-/blob/")
+	urlPath.WriteString(f.Path)
+	return &url.URL{Path: urlPath.String()}
 }
 
 // FileMatch represents either:
@@ -48,6 +96,12 @@ type FileMatch struct {
 	PathMatches  []Range
 
 	LimitHit bool
+
+	// Debug is optionally set with a debug message explaining the result.
+	//
+	// Note: this is a pointer since usually this is unset. Pointer is 8 bytes
+	// vs an empty string which is 16 bytes.
+	Debug *string `json:"-"`
 }
 
 func (fm *FileMatch) RepoName() types.MinimalRepo {
@@ -102,6 +156,7 @@ func (fm *FileMatch) Select(selectPath filter.SelectPath) Match {
 		// Only return file match if line matches exist
 		if len(fm.ChunkMatches) > 0 {
 			fm.Symbols = nil
+			fm.PathMatches = nil
 			return fm
 		}
 		return nil
@@ -111,13 +166,17 @@ func (fm *FileMatch) Select(selectPath filter.SelectPath) Match {
 	return nil
 }
 
-// AppendMatches appends the line matches from src as well as updating match
-// counts and limit.
 func (fm *FileMatch) AppendMatches(src *FileMatch) {
 	// TODO merge hunk matches smartly
 	fm.ChunkMatches = append(fm.ChunkMatches, src.ChunkMatches...)
-	fm.Symbols = append(fm.Symbols, src.Symbols...)
+	fm.mergeSymbols(src)
 	fm.LimitHit = fm.LimitHit || src.LimitHit
+}
+
+func (fm *FileMatch) mergeSymbols(src *FileMatch) {
+	fm.Symbols = append(fm.Symbols, src.Symbols...)
+	slices.SortFunc(fm.Symbols, compareSymbolMatches)
+	fm.Symbols = DedupSymbols(fm.Symbols)
 }
 
 // Limit will mutate fm such that it only has limit results. limit is a number
@@ -195,13 +254,22 @@ type ChunkMatch struct {
 }
 
 // MatchedContent returns the content matched by the ranges in this ChunkMatch.
-func (h ChunkMatch) MatchedContent() []string {
+func (cm ChunkMatch) MatchedContent() []string {
 	// Create a new set of ranges whose offsets are
 	// relative to the start of the content.
-	relRanges := h.Ranges.Sub(h.ContentStart)
+	relRanges := cm.Ranges.Sub(cm.ContentStart)
 	res := make([]string, 0, len(relRanges))
 	for _, rr := range relRanges {
-		res = append(res, h.Content[rr.Start.Offset:rr.End.Offset])
+		// TODO(camdencheek): fix root cause(s).
+		// See https://github.com/sourcegraph/sourcegraph/issues/60605
+		start := rr.Start.Offset
+		end := rr.End.Offset
+		if start > len(cm.Content) || end > len(cm.Content) {
+			log.Scoped("search").Error("matched range out of bounds", log.String("content", cm.Content), log.Int("start", start), log.Int("end", end))
+			start = min(len(cm.Content), start)
+			end = min(len(cm.Content), end)
+		}
+		res = append(res, cm.Content[start:end])
 	}
 	return res
 }
@@ -211,8 +279,8 @@ func (h ChunkMatch) MatchedContent() []string {
 // between lines in a multiline match, but it allows us to keep providing the
 // LineMatch representation for clients without breaking backwards compatibility.
 func (h ChunkMatch) AsLineMatches() []*LineMatch {
-	lines := strings.Split(h.Content, "\n")
-	lineMatches := make([]*LineMatch, len(lines))
+	lines := strings.Split(strings.TrimSuffix(h.Content, "\n"), "\n")
+	lineMatches := make([]*LineMatch, 0, len(lines))
 	for i, line := range lines {
 		lineNumber := h.ContentStart.Line + i
 		offsetAndLengths := [][2]int32{}
@@ -235,10 +303,12 @@ func (h ChunkMatch) AsLineMatches() []*LineMatch {
 				}
 			}
 		}
-		lineMatches[i] = &LineMatch{
-			Preview:          line,
-			LineNumber:       int32(lineNumber),
-			OffsetAndLengths: offsetAndLengths,
+		if len(offsetAndLengths) > 0 {
+			lineMatches = append(lineMatches, &LineMatch{
+				Preview:          line,
+				LineNumber:       int32(lineNumber),
+				OffsetAndLengths: offsetAndLengths,
+			})
 		}
 	}
 	return lineMatches

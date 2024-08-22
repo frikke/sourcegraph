@@ -8,26 +8,27 @@ import (
 )
 
 type operations struct {
-	// LSIF Uploads
-	lsifUploadByID    *observation.Operation
-	lsifUploadsByRepo *observation.Operation
-	deleteLsifUpload  *observation.Operation
-	deleteLsifUploads *observation.Operation
-
-	// Commit Graph
-	commitGraph *observation.Operation
+	codeIntelSummary      *observation.Operation
+	commitGraph           *observation.Operation
+	deletePreciseIndex    *observation.Operation
+	deletePreciseIndexes  *observation.Operation
+	preciseIndexByID      *observation.Operation
+	preciseIndexes        *observation.Operation
+	reindexPreciseIndex   *observation.Operation
+	reindexPreciseIndexes *observation.Operation
+	repositorySummary     *observation.Operation
 }
 
-func newOperations(observationContext *observation.Context) *operations {
+func newOperations(observationCtx *observation.Context) *operations {
 	m := metrics.NewREDMetrics(
-		observationContext.Registerer,
+		observationCtx.Registerer,
 		"codeintel_uploads_transport_graphql",
 		metrics.WithLabels("op"),
 		metrics.WithCountHelp("Total number of method invocations."),
 	)
 
 	op := func(name string) *observation.Operation {
-		return observationContext.Operation(observation.Op{
+		return observationCtx.Operation(observation.Op{
 			Name:              fmt.Sprintf("codeintel.uploads.transport.graphql.%s", name),
 			MetricLabelValues: []string{name},
 			Metrics:           m,
@@ -35,13 +36,14 @@ func newOperations(observationContext *observation.Context) *operations {
 	}
 
 	return &operations{
-		// LSIF Uploads
-		lsifUploadByID:    op("LSIFUploadByID"),
-		lsifUploadsByRepo: op("LSIFUploadsByRepo"),
-		deleteLsifUpload:  op("DeleteLSIFUpload"),
-		deleteLsifUploads: op("DeleteLSIFUploads"),
-
-		// Commit Graph
-		commitGraph: op("CommitGraph"),
+		codeIntelSummary:      op("CodeIntelSummary"),
+		commitGraph:           op("CommitGraph"),
+		deletePreciseIndex:    op("DeletePreciseIndex"),
+		deletePreciseIndexes:  op("DeletePreciseIndexes"),
+		preciseIndexByID:      op("PreciseIndexByID"),
+		preciseIndexes:        op("PreciseIndexes"),
+		reindexPreciseIndex:   op("ReindexPreciseIndex"),
+		reindexPreciseIndexes: op("ReindexPreciseIndexes"),
+		repositorySummary:     op("RepositorySummary"),
 	}
 }

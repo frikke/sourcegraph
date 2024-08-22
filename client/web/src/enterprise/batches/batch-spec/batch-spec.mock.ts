@@ -1,33 +1,47 @@
 import { subDays, subHours, subMinutes } from 'date-fns'
-import { MATCH_ANY_PARAMETERS, MockedResponses, WildcardMockedResponse } from 'wildcard-mock-link'
+import { MATCH_ANY_PARAMETERS, type MockedResponses, type WildcardMockedResponse } from 'wildcard-mock-link'
 
 import { getDocumentNode } from '@sourcegraph/http-client'
-import { BatchSpecSource } from '@sourcegraph/shared/src/schema'
 
 import {
     BatchSpecWorkspaceResolutionState,
-    WorkspaceResolutionStatusResult,
-    BatchSpecImportingChangesetsResult,
-    PreviewBatchSpecImportingChangesetFields,
-    BatchSpecWorkspacesPreviewResult,
-    EditBatchChangeFields,
-    PreviewVisibleBatchSpecWorkspaceFields,
+    type WorkspaceResolutionStatusResult,
+    type BatchSpecImportingChangesetsResult,
+    type PreviewBatchSpecImportingChangesetFields,
+    type BatchSpecWorkspacesPreviewResult,
+    type EditBatchChangeFields,
+    type PreviewVisibleBatchSpecWorkspaceFields,
     BatchSpecState,
     BatchChangeState,
     BatchSpecWorkspaceState,
-    HiddenBatchSpecWorkspaceFields,
+    type HiddenBatchSpecWorkspaceFields,
     ChangesetSpecType,
-    VisibleBatchSpecWorkspaceFields,
-    BatchSpecWorkspaceStepFields,
-    BatchSpecExecutionFields,
-    BatchSpecWorkspacesResult,
+    type VisibleBatchSpecWorkspaceFields,
+    type BatchSpecWorkspaceStepFields,
+    type BatchSpecExecutionFields,
+    type BatchSpecWorkspacesResult,
+    BatchSpecSource,
     ExecutorCompatibility,
 } from '../../../graphql-operations'
 import { EXECUTORS, IMPORTING_CHANGESETS, WORKSPACES, WORKSPACE_RESOLUTION_STATUS } from '../create/backend'
+import { GET_LICENSE_AND_USAGE_INFO } from '../list/backend'
+import { getLicenseAndUsageInfoResult } from '../list/testData'
 
 import helloWorldSample from './edit/library/hello-world.batch.yaml'
 
 const now = new Date()
+
+export const LICENSED_MOCK: WildcardMockedResponse = {
+    request: { query: getDocumentNode(GET_LICENSE_AND_USAGE_INFO), variables: MATCH_ANY_PARAMETERS },
+    result: { data: getLicenseAndUsageInfoResult(true, true) },
+    nMatches: Number.POSITIVE_INFINITY,
+}
+
+export const UNLICENSED_MOCK: WildcardMockedResponse = {
+    request: { query: getDocumentNode(GET_LICENSE_AND_USAGE_INFO), variables: MATCH_ANY_PARAMETERS },
+    result: { data: getLicenseAndUsageInfoResult(false, true) },
+    nMatches: Number.POSITIVE_INFINITY,
+}
 
 export const MOCK_USER_NAMESPACE = {
     __typename: 'User',
@@ -163,6 +177,7 @@ export const mockWorkspaceResolutionStatus = (
         workspaceResolution: {
             __typename: 'BatchSpecWorkspaceResolution',
             state: status,
+            startedAt: new Date().toISOString(),
             failureMessage: error || null,
         },
     },
@@ -222,7 +237,6 @@ export const mockStep = (
     finishedAt: subMinutes(now, 1).toISOString(),
     ifCondition: null,
     number,
-    outputLines: ['stdout: Hello World', 'stdout: '],
     outputVariables: [],
     run: `echo Hello World Step ${number} | tee -a $(find -name README.md)`,
     skipped: false,
@@ -285,16 +299,17 @@ export const mockWorkspace = (
                 __typename: 'ExecutionLogEntry',
             },
         ],
-        srcExec: {
-            command: ['src', 'batch', 'exec', '-f', 'input.json'],
-            durationMilliseconds: null,
-            exitCode: null,
-            key: 'step.src.0',
-            out:
-                'stdout: {"operation":"PREPARING_DOCKER_IMAGES","timestamp":"2022-04-21T06:26:59.055Z","status":"STARTED","metadata":{}}\nstdout: {"operation":"PREPARING_DOCKER_IMAGES","timestamp":"2022-04-21T06:26:59.055Z","status":"PROGRESS","metadata":{"total":1}}\nstdout: {"operation":"PREPARING_DOCKER_IMAGES","timestamp":"2022-04-21T06:26:59.188Z","status":"PROGRESS","metadata":{"done":1,"total":1}}\nstdout: {"operation":"PREPARING_DOCKER_IMAGES","timestamp":"2022-04-21T06:26:59.188Z","status":"SUCCESS","metadata":{}}\nstdout: {"operation":"DETERMINING_WORKSPACE_TYPE","timestamp":"2022-04-21T06:26:59.188Z","status":"STARTED","metadata":{}}\n',
-            startTime: subMinutes(now, 10).toISOString(),
-            __typename: 'ExecutionLogEntry',
-        },
+        srcExec: [
+            {
+                command: ['src', 'batch', 'exec', '-f', 'input.json'],
+                durationMilliseconds: null,
+                exitCode: null,
+                key: 'step.src.batch-exec',
+                out: 'stdout: {"operation":"PREPARING_DOCKER_IMAGES","timestamp":"2022-04-21T06:26:59.055Z","status":"STARTED","metadata":{}}\nstdout: {"operation":"PREPARING_DOCKER_IMAGES","timestamp":"2022-04-21T06:26:59.055Z","status":"PROGRESS","metadata":{"total":1}}\nstdout: {"operation":"PREPARING_DOCKER_IMAGES","timestamp":"2022-04-21T06:26:59.188Z","status":"PROGRESS","metadata":{"done":1,"total":1}}\nstdout: {"operation":"PREPARING_DOCKER_IMAGES","timestamp":"2022-04-21T06:26:59.188Z","status":"SUCCESS","metadata":{}}\nstdout: {"operation":"DETERMINING_WORKSPACE_TYPE","timestamp":"2022-04-21T06:26:59.188Z","status":"STARTED","metadata":{}}\n',
+                startTime: subMinutes(now, 10).toISOString(),
+                __typename: 'ExecutionLogEntry',
+            },
+        ],
         teardown: [],
         ...workspace?.stages,
     },
@@ -312,6 +327,7 @@ export const mockWorkspace = (
         os: 'darwin',
         compatibility: ExecutorCompatibility.UP_TO_DATE,
         queueName: 'batches',
+        queueNames: null,
         srcCliVersion: '3.38.0',
         __typename: 'Executor',
         ...workspace?.executor,
@@ -463,16 +479,19 @@ export const mockImportingChangesets = (
     __typename: 'VisibleChangesetSpec'
 })[] => [...new Array(count).keys()].map(id => mockImportingChangeset(id))
 
-export const mockBatchSpecWorkspaces = (workspacesCount: number): BatchSpecWorkspacesPreviewResult => ({
+export const mockBatchSpecWorkspaces = (
+    workspacesCount: number,
+    totalCount?: number
+): BatchSpecWorkspacesPreviewResult => ({
     node: {
         __typename: 'BatchSpec',
         workspaceResolution: {
             __typename: 'BatchSpecWorkspaceResolution',
             workspaces: {
                 __typename: 'BatchSpecWorkspaceConnection',
-                totalCount: workspacesCount,
+                totalCount: totalCount ?? workspacesCount,
                 pageInfo: {
-                    hasNextPage: workspacesCount > 0,
+                    hasNextPage: !!totalCount,
                     endCursor: 'end-cursor',
                 },
                 nodes: mockPreviewWorkspaces(workspacesCount),
@@ -515,6 +534,7 @@ export const NO_ACTIVE_EXECUTORS_MOCK: WildcardMockedResponse = {
 }
 
 export const UNSTARTED_CONNECTION_MOCKS: MockedResponses = [
+    LICENSED_MOCK,
     {
         request: {
             query: getDocumentNode(WORKSPACES),
@@ -542,6 +562,7 @@ export const UNSTARTED_CONNECTION_MOCKS: MockedResponses = [
 ]
 
 export const UNSTARTED_WITH_CACHE_CONNECTION_MOCKS: MockedResponses = [
+    LICENSED_MOCK,
     {
         request: {
             query: getDocumentNode(WORKSPACES),
@@ -567,3 +588,75 @@ export const UNSTARTED_WITH_CACHE_CONNECTION_MOCKS: MockedResponses = [
         nMatches: Number.POSITIVE_INFINITY,
     },
 ]
+
+export const LARGE_SUCCESS_CONNECTION_MOCKS: MockedResponses = [
+    LICENSED_MOCK,
+    {
+        request: {
+            query: getDocumentNode(WORKSPACES),
+            variables: MATCH_ANY_PARAMETERS,
+        },
+        result: { data: mockBatchSpecWorkspaces(50, 2200) },
+        nMatches: Number.POSITIVE_INFINITY,
+    },
+    {
+        request: {
+            query: getDocumentNode(IMPORTING_CHANGESETS),
+            variables: MATCH_ANY_PARAMETERS,
+        },
+        result: { data: mockBatchSpecImportingChangesets(0) },
+        nMatches: Number.POSITIVE_INFINITY,
+    },
+    {
+        request: {
+            query: getDocumentNode(WORKSPACE_RESOLUTION_STATUS),
+            variables: MATCH_ANY_PARAMETERS,
+        },
+        result: { data: mockWorkspaceResolutionStatus(BatchSpecWorkspaceResolutionState.COMPLETED) },
+        nMatches: Number.POSITIVE_INFINITY,
+    },
+]
+
+const generateMockOutputLines = (start: number, end: number): string[] => {
+    const result: string[] = []
+
+    for (let index = start; index <= end; index++) {
+        result.push(`stdout: Hello world ${index}`)
+    }
+
+    return result
+}
+
+export const WORKSPACE_STEP_OUTPUT_LINES_PAGE_ONE = {
+    node: {
+        __typename: 'VisibleBatchSpecWorkspace',
+        step: {
+            outputLines: {
+                __typename: 'BatchSpecWorkspaceStepOutputLineConnection',
+                nodes: generateMockOutputLines(1, 500),
+                totalCount: 10,
+                pageInfo: {
+                    endCursor: '500',
+                    hasNextPage: true,
+                },
+            },
+        },
+    },
+}
+
+export const WORKSPACE_STEP_OUTPUT_LINES_PAGE_TWO = {
+    node: {
+        __typename: 'VisibleBatchSpecWorkspace',
+        step: {
+            outputLines: {
+                __typename: 'BatchSpecWorkspaceStepOutputLineConnection',
+                nodes: generateMockOutputLines(501, 1000),
+                totalCount: 10,
+                pageInfo: {
+                    endCursor: null,
+                    hasNextPage: false,
+                },
+            },
+        },
+    },
+}

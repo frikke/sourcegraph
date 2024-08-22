@@ -3,22 +3,23 @@ import React from 'react'
 import {
     Tab as ReachTab,
     TabList as ReachTabList,
-    TabListProps as ReachTabListProps,
+    type TabListProps as ReachTabListProps,
     TabPanel as ReachTabPanel,
-    TabPanelProps as ReachTabPanelProps,
+    type TabPanelProps as ReachTabPanelProps,
     TabPanels as ReachTabPanels,
-    TabPanelsProps as ReachTabPanelsProps,
-    TabProps as ReachTabProps,
+    type TabPanelsProps as ReachTabPanelsProps,
+    type TabProps as ReachTabProps,
     Tabs as ReachTabs,
-    TabsProps as ReachTabsProps,
+    type TabsProps as ReachTabsProps,
     useTabsContext,
 } from '@reach/tabs'
 import classNames from 'classnames'
+import { isFunction } from 'lodash'
 
 import { useElementObscuredArea } from '../../hooks'
-import { ForwardReferenceComponent } from '../../types'
+import type { ForwardReferenceComponent } from '../../types'
 
-import { TabPanelIndexContext, TabsState, TabsStateContext, useTabsState } from './context'
+import { TabPanelIndexContext, type TabsState, TabsStateContext, useTabsState } from './context'
 import { useScrollBackToActive } from './useScrollBackToActive'
 import { useShouldPanelRender } from './useShouldPanelRender'
 
@@ -71,7 +72,13 @@ export interface TabProps extends ReachTabProps {}
 
 export interface TabPanelsProps extends ReachTabPanelsProps {}
 
-export interface TabPanelProps extends ReachTabPanelProps {}
+export interface TabPanelContext {
+    shouldRender: boolean
+}
+
+export interface TabPanelProps extends Omit<ReachTabPanelProps, 'children'> {
+    children?: React.ReactNode | ((tabContext: TabPanelContext) => React.ReactNode)
+}
 
 /**
  * reach UI tabs component with steroids, this tabs handles how the data should be loaded
@@ -213,14 +220,14 @@ const TabListPlain = React.forwardRef((props, reference) => {
 >
 
 export const Tab = React.forwardRef((props, reference) => {
-    const { as = 'button', ...reachProps } = props
+    const { as = 'button', className, ...reachProps } = props
     const {
         settings: { size, longTabList },
     } = useTabsState()
 
     return (
         <ReachTab
-            className={classNames(styles[size], longTabList === 'scroll' && styles.tabNowrap)}
+            className={classNames(styles[size], longTabList === 'scroll' && styles.tabNowrap, className)}
             data-testid="wildcard-tab"
             as={as}
             ref={reference}
@@ -247,7 +254,7 @@ export const TabPanel = React.forwardRef((props, reference) => {
     const shouldRender = useShouldPanelRender(children)
     return (
         <ReachTabPanel data-testid="wildcard-tab-panel" as={as} ref={reference} {...reachProps}>
-            {shouldRender ? children : null}
+            {isFunction(children) ? children({ shouldRender }) : shouldRender ? children : null}
         </ReachTabPanel>
     )
 }) as ForwardReferenceComponent<'div', TabPanelProps>

@@ -1,101 +1,80 @@
+import type { MutationTuple, QueryResult } from '@apollo/client'
 import { parse as parseJSONC } from 'jsonc-parser'
-import { Observable } from 'rxjs'
-import { map, tap, mapTo } from 'rxjs/operators'
+import { lastValueFrom, type Observable } from 'rxjs'
+import { map, tap } from 'rxjs/operators'
 
-import { createAggregateError, resetAllMemoizationCaches, repeatUntil } from '@sourcegraph/common'
+import { resetAllMemoizationCaches } from '@sourcegraph/common'
 import {
     createInvalidGraphQLMutationResponseError,
     dataOrThrowErrors,
-    isErrorGraphQLResult,
     gql,
+    useMutation,
+    useQuery,
 } from '@sourcegraph/http-client'
-import * as GQL from '@sourcegraph/shared/src/schema'
-import { Settings } from '@sourcegraph/shared/src/settings/settings'
+import type { Settings } from '@sourcegraph/shared/src/settings/settings'
 
 import { mutateGraphQL, queryGraphQL, requestGraphQL } from '../backend/graphql'
 import {
-    RepositoriesVariables,
-    RepositoriesResult,
-    ExternalServiceKind,
-    UserActivePeriod,
-    OrganizationsResult,
-    OrganizationsVariables,
-    OrganizationsConnectionFields,
+    useShowMorePagination,
+    type UseShowMorePaginationResult,
+} from '../components/FilteredConnection/hooks/useShowMorePagination'
+import type {
+    AllConfigResult,
+    CreateUserResult,
     DeleteOrganizationResult,
     DeleteOrganizationVariables,
-    Scalars,
-    SiteUpdateCheckVariables,
-    SiteUpdateCheckResult,
-    UpdateSiteConfigurationResult,
-    UpdateSiteConfigurationVariables,
-    ReloadSiteResult,
-    ReloadSiteVariables,
-    SetUserIsSiteAdminResult,
-    SetUserIsSiteAdminVariables,
-    InvalidateSessionsByIDResult,
-    InvalidateSessionsByIDVariables,
-    DeleteUserResult,
-    DeleteUserVariables,
-    ScheduleRepositoryPermissionsSyncResult,
-    ScheduleRepositoryPermissionsSyncVariables,
+    DeleteWebhookResult,
+    DeleteWebhookVariables,
+    ExternalServiceKind,
+    FeatureFlagFields,
+    FeatureFlagsResult,
+    FeatureFlagsVariables,
+    GitserverFields,
+    GitserversResult,
+    GitserversVariables,
+    OrganizationsConnectionFields,
+    OrganizationsResult,
+    OrganizationsVariables,
     OutOfBandMigrationFields,
     OutOfBandMigrationsResult,
     OutOfBandMigrationsVariables,
-    SetUserTagResult,
-    SetUserTagVariables,
-    FeatureFlagsResult,
-    FeatureFlagsVariables,
-    FeatureFlagFields,
+    RandomizeUserPasswordResult,
+    ReloadSiteResult,
+    ReloadSiteVariables,
+    Scalars,
+    ScheduleRepositoryPermissionsSyncResult,
+    ScheduleRepositoryPermissionsSyncVariables,
+    SetUserIsSiteAdminResult,
+    SetUserIsSiteAdminVariables,
     SiteAdminAccessTokenConnectionFields,
-    SiteAdminAccessTokensVariables,
     SiteAdminAccessTokensResult,
+    SiteAdminAccessTokensVariables,
+    SiteAdminSettingsCascadeFields,
+    SiteResult,
+    SiteUpdateCheckResult,
+    SiteUpdateCheckVariables,
+    UpdateSiteConfigurationResult,
+    UpdateSiteConfigurationVariables,
+    WebhookByIdResult,
+    WebhookByIdVariables,
+    WebhookFields,
+    WebhookLogFields,
+    WebhookLogsByWebhookIDResult,
+    WebhookLogsByWebhookIDVariables,
+    WebhookPageHeaderResult,
+    WebhookPageHeaderVariables,
+    WebhooksListResult,
+    WebhooksListVariables,
 } from '../graphql-operations'
 import { accessTokenFragment } from '../settings/tokens/AccessTokenNode'
 
-/**
- * Fetches all users.
- */
-export function fetchAllUsers(args: { first?: number; query?: string }): Observable<GQL.IUserConnection> {
-    return queryGraphQL(
-        gql`
-            query Users($first: Int, $query: String) {
-                users(first: $first, query: $query) {
-                    nodes {
-                        id
-                        username
-                        displayName
-                        emails {
-                            email
-                            verified
-                            verificationPending
-                            viewerCanManuallyVerify
-                            isPrimary
-                        }
-                        createdAt
-                        siteAdmin
-                        organizations {
-                            nodes {
-                                name
-                            }
-                        }
-                        tags
-                    }
-                    totalCount
-                }
-            }
-        `,
-        args
-    ).pipe(
-        map(dataOrThrowErrors),
-        map(data => data.users)
-    )
-}
+import { WEBHOOK_LOGS_BY_ID } from './webhooks/backend'
 
 /**
  * Fetches all organizations.
  */
 export function fetchAllOrganizations(args: {
-    first?: number
+    first?: number | null
     query?: string
 }): Observable<OrganizationsConnectionFields> {
     return requestGraphQL<OrganizationsResult, OrganizationsVariables>(
@@ -142,6 +121,11 @@ const mirrorRepositoryInfoFieldsFragment = gql`
         cloned
         cloneInProgress
         updatedAt
+        nextSyncAt
+        isCorrupted
+        corruptionLogs {
+            timestamp
+        }
         lastError
         byteSize
         shard
@@ -160,6 +144,7 @@ const siteAdminRepositoryFieldsFragment = gql`
     ${externalRepositoryFieldsFragment}
 
     fragment SiteAdminRepositoryFields on Repository {
+        __typename
         id
         name
         createdAt
@@ -174,72 +159,148 @@ const siteAdminRepositoryFieldsFragment = gql`
         }
     }
 `
-/**
- * Fetches all repositories.
- *
- * @returns Observable that emits the list of repositories
- */
-function fetchAllRepositories(args: Partial<RepositoriesVariables>): Observable<RepositoriesResult['repositories']> {
-    return requestGraphQL<RepositoriesResult, RepositoriesVariables>(
-        gql`
-            query Repositories(
-                $first: Int
-                $query: String
-                $indexed: Boolean
-                $notIndexed: Boolean
-                $failedFetch: Boolean
-                $cloneStatus: CloneStatus
-            ) {
-                repositories(
-                    first: $first
-                    query: $query
-                    indexed: $indexed
-                    notIndexed: $notIndexed
-                    failedFetch: $failedFetch
-                    cloneStatus: $cloneStatus
-                ) {
-                    nodes {
-                        ...SiteAdminRepositoryFields
-                    }
-                    totalCount(precise: true)
-                    pageInfo {
-                        hasNextPage
-                    }
-                }
+export const REPOSITORIES_QUERY = gql`
+    query Repositories(
+        $first: Int
+        $last: Int
+        $after: String
+        $before: String
+        $query: String = ""
+        $indexed: Boolean = true
+        $notIndexed: Boolean = true
+        $failedFetch: Boolean = false
+        $corrupted: Boolean = false
+        $cloneStatus: CloneStatus = null
+        $orderBy: RepositoryOrderBy = REPOSITORY_NAME
+        $descending: Boolean = false
+        $externalService: ID = null
+    ) {
+        repositories(
+            first: $first
+            last: $last
+            after: $after
+            before: $before
+            query: $query
+            indexed: $indexed
+            notIndexed: $notIndexed
+            failedFetch: $failedFetch
+            corrupted: $corrupted
+            cloneStatus: $cloneStatus
+            orderBy: $orderBy
+            descending: $descending
+            externalService: $externalService
+        ) {
+            nodes {
+                ...SiteAdminRepositoryFields
             }
-
-            ${siteAdminRepositoryFieldsFragment}
-        `,
-        {
-            indexed: args.indexed ?? true,
-            notIndexed: args.notIndexed ?? true,
-            failedFetch: args.failedFetch ?? false,
-            first: args.first ?? null,
-            query: args.query ?? null,
-            cloneStatus: args.cloneStatus ?? null,
+            totalCount
+            pageInfo {
+                hasNextPage
+                hasPreviousPage
+                startCursor
+                endCursor
+            }
         }
-    ).pipe(
-        map(dataOrThrowErrors),
-        map(data => data.repositories)
-    )
-}
+    }
+
+    ${siteAdminRepositoryFieldsFragment}
+`
 
 export const REPO_PAGE_POLL_INTERVAL = 5000
 
-export function fetchAllRepositoriesAndPollIfEmptyOrAnyCloning(
-    args: Partial<RepositoriesVariables>
-): Observable<RepositoriesResult['repositories']> {
-    return fetchAllRepositories(args).pipe(
-        // Poll every 5000ms if repositories are being cloned or the list is empty.
-        repeatUntil(
-            result =>
-                result.nodes &&
-                result.nodes.length > 0 &&
-                result.nodes.every(nodes => !nodes.mirrorInfo.cloneInProgress && nodes.mirrorInfo.cloned),
-            { delay: REPO_PAGE_POLL_INTERVAL }
-        )
-    )
-}
+export const SLOW_REQUESTS = gql`
+    query SlowRequests($after: String) {
+        slowRequests(after: $after) {
+            nodes {
+                index
+                user {
+                    username
+                }
+                start
+                duration
+                name
+                source
+                repository {
+                    name
+                }
+                variables
+                errors
+                query
+                filepath
+            }
+            totalCount
+            pageInfo {
+                endCursor
+                hasNextPage
+            }
+        }
+    }
+`
+
+export const OUTBOUND_REQUESTS = gql`
+    query OutboundRequests($after: String) {
+        outboundRequests(after: $after) {
+            nodes {
+                id
+                startedAt
+                method
+                url
+                requestHeaders {
+                    name
+                    values
+                }
+                requestBody
+                statusCode
+                responseHeaders {
+                    name
+                    values
+                }
+                durationMs
+                errorMessage
+                creationStackFrame
+                callStack
+            }
+        }
+    }
+`
+export const BACKGROUND_JOBS = gql`
+    query BackgroundJobs($recentRunCount: Int) {
+        backgroundJobs(recentRunCount: $recentRunCount) {
+            nodes {
+                name
+
+                routines {
+                    name
+                    type
+                    description
+                    intervalMs
+                    instances {
+                        hostName
+                        lastStartedAt
+                        lastStoppedAt
+                    }
+                    recentRuns {
+                        at
+                        hostName
+                        durationMs
+                        errorMessage
+                    }
+                    stats {
+                        since
+                        runCount
+                        errorCount
+                        minDurationMs
+                        avgDurationMs
+                        maxDurationMs
+                    }
+                }
+            }
+        }
+    }
+`
+
+export const OUTBOUND_REQUESTS_PAGE_POLL_INTERVAL_MS = 5000
+export const BACKGROUND_JOBS_PAGE_POLL_INTERVAL_MS = 5000
 
 export const UPDATE_MIRROR_REPOSITORY = gql`
     mutation UpdateMirrorRepository($repository: ID!) {
@@ -250,43 +311,29 @@ export const UPDATE_MIRROR_REPOSITORY = gql`
 `
 
 export const CHECK_MIRROR_REPOSITORY_CONNECTION = gql`
-    mutation CheckMirrorRepositoryConnection($repository: ID, $name: String) {
-        checkMirrorRepositoryConnection(repository: $repository, name: $name) {
+    mutation CheckMirrorRepositoryConnection($repository: ID!) {
+        checkMirrorRepositoryConnection(repository: $repository) {
             error
         }
     }
 `
 
-export function checkMirrorRepositoryConnection(
-    args:
-        | {
-              repository: Scalars['ID']
-          }
-        | {
-              name: string
-          }
-): Observable<GQL.ICheckMirrorRepositoryConnectionResult> {
-    return mutateGraphQL(CHECK_MIRROR_REPOSITORY_CONNECTION, args).pipe(
-        map(dataOrThrowErrors),
-        tap(() => resetAllMemoizationCaches()),
-        map(data => data.checkMirrorRepositoryConnection)
-    )
-}
-
-export function scheduleRepositoryPermissionsSync(args: { repository: Scalars['ID'] }): Observable<void> {
-    return requestGraphQL<ScheduleRepositoryPermissionsSyncResult, ScheduleRepositoryPermissionsSyncVariables>(
-        gql`
-            mutation ScheduleRepositoryPermissionsSync($repository: ID!) {
-                scheduleRepositoryPermissionsSync(repository: $repository) {
-                    alwaysNil
+export function scheduleRepositoryPermissionsSync(args: { repository: Scalars['ID'] }): Promise<void> {
+    return lastValueFrom(
+        requestGraphQL<ScheduleRepositoryPermissionsSyncResult, ScheduleRepositoryPermissionsSyncVariables>(
+            gql`
+                mutation ScheduleRepositoryPermissionsSync($repository: ID!) {
+                    scheduleRepositoryPermissionsSync(repository: $repository) {
+                        alwaysNil
+                    }
                 }
-            }
-        `,
-        args
-    ).pipe(
-        map(dataOrThrowErrors),
-        tap(() => resetAllMemoizationCaches()),
-        mapTo(undefined)
+            `,
+            args
+        ).pipe(
+            map(dataOrThrowErrors),
+            tap(() => resetAllMemoizationCaches()),
+            map(() => undefined)
+        )
     )
 }
 
@@ -299,87 +346,14 @@ export const RECLONE_REPOSITORY_MUTATION = gql`
 `
 
 /**
- * Fetches usage statistics for all users.
- *
- * @returns Observable that emits the list of users and their usage data
- */
-export function fetchUserUsageStatistics(args: {
-    activePeriod?: UserActivePeriod
-    query?: string
-    first?: number
-}): Observable<GQL.IUserConnection> {
-    return queryGraphQL(
-        gql`
-            query UserUsageStatistics($activePeriod: UserActivePeriod, $query: String, $first: Int) {
-                users(activePeriod: $activePeriod, query: $query, first: $first) {
-                    nodes {
-                        id
-                        username
-                        usageStatistics {
-                            searchQueries
-                            pageViews
-                            codeIntelligenceActions
-                            lastActiveTime
-                            lastActiveCodeHostIntegrationTime
-                        }
-                    }
-                    totalCount
-                }
-            }
-        `,
-        args
-    ).pipe(
-        map(dataOrThrowErrors),
-        map(data => data.users)
-    )
-}
-
-/**
- * Fetches site-wide usage statitics.
- *
- * @returns Observable that emits the list of users and their usage data
- */
-export function fetchSiteUsageStatistics(): Observable<GQL.ISiteUsageStatistics> {
-    return queryGraphQL(gql`
-        query SiteUsageStatistics {
-            site {
-                usageStatistics {
-                    daus {
-                        userCount
-                        registeredUserCount
-                        anonymousUserCount
-                        startTime
-                    }
-                    waus {
-                        userCount
-                        registeredUserCount
-                        anonymousUserCount
-                        startTime
-                    }
-                    maus {
-                        userCount
-                        registeredUserCount
-                        anonymousUserCount
-                        startTime
-                    }
-                }
-            }
-        }
-    `).pipe(
-        map(dataOrThrowErrors),
-        map(data => data.site.usageStatistics)
-    )
-}
-
-/**
  * Fetches the site and its configuration.
- *
  * @returns Observable that emits the site
  */
-export function fetchSite(): Observable<GQL.ISite> {
-    return queryGraphQL(gql`
+export function fetchSite(): Observable<SiteResult['site']> {
+    return queryGraphQL<SiteResult>(gql`
         query Site {
             site {
+                __typename
                 id
                 canReloadSite
                 configuration {
@@ -400,7 +374,7 @@ export function fetchSite(): Observable<GQL.ISite> {
  */
 interface ExternalServiceConfig {}
 
-type SettingsSubject = Pick<GQL.SettingsSubject, 'settingsURL' | '__typename'> & {
+type SettingsSubject = Pick<SiteAdminSettingsCascadeFields['subjects'][number], 'settingsURL' | '__typename'> & {
     contents: Settings
 }
 
@@ -408,7 +382,7 @@ type SettingsSubject = Pick<GQL.SettingsSubject, 'settingsURL' | '__typename'> &
  * All configuration and settings in one place.
  */
 interface AllConfig {
-    site: GQL.ISiteConfiguration
+    site: AllConfigResult['site']
     externalServices: Partial<Record<ExternalServiceKind, ExternalServiceConfig>>
     settings: {
         subjects: SettingsSubject[]
@@ -420,7 +394,7 @@ interface AllConfig {
  * Fetches all the configuration and settings (requires site admin privileges).
  */
 export function fetchAllConfigAndSettings(): Observable<AllConfig> {
-    return queryGraphQL(
+    return queryGraphQL<AllConfigResult>(
         gql`
             query AllConfig($first: Int) {
                 site {
@@ -470,23 +444,22 @@ export function fetchAllConfigAndSettings(): Observable<AllConfig> {
     ).pipe(
         map(dataOrThrowErrors),
         map(data => {
-            const externalServices: Partial<
-                Record<ExternalServiceKind, ExternalServiceConfig[]>
-            > = data.externalServices.nodes
-                .filter(svc => svc.config)
-                .map(svc => [svc.kind, parseJSONC(svc.config) as ExternalServiceConfig] as const)
-                .reduce<Partial<{ [k in ExternalServiceKind]: ExternalServiceConfig[] }>>(
-                    (externalServicesByKind, [kind, config]) => {
-                        let services = externalServicesByKind[kind]
-                        if (!services) {
-                            services = []
-                            externalServicesByKind[kind] = services
-                        }
-                        services.push(config)
-                        return externalServicesByKind
-                    },
-                    {}
-                )
+            const externalServices: Partial<Record<ExternalServiceKind, ExternalServiceConfig[]>> =
+                data.externalServices.nodes
+                    .filter(svc => svc.config)
+                    .map(svc => [svc.kind, parseJSONC(svc.config) as ExternalServiceConfig] as const)
+                    .reduce<Partial<{ [k in ExternalServiceKind]: ExternalServiceConfig[] }>>(
+                        (externalServicesByKind, [kind, config]) => {
+                            let services = externalServicesByKind[kind]
+                            if (!services) {
+                                services = []
+                                externalServicesByKind[kind] = services
+                            }
+                            services.push(config)
+                            return externalServicesByKind
+                        },
+                        {}
+                    )
             const settingsSubjects = data.viewerSettings.subjects.map(settings => ({
                 __typename: settings.__typename,
                 settingsURL: settings.settingsURL,
@@ -509,7 +482,6 @@ export function fetchAllConfigAndSettings(): Observable<AllConfig> {
 
 /**
  * Updates the site's configuration.
- *
  * @returns An observable indicating whether or not a service restart is
  * required for the update to be applied.
  */
@@ -549,44 +521,33 @@ export function reloadSite(): Observable<void> {
     )
 }
 
-export function setUserIsSiteAdmin(userID: Scalars['ID'], siteAdmin: boolean): Observable<void> {
-    return requestGraphQL<SetUserIsSiteAdminResult, SetUserIsSiteAdminVariables>(
-        gql`
-            mutation SetUserIsSiteAdmin($userID: ID!, $siteAdmin: Boolean!) {
-                setUserIsSiteAdmin(userID: $userID, siteAdmin: $siteAdmin) {
-                    alwaysNil
+export function setUserIsSiteAdmin(userID: Scalars['ID'], siteAdmin: boolean): Promise<void> {
+    return lastValueFrom(
+        requestGraphQL<SetUserIsSiteAdminResult, SetUserIsSiteAdminVariables>(
+            gql`
+                mutation SetUserIsSiteAdmin($userID: ID!, $siteAdmin: Boolean!) {
+                    setUserIsSiteAdmin(userID: $userID, siteAdmin: $siteAdmin) {
+                        alwaysNil
+                    }
                 }
-            }
-        `,
-        { userID, siteAdmin }
-    ).pipe(
-        map(dataOrThrowErrors),
-        map(() => undefined)
+            `,
+            { userID, siteAdmin }
+        ).pipe(
+            map(dataOrThrowErrors),
+            map(() => undefined)
+        )
     )
 }
 
-export function invalidateSessionsByID(userID: Scalars['ID']): Observable<void> {
-    return requestGraphQL<InvalidateSessionsByIDResult, InvalidateSessionsByIDVariables>(
-        gql`
-            mutation InvalidateSessionsByID($userID: ID!) {
-                invalidateSessionsByID(userID: $userID) {
-                    alwaysNil
-                }
-            }
-        `,
-        { userID }
-    ).pipe(
-        map(dataOrThrowErrors),
-        map(() => undefined)
-    )
-}
-
-export function randomizeUserPassword(user: Scalars['ID']): Observable<GQL.IRandomizeUserPasswordResult> {
-    return mutateGraphQL(
+export function randomizeUserPassword(
+    user: Scalars['ID']
+): Observable<RandomizeUserPasswordResult['randomizeUserPassword']> {
+    return mutateGraphQL<RandomizeUserPasswordResult>(
         gql`
             mutation RandomizeUserPassword($user: ID!) {
                 randomizeUserPassword(user: $user) {
                     resetPasswordURL
+                    emailSent
                 }
             }
         `,
@@ -597,31 +558,11 @@ export function randomizeUserPassword(user: Scalars['ID']): Observable<GQL.IRand
     )
 }
 
-export function deleteUser(user: Scalars['ID'], hard?: boolean): Observable<void> {
-    return requestGraphQL<DeleteUserResult, DeleteUserVariables>(
+export function createUser(username: string, email: string | undefined): Observable<CreateUserResult['createUser']> {
+    return mutateGraphQL<CreateUserResult>(
         gql`
-            mutation DeleteUser($user: ID!, $hard: Boolean) {
-                deleteUser(user: $user, hard: $hard) {
-                    alwaysNil
-                }
-            }
-        `,
-        { user, hard: hard ?? null }
-    ).pipe(
-        map(dataOrThrowErrors),
-        map(data => {
-            if (!data.deleteUser) {
-                throw createInvalidGraphQLMutationResponseError('DeleteUser')
-            }
-        })
-    )
-}
-
-export function createUser(username: string, email: string | undefined): Observable<GQL.ICreateUserResult> {
-    return mutateGraphQL(
-        gql`
-            mutation CreateUser($username: String!, $email: String) {
-                createUser(username: $username, email: $email) {
+            mutation SiteAdminCreateUser($username: String!, $email: String) {
+                createUser(username: $username, email: $email, verifiedEmail: false) {
                     resetPasswordURL
                 }
             }
@@ -633,38 +574,18 @@ export function createUser(username: string, email: string | undefined): Observa
     )
 }
 
-export function setUserTag(node: string, tag: string, present: boolean = true): Observable<void> {
-    return requestGraphQL<SetUserTagResult, SetUserTagVariables>(
-        gql`
-            mutation SetUserTag($node: ID!, $tag: String!, $present: Boolean!) {
-                setTag(node: $node, tag: $tag, present: $present) {
-                    alwaysNil
+export function deleteOrganization(organization: Scalars['ID']): Promise<void> {
+    return lastValueFrom(
+        requestGraphQL<DeleteOrganizationResult, DeleteOrganizationVariables>(
+            gql`
+                mutation DeleteOrganization($organization: ID!) {
+                    deleteOrganization(organization: $organization) {
+                        alwaysNil
+                    }
                 }
-            }
-        `,
-        { node, tag, present }
-    ).pipe(
-        map(dataOrThrowErrors),
-        map(data => {
-            if (!data.setTag) {
-                throw createInvalidGraphQLMutationResponseError('SetUserTag')
-            }
-        })
-    )
-}
-
-export function deleteOrganization(organization: Scalars['ID'], hard?: boolean): Promise<void> {
-    return requestGraphQL<DeleteOrganizationResult, DeleteOrganizationVariables>(
-        gql`
-            mutation DeleteOrganization($organization: ID!, $hard: Boolean) {
-                deleteOrganization(organization: $organization, hard: $hard) {
-                    alwaysNil
-                }
-            }
-        `,
-        { organization, hard: hard ?? null }
-    )
-        .pipe(
+            `,
+            { organization }
+        ).pipe(
             map(dataOrThrowErrors),
             map(data => {
                 if (!data.deleteOrganization) {
@@ -672,7 +593,7 @@ export function deleteOrganization(organization: Scalars['ID'], hard?: boolean):
                 }
             })
         )
-        .toPromise()
+    )
 }
 
 export const SITE_UPDATE_CHECK = gql`
@@ -697,58 +618,56 @@ export function fetchSiteUpdateCheck(): Observable<SiteUpdateCheckResult['site']
     )
 }
 
-/**
- * Resolves to `false` if prometheus API is unavailable (due to being disabled or not configured in this deployment)
- *
- * @param days number of days of data to fetch
- */
-export function fetchMonitoringStats(days: number): Observable<GQL.IMonitoringStatistics | false> {
-    // more details in /internal/srcprometheus.ErrPrometheusUnavailable
-    const errorPrometheusUnavailable = 'prometheus API is unavailable'
-    return queryGraphQL(
-        gql`
-            query SiteMonitoringStatistics($days: Int!) {
-                site {
-                    monitoringStatistics(days: $days) {
-                        alerts {
-                            serviceName
-                            name
-                            timestamp
-                            average
-                            owner
-                        }
-                    }
+export const SITE_UPGRADE_READINESS = gql`
+    query SiteUpgradeReadiness {
+        site {
+            upgradeReadiness {
+                schemaDrift {
+                    name
+                    problem
+                    solution
+                    diff
+                    statements
+                    urlHint
+                }
+                requiredOutOfBandMigrations {
+                    id
+                    description
                 }
             }
-        `,
-        { days }
-    ).pipe(
-        map(result => {
-            if (isErrorGraphQLResult(result)) {
-                if (result.errors.find(error => error.message.includes(errorPrometheusUnavailable))) {
-                    return false
-                }
-                throw createAggregateError(result.errors)
-            }
-            return result.data
-        }),
-        map(data => {
-            if (data) {
-                return data.site.monitoringStatistics
-            }
-            return data
-        })
-    )
-}
+            autoUpgradeEnabled
+        }
+    }
+`
+export const GET_AUTO_UPGRADE = gql`
+    query AutoUpgradeEnabled {
+        site {
+            autoUpgradeEnabled
+        }
+    }
+`
+
+export const SET_AUTO_UPGRADE = gql`
+    mutation SetAutoUpgrade($enable: Boolean!) {
+        setAutoUpgrade(enable: $enable) {
+            alwaysNil
+        }
+    }
+`
 
 /**
- * Fetches all out-of-band migrations.
+ * Fetches out-of-band migrations.
+ *
+ * If excludeDeprecatedBeforeFirstVersion is true, exclude migrations which have not been deprecated,
+ * or were not deprecated before the Sourcegraph init version.
  */
-export function fetchAllOutOfBandMigrations(): Observable<OutOfBandMigrationFields[]> {
+export function fetchOutOfBandMigrations(
+    excludeDeprecatedBeforeFirstVersion?: boolean
+): Observable<OutOfBandMigrationFields[]> {
     return requestGraphQL<OutOfBandMigrationsResult, OutOfBandMigrationsVariables>(
         gql`
-            query OutOfBandMigrations {
-                outOfBandMigrations {
+            query OutOfBandMigrations($excludeDeprecatedBeforeFirstVersion: Boolean = false) {
+                outOfBandMigrations(ExcludeDeprecatedBeforeFirstVersion: $excludeDeprecatedBeforeFirstVersion) {
                     ...OutOfBandMigrationFields
                 }
             }
@@ -770,7 +689,8 @@ export function fetchAllOutOfBandMigrations(): Observable<OutOfBandMigrationFiel
                     created
                 }
             }
-        `
+        `,
+        { excludeDeprecatedBeforeFirstVersion }
     ).pipe(
         map(dataOrThrowErrors),
         map(data => data.outOfBandMigrations)
@@ -797,6 +717,8 @@ export function fetchFeatureFlags(): Observable<FeatureFlagFields[]> {
                     overrides {
                         ...OverrideFields
                     }
+                    createdAt
+                    updatedAt
                 }
                 ... on FeatureFlagRollout {
                     name
@@ -804,6 +726,8 @@ export function fetchFeatureFlags(): Observable<FeatureFlagFields[]> {
                     overrides {
                         ...OverrideFields
                     }
+                    createdAt
+                    updatedAt
                 }
             }
 
@@ -819,8 +743,8 @@ export function fetchFeatureFlags(): Observable<FeatureFlagFields[]> {
     )
 }
 
-export const REPOSITORY_STATS = gql`
-    query RepositoryStats {
+export const STATUS_AND_REPO_STATS = gql`
+    query StatusAndRepoStats {
         repositoryStats {
             __typename
             total
@@ -828,12 +752,54 @@ export const REPOSITORY_STATS = gql`
             cloned
             cloning
             failedFetch
+            corrupted
             indexed
+        }
+        statusMessages {
+            ... on GitUpdatesDisabled {
+                __typename
+
+                message
+            }
+
+            ... on NoRepositoriesDetected {
+                __typename
+
+                message
+            }
+
+            ... on CloningProgress {
+                __typename
+
+                message
+            }
+
+            ... on IndexingProgress {
+                __typename
+
+                notIndexed
+                indexed
+            }
+
+            ... on SyncError {
+                __typename
+
+                message
+            }
+
+            ... on ExternalServiceSyncError {
+                __typename
+
+                externalService {
+                    id
+                    displayName
+                }
+            }
         }
     }
 `
 
-export function queryAccessTokens(args: { first?: number }): Observable<SiteAdminAccessTokenConnectionFields> {
+export function queryAccessTokens(args: { first?: number | null }): Observable<SiteAdminAccessTokenConnectionFields> {
     return requestGraphQL<SiteAdminAccessTokensResult, SiteAdminAccessTokensVariables>(
         gql`
             query SiteAdminAccessTokens($first: Int) {
@@ -859,4 +825,287 @@ export function queryAccessTokens(args: { first?: number }): Observable<SiteAdmi
         map(dataOrThrowErrors),
         map(data => data.site.accessTokens)
     )
+}
+
+export const SITE_EXTERNAL_SERVICE_CONFIG = gql`
+    query SiteExternalServiceConfig {
+        site {
+            externalServicesFromFile
+            allowEditExternalServicesWithFile
+        }
+    }
+`
+
+const WEBHOOK_FIELDS_FRAGMENT = gql`
+    fragment WebhookFields on Webhook {
+        id
+        uuid
+        url
+        name
+        codeHostKind
+        codeHostURN
+        secret
+        updatedAt
+        createdAt
+        createdBy {
+            username
+            url
+        }
+        updatedBy {
+            username
+            url
+        }
+    }
+`
+
+export const WEBHOOKS = gql`
+    ${WEBHOOK_FIELDS_FRAGMENT}
+
+    query WebhooksList {
+        webhooks {
+            nodes {
+                ...WebhookFields
+            }
+            totalCount
+            pageInfo {
+                hasNextPage
+            }
+        }
+    }
+`
+
+export const WEBHOOK_BY_ID = gql`
+    ${WEBHOOK_FIELDS_FRAGMENT}
+
+    query WebhookById($id: ID!) {
+        node(id: $id) {
+            __typename
+            ...WebhookFields
+        }
+    }
+`
+
+export const WEBHOOK_PAGE_HEADER = gql`
+    query WebhookPageHeader {
+        webhooks {
+            nodes {
+                webhookLogs {
+                    totalCount
+                }
+            }
+        }
+
+        errorsOnly: webhooks {
+            nodes {
+                webhookLogs(onlyErrors: true) {
+                    totalCount
+                }
+            }
+        }
+    }
+`
+
+export const useWebhookPageHeader = (): { loading: boolean; totalErrors: number; totalNoEvents: number } => {
+    const { data, loading } = useQuery<WebhookPageHeaderResult, WebhookPageHeaderVariables>(WEBHOOK_PAGE_HEADER, {})
+    const totalNoEvents = data?.webhooks.nodes.filter(webhook => webhook.webhookLogs?.totalCount === 0).length || 0
+    const totalErrors =
+        data?.errorsOnly.nodes.reduce((sum, webhook) => sum + (webhook.webhookLogs?.totalCount || 0), 0) || 0
+    return { loading, totalErrors, totalNoEvents }
+}
+
+export const useWebhooksConnection = (): UseShowMorePaginationResult<WebhooksListResult, WebhookFields> =>
+    useShowMorePagination<WebhooksListResult, WebhooksListVariables, WebhookFields>({
+        query: WEBHOOKS,
+        variables: {},
+        getConnection: result => {
+            const { webhooks } = dataOrThrowErrors(result)
+            return webhooks
+        },
+    })
+
+export const useWebhookQuery = (id: string): QueryResult<WebhookByIdResult, WebhookByIdVariables> =>
+    useQuery<WebhookByIdResult, WebhookByIdVariables>(WEBHOOK_BY_ID, {
+        variables: { id },
+    })
+
+export const useWebhookLogsConnection = (
+    webhookID: string,
+    onlyErrors: boolean
+): UseShowMorePaginationResult<WebhookLogsByWebhookIDResult, WebhookLogFields> =>
+    useShowMorePagination<WebhookLogsByWebhookIDResult, WebhookLogsByWebhookIDVariables, WebhookLogFields>({
+        query: WEBHOOK_LOGS_BY_ID,
+        variables: {
+            onlyErrors,
+            onlyUnmatched: false,
+            webhookID,
+        },
+        getConnection: result => {
+            const { webhookLogs } = dataOrThrowErrors(result)
+            return webhookLogs
+        },
+        options: {
+            fetchPolicy: 'cache-first',
+        },
+    })
+
+export const CREATE_WEBHOOK_QUERY = gql`
+    mutation CreateWebhook($name: String!, $codeHostKind: String!, $codeHostURN: String!, $secret: String) {
+        createWebhook(name: $name, codeHostKind: $codeHostKind, codeHostURN: $codeHostURN, secret: $secret) {
+            id
+        }
+    }
+`
+
+export const UPDATE_WEBHOOK_QUERY = gql`
+    mutation UpdateWebhook($id: ID!, $name: String!, $codeHostKind: String!, $codeHostURN: String!, $secret: String) {
+        updateWebhook(id: $id, name: $name, codeHostKind: $codeHostKind, codeHostURN: $codeHostURN, secret: $secret) {
+            id
+        }
+    }
+`
+
+export const EXTERNAL_SERVICE_KINDS = gql`
+    query ExternalServiceKinds {
+        externalServices {
+            nodes {
+                kind
+            }
+        }
+    }
+`
+
+const siteAdminPackageFieldsFragment = gql`
+    ${mirrorRepositoryInfoFieldsFragment}
+    ${externalRepositoryFieldsFragment}
+
+    fragment SiteAdminPackageFields on PackageRepoReference {
+        id
+        name
+        kind
+        blocked
+        repository {
+            id
+            name
+            url
+            mirrorInfo {
+                ...MirrorRepositoryInfoFields
+            }
+            externalRepository {
+                ...ExternalRepositoryFields
+            }
+        }
+    }
+`
+
+export const PACKAGES_QUERY = gql`
+    query Packages($kind: PackageRepoReferenceKind = null, $query: String = "", $first: Int, $after: String) {
+        packageRepoReferences(kind: $kind, name: $query, first: $first, after: $after) {
+            nodes {
+                ...SiteAdminPackageFields
+            }
+            totalCount
+            pageInfo {
+                hasNextPage
+                endCursor
+            }
+        }
+    }
+
+    ${siteAdminPackageFieldsFragment}
+`
+
+export const SITE_CONFIGURATION_CHANGE_CONNECTION_QUERY = gql`
+    query SiteConfigurationHistory($first: Int, $last: Int, $after: String, $before: String) {
+        site {
+            __typename
+            configuration {
+                history(first: $first, last: $last, after: $after, before: $before) {
+                    __typename
+                    totalCount
+                    nodes {
+                        __typename
+                        ...SiteConfigurationChangeNode
+                    }
+                    pageInfo {
+                        hasNextPage
+                        hasPreviousPage
+                        endCursor
+                        startCursor
+                    }
+                }
+            }
+        }
+    }
+
+    fragment SiteConfigurationChangeNode on SiteConfigurationChange {
+        id
+        author {
+            id
+            username
+            displayName
+            avatarURL
+        }
+        diff
+        createdAt
+    }
+`
+
+const gitserverFieldsFragment = gql`
+    fragment GitserverFields on GitserverInstance {
+        id
+        address
+        freeDiskSpaceBytes
+        totalDiskSpaceBytes
+    }
+`
+
+export const GITSERVERS = gql`
+    query Gitservers {
+        gitservers {
+            nodes {
+                ...GitserverFields
+            }
+        }
+    }
+
+    ${gitserverFieldsFragment}
+`
+
+export const useGitserversConnection = (): UseShowMorePaginationResult<GitserversResult, GitserverFields> =>
+    useShowMorePagination<GitserversResult, GitserversVariables, GitserverFields>({
+        query: GITSERVERS,
+        variables: {},
+        getConnection: result => {
+            const { gitservers } = dataOrThrowErrors(result)
+            return gitservers
+        },
+    })
+
+export const WEBHOOK_EXTERNAL_SERVICES = gql`
+    query WebhookExternalServices {
+        externalServices {
+            nodes {
+                ...WebhookExternalServiceFields
+            }
+        }
+    }
+
+    fragment WebhookExternalServiceFields on ExternalService {
+        id
+        kind
+        displayName
+        url
+    }
+`
+
+const DELETE_WEBHOOK = gql`
+    mutation DeleteWebhook($id: ID!) {
+        deleteWebhook(id: $id) {
+            alwaysNil
+        }
+    }
+`
+
+export function useDeleteWebhook(): MutationTuple<DeleteWebhookResult, DeleteWebhookVariables> {
+    return useMutation<DeleteWebhookResult, DeleteWebhookVariables>(DELETE_WEBHOOK)
 }

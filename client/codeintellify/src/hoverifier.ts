@@ -8,14 +8,13 @@ import {
     from,
     fromEvent,
     merge,
-    Observable,
+    type Observable,
     of,
     Subject,
-    Subscribable,
-    SubscribableOrPromise,
     Subscription,
     race,
-    MonoTypeOperatorFunction,
+    type MonoTypeOperatorFunction,
+    ObservableInput,
 } from 'rxjs'
 import {
     catchError,
@@ -24,7 +23,6 @@ import {
     filter,
     first,
     map,
-    mapTo,
     observeOn,
     share,
     switchMap,
@@ -37,25 +35,31 @@ import {
 } from 'rxjs/operators'
 import { Key } from 'ts-key-enum'
 
-import { asError, ErrorLike, isErrorLike, logger } from '@sourcegraph/common'
-import { Position, Range } from '@sourcegraph/extension-api-types'
+import { asError, type ErrorLike, isErrorLike, logger } from '@sourcegraph/common'
+import type { Position, Range } from '@sourcegraph/extension-api-types'
 
 import { elementOverlaps, scrollRectangleIntoCenterIfNeeded, toMaybeLoadingProviderResult } from './helpers'
-import { emitLoading, MaybeLoadingResult, LOADING } from './loading'
+import { emitLoading, type MaybeLoadingResult, LOADING } from './loading'
 import { calculateOverlayPosition } from './overlayPosition'
-import { PositionEvent, SupportedMouseEvent } from './positions'
+import type { PositionEvent, SupportedMouseEvent } from './positions'
 import { createObservableStateContainer } from './state'
 import {
     convertNode,
-    DiffPart,
-    DOMFunctions,
+    type DiffPart,
+    type DOMFunctions,
     findElementWithOffset,
     getCodeElementsInRange,
     getTokenAtPositionOrRange,
-    HoveredToken,
+    type HoveredToken,
     shouldTokenize,
 } from './tokenPosition'
-import { HoverAttachment, HoverOverlayProps, isPosition, LineOrPositionOrRange, DocumentHighlight } from './types'
+import {
+    type HoverAttachment,
+    type HoverOverlayProps,
+    isPosition,
+    type LineOrPositionOrRange,
+    type DocumentHighlight,
+} from './types'
 
 const defaultSelectionHighlightClassName = 'selection-highlight'
 const defaultDocumentHighlightClassName = 'sourcegraph-document-highlight'
@@ -69,7 +73,7 @@ export interface HoverifierOptions<C extends object, D, A> {
     /**
      * Emit the HoverOverlay element on this after it was rerendered when its content changed and it needs to be repositioned.
      */
-    hoverOverlayRerenders: Subscribable<{
+    hoverOverlayRerenders: ObservableInput<{
         /**
          * The HoverOverlay element
          */
@@ -83,13 +87,13 @@ export interface HoverifierOptions<C extends object, D, A> {
 
     pinOptions?: {
         /** Emit on this Observable to pin the popover. */
-        pins: Subscribable<void>
+        pins: ObservableInput<void>
 
         /** * Emit on this Observable when the close button in the HoverOverlay was clicked */
-        closeButtonClicks: Subscribable<void>
+        closeButtonClicks: ObservableInput<void>
     }
 
-    hoverOverlayElements: Subscribable<HTMLElement | null>
+    hoverOverlayElements: ObservableInput<HTMLElement | null>
 
     /**
      * Called to get the data to display in the hover.
@@ -193,7 +197,7 @@ export interface AdjustPositionProps<C extends object> {
  *
  * @template C Extra context for the hovered token.
  */
-export type PositionAdjuster<C extends object> = (props: AdjustPositionProps<C>) => SubscribableOrPromise<Position>
+export type PositionAdjuster<C extends object> = (props: AdjustPositionProps<C>) => ObservableInput<Position>
 
 /**
  * HoverifyOptions that need to be included internally with every event
@@ -229,13 +233,13 @@ export interface EventOptions<C extends object> {
  */
 export interface HoverifyOptions<C extends object>
     extends Pick<EventOptions<C>, Exclude<keyof EventOptions<C>, 'codeViewId'>> {
-    positionEvents: Subscribable<PositionEvent>
+    positionEvents: ObservableInput<PositionEvent>
 
     /**
      * Emit on this Observable to trigger the overlay on a position in this code view.
      * This Observable is intended to be used to trigger a Hover after a URL change with a position.
      */
-    positionJumps?: Subscribable<PositionJump>
+    positionJumps?: ObservableInput<PositionJump>
 }
 
 /**
@@ -329,7 +333,7 @@ interface InternalHoverifierState<C extends object, D, A> {
  * The primary purpose of this is to reduce UI jitter by not showing the overlay when there is nothing to show
  * (because there is no content, or because it is still loading).
  */
-const shouldRenderOverlay = (state: InternalHoverifierState<{}, {}, {}>): boolean =>
+const shouldRenderOverlay = <C extends object, D, A>(state: InternalHoverifierState<C, D, A>): boolean =>
     !(!state.pinned && state.mouseIsMoving) &&
     ((!!state.hoverOrError && state.hoverOrError !== LOADING) ||
         (!!state.actionsOrError &&
@@ -382,7 +386,7 @@ export const MOUSEOVER_DELAY = 50
  */
 export type HoverProvider<C extends object, D> = (
     position: HoveredToken & C
-) => Subscribable<MaybeLoadingResult<(HoverAttachment & D) | null>> | PromiseLike<(HoverAttachment & D) | null>
+) => Observable<MaybeLoadingResult<(HoverAttachment & D) | null>> | PromiseLike<(HoverAttachment & D) | null>
 
 /**
  * Function that returns a Subscribable or PromiseLike of the ranges to be highlighted in the document.
@@ -393,13 +397,13 @@ export type HoverProvider<C extends object, D> = (
  */
 export type DocumentHighlightProvider<C extends object> = (
     position: HoveredToken & C
-) => Subscribable<DocumentHighlight[]> | PromiseLike<DocumentHighlight[]>
+) => ObservableInput<DocumentHighlight[]>
 
 /**
  * @template C Extra context for the hovered token.
  * @template A The type of an action.
  */
-export type ActionsProvider<C extends object, A> = (position: HoveredToken & C) => SubscribableOrPromise<A[] | null>
+export type ActionsProvider<C extends object, A> = (position: HoveredToken & C) => ObservableInput<A[] | null>
 
 /**
  * Function responsible for resolving the position of a hovered token
@@ -445,25 +449,28 @@ export function createHoverifier<C extends object, D, A>({
 
     // This keeps the overlay open while the mouse moves over another token on the way to the overlay
 
-    const suppressWhileOverlayShown = <T>(): MonoTypeOperatorFunction<T> => observable =>
-        observable.pipe(
-            withLatestFrom(from(hoverOverlayElements).pipe(startWith(null))),
-            switchMap(([value, overlayElement]) =>
-                overlayElement === null
-                    ? of(value)
-                    : race(
-                          fromEvent(overlayElement, 'mouseover').pipe(mapTo('suppress')),
-                          of('emit').pipe(delay(MOUSEOVER_DELAY))
-                      ).pipe(
-                          filter(action => action === 'emit'),
-                          mapTo(value)
-                      )
+    const suppressWhileOverlayShown =
+        <T>(): MonoTypeOperatorFunction<T> =>
+        observable =>
+            observable.pipe(
+                withLatestFrom(from(hoverOverlayElements).pipe(startWith(null))),
+                switchMap(([value, overlayElement]) =>
+                    overlayElement === null
+                        ? of(value)
+                        : race(
+                              fromEvent(overlayElement, 'mouseover').pipe(map(() => 'suppress')),
+                              of('emit').pipe(delay(MOUSEOVER_DELAY))
+                          ).pipe(
+                              filter(action => action === 'emit'),
+                              map(() => value)
+                          )
+                )
             )
-        )
 
-    const isEventType = <T extends SupportedMouseEvent>(type: T) => (
-        event: MouseEventTrigger
-    ): event is MouseEventTrigger & { eventType: T } => event.eventType === type
+    const isEventType =
+        <T extends SupportedMouseEvent>(type: T) =>
+        (event: MouseEventTrigger): event is MouseEventTrigger & { eventType: T } =>
+            event.eventType === type
     const allCodeMouseMoves = allPositionsFromEvents.pipe(filter(isEventType('mousemove')), suppressWhileOverlayShown())
     const allCodeMouseOvers = allPositionsFromEvents.pipe(filter(isEventType('mouseover')), suppressWhileOverlayShown())
     const allCodeClicks = allPositionsFromEvents.pipe(filter(isEventType('click')))
@@ -736,14 +743,14 @@ export function createHoverifier<C extends object, D, A>({
             scrollEvents.pipe(
                 filter(() => scrollBoundaries.some(elementOverlaps(hoveredTokenElement))),
                 first(),
-                mapTo({
+                map(() => ({
                     ...rest,
                     hoveredTokenElement,
                     pinned: false,
                     hoverOrError: undefined,
                     hoveredToken: undefined,
                     actionsOrError: undefined,
-                })
+                }))
             )
         )
     }
@@ -1041,7 +1048,9 @@ export function createHoverifier<C extends object, D, A>({
     }
 
     // Pin on request.
-    subscription.add(pinOptions?.pins.subscribe(() => container.update({ pinned: true })))
+    if (pinOptions) {
+        subscription.add(from(pinOptions.pins).subscribe(() => container.update({ pinned: true })))
+    }
 
     // Unpin on close, ESC, or click.
     subscription.add(
@@ -1074,7 +1083,7 @@ export function createHoverifier<C extends object, D, A>({
                     // We assume that the first element is always the top most
                     // element and the last element is the bottom most element.
                     const topRectangle = codeElements[0].element.getBoundingClientRect()
-                    const bottomRectangle = codeElements[codeElements.length - 1].element.getBoundingClientRect()
+                    const bottomRectangle = codeElements.at(-1)!.element.getBoundingClientRect()
                     const rectangle = {
                         top: topRectangle.top,
                         bottom: bottomRectangle.bottom,

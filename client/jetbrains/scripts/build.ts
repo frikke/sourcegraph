@@ -4,7 +4,7 @@ import path from 'path'
 import * as esbuild from 'esbuild'
 import { rm } from 'shelljs'
 
-import { packageResolutionPlugin, stylePlugin, workerPlugin, buildTimerPlugin } from '@sourcegraph/build-config'
+import { packageResolutionPlugin, stylePlugin, buildTimerPlugin } from '@sourcegraph/build-config/src/esbuild/plugins'
 
 const rootPath = path.resolve(__dirname, '../../../')
 const jetbrainsWorkspacePath = path.resolve(rootPath, 'client', 'jetbrains')
@@ -18,7 +18,7 @@ export async function build(): Promise<void> {
         rm('-rf', distributionPath)
     }
 
-    await esbuild.build({
+    const ctx = await esbuild.context({
         entryPoints: {
             search: path.resolve(webviewSourcePath, 'search', 'index.tsx'),
             bridgeMock: path.resolve(webviewSourcePath, 'bridge-mock', 'index.ts'),
@@ -35,12 +35,12 @@ export async function build(): Promise<void> {
         inject: ['./scripts/react-shim.js', './scripts/process-shim.js', './scripts/buffer-shim.js'],
         plugins: [
             stylePlugin,
-            workerPlugin,
             packageResolutionPlugin({
                 process: require.resolve('process/browser'),
                 path: require.resolve('path-browserify'),
                 http: require.resolve('stream-http'),
                 https: require.resolve('https-browserify'),
+                url: require.resolve('url'),
                 util: require.resolve('util'),
             }),
             buildTimerPlugin,
@@ -49,11 +49,29 @@ export async function build(): Promise<void> {
             '.ttf': 'file',
         },
         assetNames: '[name]',
-        ignoreAnnotations: true,
-        treeShaking: false,
-        watch: !!process.env.WATCH,
         minify: true,
         sourcemap: true,
         outdir: distributionPath,
+    })
+
+    if (process.env.WATCH) {
+        await ctx.watch()
+    } else {
+        await ctx.rebuild()
+        await ctx.dispose()
+    }
+}
+
+if (require.main === module) {
+    async function main(args: string[]): Promise<void> {
+        if (args.length !== 0) {
+            throw new Error('Usage: (no options)')
+        }
+        await build()
+    }
+    // eslint-disable-next-line unicorn/prefer-top-level-await
+    main(process.argv.slice(2)).catch(error => {
+        console.error(error)
+        process.exit(1)
     })
 }

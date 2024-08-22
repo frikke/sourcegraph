@@ -3,6 +3,7 @@ package query
 import (
 	"testing"
 
+	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,4 +27,33 @@ func TestRepoHasDescription(t *testing.T) {
 	}
 
 	require.Equal(t, want, ps.RepoHasDescription())
+}
+
+func TestRepoHasKVPs(t *testing.T) {
+	ps := Parameters{
+		Parameter{
+			Field:      FieldRepo,
+			Value:      "has(key:value)",
+			Annotation: Annotation{Labels: IsPredicate},
+		},
+		Parameter{
+			Field:      FieldRepo,
+			Value:      "has.tag(tag)",
+			Annotation: Annotation{Labels: IsPredicate},
+		},
+		Parameter{
+			Field:      FieldRepo,
+			Value:      "has.key(key)",
+			Annotation: Annotation{Labels: IsPredicate},
+		},
+	}
+
+	value := types.RegexpPattern("^value$")
+	want := []RepoKVPFilter{
+		{Key: "^key$", Value: &value, Negated: false, KeyOnly: false},
+		{Key: "^tag$", Value: nil, Negated: false, KeyOnly: false},
+		{Key: "^key$", Value: nil, Negated: false, KeyOnly: true},
+	}
+
+	require.Equal(t, want, ps.RepoHasKVPs())
 }

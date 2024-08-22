@@ -6,31 +6,29 @@ import (
 
 	"github.com/sourcegraph/log"
 
-	"github.com/sourcegraph/sourcegraph/internal/actor"
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	uploads "github.com/sourcegraph/sourcegraph/internal/codeintel/uploads"
+	"github.com/sourcegraph/sourcegraph/internal/codeintel/uploads"
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
+	"github.com/sourcegraph/sourcegraph/internal/gitserver"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver/gitdomain"
 	"github.com/sourcegraph/sourcegraph/internal/lazyregexp"
+	"github.com/sourcegraph/sourcegraph/internal/object"
+	"github.com/sourcegraph/sourcegraph/internal/observation"
 	"github.com/sourcegraph/sourcegraph/internal/uploadhandler"
-	"github.com/sourcegraph/sourcegraph/internal/uploadstore"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
-
-type Handler struct {
-	svc        *uploads.Service
-	operations *operations
-}
 
 var revhashPattern = lazyregexp.New(`^[a-z0-9]{40}$`)
 
 func newHandler(
+	observationCtx *observation.Context,
 	repoStore RepoStore,
-	uploadStore uploadstore.Store,
+	gitserverClient gitserver.Client,
+	uploadStore object.Storage,
 	dbStore uploadhandler.DBStore[uploads.UploadMetadata],
 	operations *uploadhandler.Operations,
 ) http.Handler {
-	logger := log.Scoped("UploadHandler", "")
+	logger := log.Scoped("UploadHandler")
 
 	metadataFromRequest := func(ctx context.Context, r *http.Request) (uploads.UploadMetadata, int, error) {
 		commit := getQuery(r, "commit")
@@ -40,9 +38,14 @@ func newHandler(
 
 		// Ensure that the repository and commit given in the request are resolvable.
 		repositoryName := getQuery(r, "repository")
-		repositoryID, statusCode, err := ensureRepoAndCommitExist(ctx, repoStore, repositoryName, commit, logger)
+		repositoryID, statusCode, err := ensureRepoAndCommitExist(ctx, repoStore, gitserverClient, repositoryName, commit, logger)
 		if err != nil {
 			return uploads.UploadMetadata{}, statusCode, err
+		}
+
+		contentType := r.Header.Get("Content-Type")
+		if contentType == "" {
+			contentType = "application/x-ndjson+lsif"
 		}
 
 		// Populate state from request
@@ -53,11 +56,12 @@ func newHandler(
 			Indexer:           getQuery(r, "indexerName"),
 			IndexerVersion:    getQuery(r, "indexerVersion"),
 			AssociatedIndexID: getQueryInt(r, "associatedIndexId"),
+			ContentType:       contentType,
 		}, 0, nil
 	}
 
 	handler := uploadhandler.NewUploadHandler(
-		logger,
+		observationCtx,
 		dbStore,
 		uploadStore,
 		operations,
@@ -67,12 +71,7 @@ func newHandler(
 	return handler
 }
 
-func ensureRepoAndCommitExist(ctx context.Context, repoStore RepoStore, repoName, commit string, logger log.Logger) (int, int, error) {
-	// 🚨 SECURITY: Bypass authz here; we've already determined that the current request is
-	// authorized to view the target repository; they are either a site admin or the code
-	// host has explicit listed them with some level of access (depending on the code host).
-	ctx = actor.WithInternalActor(ctx)
-
+func ensureRepoAndCommitExist(ctx context.Context, repoStore RepoStore, gitserverClient gitserver.Client, repoName, commit string, logger log.Logger) (int, int, error) {
 	//
 	// 1. Resolve repository
 
@@ -88,9 +87,9 @@ func ensureRepoAndCommitExist(ctx context.Context, repoStore RepoStore, repoName
 	//
 	// 2. Resolve commit
 
-	if _, err := repoStore.ResolveRev(ctx, repo, commit); err != nil {
+	if _, err := gitserverClient.ResolveRevision(ctx, repo.Name, commit, gitserver.ResolveRevisionOptions{EnsureRevision: true}); err != nil {
 		var reason string
-		if errors.HasType(err, &gitdomain.RevisionNotFoundError{}) {
+		if errors.HasType[*gitdomain.RevisionNotFoundError](err) {
 			reason = "commit not found"
 		} else if gitdomain.IsCloneInProgress(err) {
 			reason = "repository still cloning"

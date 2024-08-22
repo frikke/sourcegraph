@@ -1,8 +1,11 @@
 import { render } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import sinon from 'sinon'
+import { describe, expect, test } from 'vitest'
 
-import { ActionEditor, ActionEditorProps } from './ActionEditor'
+import { assertAriaDisabled } from '@sourcegraph/testing'
+
+import { ActionEditor, type ActionEditorProps } from './ActionEditor'
 
 describe('ActionEditor', () => {
     const props: ActionEditorProps = {
@@ -84,7 +87,7 @@ describe('ActionEditor', () => {
         userEvent.click(getByTestId('form-action-toggle-email'))
 
         expect(queryByTestId('delete-action-email')).not.toBeInTheDocument()
-        expect(getByTestId('submit-action-email')).toBeDisabled()
+        assertAriaDisabled(getByTestId('submit-action-email'))
     })
 
     test('toggle disable when collapsed', () => {

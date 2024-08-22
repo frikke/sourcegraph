@@ -1,10 +1,12 @@
-import { FC, HTMLAttributes, useEffect, useState } from 'react'
+import { type FC, type HTMLAttributes, useEffect, useState } from 'react'
 
 import { mdiArrowCollapse } from '@mdi/js'
 
-import { SearchAggregationMode, SearchPatternType } from '@sourcegraph/shared/src/schema'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import { Button, H2, Icon, Code, Card, CardBody } from '@sourcegraph/wildcard'
+
+import type { SearchAggregationMode, SearchPatternType } from '../../../../graphql-operations'
 
 import { AggregationLimitLabel, AggregationModeControls } from './components'
 import { AggregationChartCard, getAggregationData } from './components/aggregation-chart-card/AggregationChartCard'
@@ -19,7 +21,7 @@ import { AggregationUIMode } from './types'
 
 import styles from './SearchAggregationResult.module.scss'
 
-interface SearchAggregationResultProps extends TelemetryProps, HTMLAttributes<HTMLElement> {
+interface SearchAggregationResultProps extends TelemetryProps, TelemetryV2Props, HTMLAttributes<HTMLElement> {
     /**
      * Current submitted query, note that this query isn't a live query
      * that is synced with typed query in the search box, this query is submitted
@@ -37,14 +39,24 @@ interface SearchAggregationResultProps extends TelemetryProps, HTMLAttributes<HT
      * That should update the query and re-trigger search (but this should be connected
      * to this UI through its consumer)
      */
-    onQuerySubmit: (newQuery: string) => void
+    onQuerySubmit: (newQuery: string, updatedQuerySearch: string) => void
+}
+
+// Used to map strings to numbers for V2 analytics
+export const V2SearchAggregationModeTypes: { [key in SearchAggregationMode]: number } = {
+    AUTHOR: 1,
+    CAPTURE_GROUP: 2,
+    PATH: 3,
+    REPO: 4,
+    REPO_METADATA: 5,
 }
 
 export const SearchAggregationResult: FC<SearchAggregationResultProps> = props => {
-    const { query, patternType, caseSensitive, onQuerySubmit, telemetryService, ...attributes } = props
+    const { query, patternType, caseSensitive, onQuerySubmit, telemetryService, telemetryRecorder, ...attributes } =
+        props
 
     const [extendedTimeout, setExtendedTimeoutLocal] = useState(false)
-    const [aggregationUIMode, setAggregationUIMode] = useAggregationUIMode()
+    const [, setAggregationUIMode] = useAggregationUIMode()
     const [aggregationMode, setAggregationMode] = useAggregationSearchMode()
     const { data, error, loading } = useSearchAggregationData({
         query,
@@ -53,32 +65,33 @@ export const SearchAggregationResult: FC<SearchAggregationResultProps> = props =
         caseSensitive,
         proactive: true,
         extendedTimeout,
+        telemetryService,
+        telemetryRecorder,
     })
 
     const handleCollapseClick = (): void => {
         setAggregationUIMode(AggregationUIMode.Sidebar)
         telemetryService.log(GroupResultsPing.CollapseFullViewPanel, { aggregationMode }, { aggregationMode })
-    }
-
-    const resetUIMode = (): void => {
-        if (aggregationUIMode !== AggregationUIMode.Sidebar) {
-            setAggregationUIMode(AggregationUIMode.Sidebar)
-        }
+        telemetryRecorder.recordEvent('search.group.results.expandedView', 'collapse', {
+            metadata: { aggregationMode: aggregationMode ? V2SearchAggregationModeTypes[aggregationMode] : 0 },
+        })
     }
 
     const handleBarLinkClick = (query: string, index: number): void => {
         // Clearing the aggregation mode on drill down would provide a better experience
         // in most cases and preserve the desired behavior of the capture group search
         // when the original query had multiple capture groups
-        setAggregationMode(null)
+        const updatedSearchQuery = setAggregationMode(null)
 
-        resetUIMode()
-        onQuerySubmit(query)
+        onQuerySubmit(query, updatedSearchQuery)
         telemetryService.log(
             GroupResultsPing.ChartBarClick,
             { aggregationMode, index, uiMode: 'resultsScreen' },
             { aggregationMode, index, uiMode: 'resultsScreen' }
         )
+        telemetryRecorder.recordEvent('search.group.results.chartBar', 'click', {
+            metadata: { aggregationMode: aggregationMode ? V2SearchAggregationModeTypes[aggregationMode] : 0, index },
+        })
     }
 
     const handleBarHover = (): void => {
@@ -87,6 +100,9 @@ export const SearchAggregationResult: FC<SearchAggregationResultProps> = props =
             { aggregationMode, uiMode: 'resultsScreen' },
             { aggregationMode, uiMode: 'resultsScreen' }
         )
+        telemetryRecorder.recordEvent('search.group.results.chartBar', 'hover', {
+            metadata: { aggregationMode: aggregationMode ? V2SearchAggregationModeTypes[aggregationMode] : 0 },
+        })
     }
 
     const handleAggregationModeChange = (mode: SearchAggregationMode): void => {
@@ -96,6 +112,9 @@ export const SearchAggregationResult: FC<SearchAggregationResultProps> = props =
             { aggregationMode: mode, uiMode: 'resultsScreen' },
             { aggregationMode: mode, uiMode: 'resultsScreen' }
         )
+        telemetryRecorder.recordEvent('search.group.aggregationMode', 'click', {
+            metadata: { aggregationMode: aggregationMode ? V2SearchAggregationModeTypes[aggregationMode] : 0 },
+        })
     }
 
     const handleAggregationModeHover = (aggregationMode: SearchAggregationMode, available: boolean): void => {
@@ -105,6 +124,9 @@ export const SearchAggregationResult: FC<SearchAggregationResultProps> = props =
                 { aggregationMode, uiMode: 'resultsScreen' },
                 { aggregationMode, uiMode: 'resultsScreen' }
             )
+            telemetryRecorder.recordEvent('search.group.aggregationMode', 'hover', {
+                metadata: { aggregationMode: aggregationMode ? V2SearchAggregationModeTypes[aggregationMode] : 0 },
+            })
         }
     }
 
@@ -115,24 +137,24 @@ export const SearchAggregationResult: FC<SearchAggregationResultProps> = props =
 
     return (
         <section {...attributes}>
-            <header className={styles.header}>
-                <H2 className="m-0">Group results by</H2>
-                <Button
-                    variant="secondary"
-                    outline={true}
-                    aria-label="Close aggregation full UI mode"
-                    onClick={handleCollapseClick}
-                >
-                    <Icon aria-hidden={true} className="mr-1" svgPath={mdiArrowCollapse} />
-                    Collapse
-                </Button>
-            </header>
-
-            <span className="text-muted">
-                Aggregation is based on results with no count limitation (<Code>count:all</Code>).
-            </span>
-
             <Card as={CardBody} className={styles.card}>
+                <header className={styles.header}>
+                    <H2 className="m-0">Group results by</H2>
+                    <Button
+                        variant="secondary"
+                        outline={true}
+                        aria-label="Close aggregation full UI mode"
+                        onClick={handleCollapseClick}
+                    >
+                        <Icon aria-hidden={true} className="mr-1" svgPath={mdiArrowCollapse} />
+                        Collapse
+                    </Button>
+                </header>
+
+                <span className="mb-3 text-muted">
+                    Aggregation is based on results with no count limitation (<Code>count:all</Code>).
+                </span>
+
                 <div className={styles.controls}>
                     <AggregationModeControls
                         loading={loading}

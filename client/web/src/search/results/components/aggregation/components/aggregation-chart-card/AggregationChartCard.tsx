@@ -1,16 +1,16 @@
-import { Suspense, HTMLAttributes, ReactElement, MouseEvent } from 'react'
+import { Suspense, type HTMLAttributes, type ReactElement, type MouseEvent } from 'react'
 
 import { mdiPlay } from '@mdi/js'
+import { useDebouncedCallback } from 'use-debounce'
 
-import { ErrorAlert, ErrorMessage } from '@sourcegraph/branded/src/components/alerts'
 import { pluralize } from '@sourcegraph/common'
-import { NotAvailableReasonType, SearchAggregationMode } from '@sourcegraph/shared/src/graphql-operations'
+import { NotAvailableReasonType, type SearchAggregationMode } from '@sourcegraph/shared/src/graphql-operations'
 import { lazyComponent } from '@sourcegraph/shared/src/util/lazyComponent'
-import { Text, Link, Tooltip, Button, Icon } from '@sourcegraph/wildcard'
+import { Text, Link, Tooltip, Button, Icon, ErrorAlert, ErrorMessage } from '@sourcegraph/wildcard'
 
-import { SearchAggregationDatum, GetSearchAggregationResult } from '../../../../../../graphql-operations'
+import type { SearchAggregationDatum, GetSearchAggregationResult } from '../../../../../../graphql-operations'
 
-import { AggregationChartProps, AggregationTextContent, AggregationContent } from './components'
+import { type AggregationChartProps, AggregationTextContent, AggregationContent } from './components'
 
 import styles from './AggregationChartCard.module.scss'
 
@@ -50,23 +50,28 @@ function getAggregationError(
 export function getAggregationData(aggregations: SearchAggregationResult, limit?: number): SearchAggregationDatum[] {
     switch (aggregations?.__typename) {
         case 'ExhaustiveSearchAggregationResult':
-        case 'NonExhaustiveSearchAggregationResult':
+        case 'NonExhaustiveSearchAggregationResult': {
             return limit !== undefined ? aggregations.groups.slice(0, limit) : aggregations.groups
+        }
 
-        default:
+        default: {
             return []
+        }
     }
 }
 
 export function getOtherGroupCount(aggregations: SearchAggregationResult, limit: number): number {
     switch (aggregations?.__typename) {
-        case 'ExhaustiveSearchAggregationResult':
+        case 'ExhaustiveSearchAggregationResult': {
             return (aggregations.otherGroupCount ?? 0) + Math.max(aggregations.groups.length - limit, 0)
-        case 'NonExhaustiveSearchAggregationResult':
+        }
+        case 'NonExhaustiveSearchAggregationResult': {
             return (aggregations.approximateOtherGroupCount ?? 0) + Math.max(aggregations.groups.length - limit, 0)
+        }
 
-        default:
+        default: {
             return 0
+        }
     }
 }
 
@@ -77,8 +82,8 @@ interface AggregationChartCardProps extends HTMLAttributes<HTMLDivElement> {
     mode?: SearchAggregationMode | null
     size?: 'sm' | 'md'
     showLoading?: boolean
+    onBarHover: () => void
     onBarLinkClick?: (query: string, barIndex: number) => void
-    onBarHover?: () => void
     onExtendTimeout: () => void
 }
 
@@ -96,6 +101,8 @@ export function AggregationChartCard(props: AggregationChartCardProps): ReactEle
         onBarHover,
         onExtendTimeout,
     } = props
+
+    const onBarHoverDebounced = useDebouncedCallback(onBarHover, 300)
 
     if (loading) {
         return (
@@ -156,6 +163,10 @@ export function AggregationChartCard(props: AggregationChartCardProps): ReactEle
         onBarLinkClick?.(getLink(datum), index)
     }
 
+    const handleMouseLeave = (): void => {
+        onBarHoverDebounced.cancel()
+    }
+
     return (
         <AggregationContent className={className}>
             <Suspense>
@@ -170,7 +181,8 @@ export function AggregationChartCard(props: AggregationChartCardProps): ReactEle
                     getDatumName={getName}
                     getDatumLink={getLink}
                     onDatumLinkClick={handleDatumLinkClick}
-                    onDatumHover={onBarHover}
+                    onDatumHover={onBarHoverDebounced}
+                    onMouseLeave={handleMouseLeave}
                     className={styles.chart}
                 />
 

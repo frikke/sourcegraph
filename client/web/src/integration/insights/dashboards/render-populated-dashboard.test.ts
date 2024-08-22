@@ -1,12 +1,13 @@
 import assert from 'assert'
 
-import { Page } from 'puppeteer'
+import { beforeEach, describe, it } from 'mocha'
+import type { Page } from 'puppeteer'
 
-import { createDriverForTest, Driver } from '@sourcegraph/shared/src/testing/driver'
+import { createDriverForTest, type Driver } from '@sourcegraph/shared/src/testing/driver'
 import { afterEachSaveScreenshotIfFailed } from '@sourcegraph/shared/src/testing/screenshotReporter'
 
-import { GetInsightViewResult } from '../../../graphql-operations'
-import { createWebIntegrationTestContext, WebIntegrationTestContext } from '../../context'
+import type { GetInsightViewResult } from '../../../graphql-operations'
+import { createWebIntegrationTestContext, type WebIntegrationTestContext } from '../../context'
 import {
     CAPTURE_GROUP_INSIGHT,
     COMPUTE_INSIGHT,
@@ -71,7 +72,9 @@ describe('Code insights populated dashboard', () => {
 
         await driver.page.goto(driver.sourcegraphBaseUrl + '/insights/dashboards/EACH_TYPE_OF_INSIGHT')
 
-        const dashboardSelectButton = await driver.page.waitForSelector('[data-testid="dashboard-select-button"')
+        const dashboardSelectButton = await driver.page.waitForSelector(
+            '[aria-label="Choose a dashboard, Each Type of Insight"]'
+        )
 
         assert(dashboardSelectButton)
 
@@ -88,6 +91,12 @@ describe('Code insights populated dashboard', () => {
             SEARCH_BASED_INSIGHT.presentation.title,
             COMPUTE_INSIGHT.presentation.title,
         ]
+
+        await driver.page.waitForSelector(`[aria-label="${CAPTURE_GROUP_INSIGHT.presentation.title} insight`)
+        await driver.page.waitForSelector(`[aria-label="${LANG_STATS_INSIGHT.presentation.title} insight`)
+        await driver.page.waitForSelector(`[aria-label="${SEARCH_BASED_INSIGHT.presentation.title} insight`)
+        await driver.page.waitForSelector(`[aria-label="${COMPUTE_INSIGHT.presentation.title} insight`)
+
         const foundLinks = await getLinks(driver.page, expectedLinks)
 
         assert.deepStrictEqual(expectedLinks, foundLinks)
@@ -127,7 +136,7 @@ function getInsightViewById(id: string | null): GetInsightViewResult {
         GET_INSIGHT_VIEW_CAPTURE_GROUP_INSIGHT,
         GET_INSIGHT_VIEW_COMPUTE_INSIGHT,
         GET_INSIGHT_VIEW_SEARCH_BASED_INSIGHT,
-    ].find(insight => insight.insightViews.nodes[0].id === id)
+    ].find(insight => insight.insightViews.nodes[0]?.id === id)
 
     if (!insightView) {
         throw new Error(`Insight view with id ${id} not found`)

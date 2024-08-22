@@ -9,8 +9,10 @@ import (
 	"strings"
 
 	"github.com/sourcegraph/log"
+
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/conf/reposource"
+	"github.com/sourcegraph/sourcegraph/internal/dotcom"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc"
 	"github.com/sourcegraph/sourcegraph/internal/httpcli"
 	"github.com/sourcegraph/sourcegraph/internal/jsonc"
@@ -23,17 +25,19 @@ type (
 	// A OtherSource yields repositories from a single Other connection configured
 	// in Sourcegraph via the external services configuration.
 	OtherSource struct {
-		svc    *types.ExternalService
-		conn   *schema.OtherExternalServiceConnection
-		client httpcli.Doer
-		logger log.Logger
+		svc      *types.ExternalService
+		conn     *schema.OtherExternalServiceConnection
+		excluder repoExcluder
+		client   httpcli.Doer
+		logger   log.Logger
 	}
 
 	// A srcExposeItem is the object model returned by src-cli when serving git repos
 	srcExposeItem struct {
-		URI       string `json:"uri"`
-		Name      string `json:"name"`
-		ClonePath string `json:"clonePath"`
+		URI         string `json:"uri"`
+		Name        string `json:"name"`
+		ClonePath   string `json:"clonePath"`
+		AbsFilePath string `json:"absFilePath"`
 	}
 )
 
@@ -57,23 +61,54 @@ func NewOtherSource(ctx context.Context, svc *types.ExternalService, cf *httpcli
 		return nil, err
 	}
 
-	return &OtherSource{svc: svc, conn: &c, client: cli, logger: logger}, nil
+	var ex repoExcluder
+	for _, r := range c.Exclude {
+		ex.AddRule(NewRule().
+			Exact(r.Name).
+			Pattern(r.Pattern))
+	}
+	if err := ex.RuleErrors(); err != nil {
+		return nil, err
+	}
+
+	if dotcom.SourcegraphDotComMode() && c.MakeReposPublicOnDotCom {
+		svc.Unrestricted = true
+	}
+
+	return &OtherSource{
+		svc:      svc,
+		conn:     &c,
+		excluder: ex,
+		client:   cli,
+		logger:   logger,
+	}, nil
+}
+
+// CheckConnection at this point assumes availability and relies on errors returned
+// from the subsequent calls. This is going to be expanded as part of issue #44683
+// to actually only return true if the source can serve requests.
+func (s OtherSource) CheckConnection(ctx context.Context) error {
+	return nil
 }
 
 // ListRepos returns all Other repositories accessible to all connections configured
 // in Sourcegraph via the external services configuration.
 func (s OtherSource) ListRepos(ctx context.Context, results chan SourceResult) {
-	if len(s.conn.Repos) == 1 && (s.conn.Repos[0] == "src-expose" || s.conn.Repos[0] == "src-serve") {
-		repos, err := s.srcExpose(ctx)
-		if err != nil {
-			results <- SourceResult{Source: s, Err: err}
-		}
+	repos, validSrcExposeConfiguration, err := s.srcExpose(ctx)
+	if err != nil {
+		results <- SourceResult{Source: s, Err: err}
+		return
+	}
+
+	if validSrcExposeConfiguration {
 		for _, r := range repos {
 			results <- SourceResult{Source: s, Repo: r}
 		}
 		return
 	}
 
+	// If the current configuration does not define a src expose code host connection
+	// then we utilize cloneURLs
 	urls, err := s.cloneURLs()
 	if err != nil {
 		results <- SourceResult{Source: s, Err: err}
@@ -87,6 +122,10 @@ func (s OtherSource) ListRepos(ctx context.Context, results chan SourceResult) {
 			results <- SourceResult{Source: s, Err: err}
 			return
 		}
+		if s.excludes(r) {
+			continue
+		}
+
 		results <- SourceResult{Source: s, Repo: r}
 	}
 }
@@ -94,6 +133,10 @@ func (s OtherSource) ListRepos(ctx context.Context, results chan SourceResult) {
 // ExternalServices returns a singleton slice containing the external service.
 func (s OtherSource) ExternalServices() types.ExternalServices {
 	return types.ExternalServices{s.svc}
+}
+
+func (s OtherSource) excludes(r *types.Repo) bool {
+	return s.excluder.ShouldExclude(string(r.Name))
 }
 
 func (s OtherSource) cloneURLs() ([]*url.URL, error) {
@@ -159,24 +202,39 @@ func (s OtherSource) otherRepoFromCloneURL(urn string, u *url.URL) (*types.Repo,
 		Metadata: &extsvc.OtherRepoMetadata{
 			RelativePath: strings.TrimPrefix(repoURL, serviceID),
 		},
+		Private: !s.svc.Unrestricted,
 	}, nil
 }
 
-func (s OtherSource) srcExpose(ctx context.Context) ([]*types.Repo, error) {
-	req, err := http.NewRequest("GET", s.conn.Url+"/v1/list-repos", nil)
-	if err != nil {
-		return nil, err
+func (s OtherSource) srcExposeRequest() (req *http.Request, validSrcExpose bool, err error) {
+	srcServe := len(s.conn.Repos) == 1 && (s.conn.Repos[0] == "src-expose" || s.conn.Repos[0] == "src-serve")
+
+	// Certain versions of src-serve accept the directory to discover git repositories within
+	if srcServe {
+		validSrcExpose = true
+		req, err = http.NewRequest("GET", s.conn.Url+"/v1/list-repos", nil)
 	}
+
+	return
+}
+
+func (s OtherSource) srcExpose(ctx context.Context) ([]*types.Repo, bool, error) {
+	req, validSrcExposeConfiguration, err := s.srcExposeRequest()
+	if !validSrcExposeConfiguration || err != nil {
+		// OtherSource configuration not supported for srcExpose
+		return nil, validSrcExposeConfiguration, err
+	}
+
 	req = req.WithContext(ctx)
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, validSrcExposeConfiguration, err
 	}
 	defer resp.Body.Close()
 
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to read response from src-expose")
+		return nil, validSrcExposeConfiguration, errors.Wrap(err, "failed to read response from src-expose")
 	}
 
 	var data struct {
@@ -184,7 +242,7 @@ func (s OtherSource) srcExpose(ctx context.Context) ([]*types.Repo, error) {
 	}
 	err = json.Unmarshal(b, &data)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to decode response from src-expose: %s", string(b))
+		return nil, validSrcExposeConfiguration, errors.Wrapf(err, "failed to decode response from src-expose: %s", string(b))
 	}
 
 	clonePrefix := s.conn.Url
@@ -197,11 +255,12 @@ func (s OtherSource) srcExpose(ctx context.Context) ([]*types.Repo, error) {
 	loggedDeprecationError := false
 	for _, r := range data.Items {
 		repo := &types.Repo{
-			URI: r.URI,
+			URI:     r.URI,
+			Private: !s.svc.Unrestricted,
 		}
 		// The only required fields are URI and ClonePath
 		if r.URI == "" {
-			return nil, errors.Errorf("repo without URI returned from src-expose: %+v", r)
+			return nil, validSrcExposeConfiguration, errors.Errorf("repo without URI returned from src-expose: %+v", r)
 		}
 
 		// ClonePath is always set in the new versions of src-cli.
@@ -233,6 +292,7 @@ func (s OtherSource) srcExpose(ctx context.Context) ([]*types.Repo, error) {
 		}
 		repo.Metadata = &extsvc.OtherRepoMetadata{
 			RelativePath: strings.TrimPrefix(cloneURL, s.conn.Url),
+			AbsFilePath:  r.AbsFilePath,
 		}
 		// The only required field left is Name
 		name := r.Name
@@ -241,8 +301,13 @@ func (s OtherSource) srcExpose(ctx context.Context) ([]*types.Repo, error) {
 		}
 		// Remove any trailing .git in the name if exists (bare repos)
 		repo.Name = api.RepoName(strings.TrimSuffix(name, ".git"))
+
+		if s.excludes(repo) {
+			continue
+		}
+
 		repos = append(repos, repo)
 	}
 
-	return repos, nil
+	return repos, validSrcExposeConfiguration, nil
 }

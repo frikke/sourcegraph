@@ -1,17 +1,17 @@
 import { useState } from 'react'
 
-import { MockedResponse } from '@apollo/client/testing/core/mocking/mockLink'
-import { Meta, Story } from '@storybook/react'
+import type { MockedResponse } from '@apollo/client/testing/core/mocking/mockLink'
+import type { Meta, StoryFn } from '@storybook/react'
 
 import { MockedTestProvider } from '@sourcegraph/shared/src/testing/apollo'
 
 import { WebStory } from '../../../../../../../../../components/WebStory'
 import {
-    GetSearchContextsResult,
+    type GetSearchContextsResult,
     SeriesSortDirection,
     SeriesSortMode,
 } from '../../../../../../../../../graphql-operations'
-import { InsightFilters } from '../../../../../../../core'
+import type { InsightFilters } from '../../../../../../../core'
 import { SEARCH_CONTEXT_GQL } from '../search-context/DrillDownSearchContextFilter'
 
 import { DrillDownInsightFilters, FilterSectionVisualMode } from './DrillDownInsightFilters'
@@ -87,7 +87,8 @@ const ORIGINAL_FILTERS: InsightFilters = {
     excludeRepoRegexp: '',
     context: '',
     seriesDisplayOptions: {
-        limit: '20',
+        limit: 20,
+        numSamples: null,
         sortOptions: {
             direction: SeriesSortDirection.DESC,
             mode: SeriesSortMode.RESULT_COUNT,
@@ -100,7 +101,8 @@ const FILTERS: InsightFilters = {
     excludeRepoRegexp: 'hello world loooong loooooooooooooong repo filter regular expressssssion',
     context: '',
     seriesDisplayOptions: {
-        limit: '20',
+        limit: 20,
+        numSamples: null,
         sortOptions: {
             direction: SeriesSortDirection.DESC,
             mode: SeriesSortMode.RESULT_COUNT,
@@ -108,11 +110,12 @@ const FILTERS: InsightFilters = {
     },
 }
 
-export const DrillDownFiltersShowcase: Story = () => (
+export const DrillDownFiltersShowcase: StoryFn = () => (
     <MockedTestProvider mocks={[CONTEXTS_GQL_MOCKS]}>
         <DrillDownInsightFilters
             initialValues={FILTERS}
             originalValues={ORIGINAL_FILTERS}
+            isNumSamplesFilterAvailable={true}
             visualMode={FilterSectionVisualMode.CollapseSections}
             onFiltersChange={console.log}
             onFilterSave={console.log}
@@ -121,7 +124,7 @@ export const DrillDownFiltersShowcase: Story = () => (
     </MockedTestProvider>
 )
 
-export const DrillDownFiltersHorizontalMode: Story = () => {
+export const DrillDownFiltersHorizontalMode: StoryFn = () => {
     const [mode, setMode] = useState<FilterSectionVisualMode>(FilterSectionVisualMode.HorizontalSections)
 
     return (
@@ -129,6 +132,7 @@ export const DrillDownFiltersHorizontalMode: Story = () => {
             <DrillDownInsightFilters
                 initialValues={FILTERS}
                 originalValues={ORIGINAL_FILTERS}
+                isNumSamplesFilterAvailable={true}
                 visualMode={mode}
                 onVisualModeChange={setMode}
                 onFiltersChange={console.log}

@@ -1,13 +1,13 @@
 /* eslint-disable jsdoc/check-param-names */
-import { Observable, of } from 'rxjs'
+import { type Observable, of } from 'rxjs'
 
 import * as sourcegraph from './api'
 import * as indicators from './indicators'
-import { LanguageSpec } from './language-specs/language-spec'
-import { Logger, NoopLogger } from './logging'
+import type { LanguageSpec } from './language-specs/language-spec'
+import { type Logger, NoopLogger } from './logging'
 import { createProviders as createLSIFProviders } from './lsif/providers'
 import { createProviders as createSearchProviders } from './search/providers'
-import { TelemetryEmitter } from './telemetry'
+import { type CodeIntelActions, TelemetryEmitter } from './telemetry'
 import { API } from './util/api'
 import { asArray, mapArrayish, nonEmpty } from './util/helpers'
 import { noopAsyncGenerator, observableFromAsyncIterator } from './util/ix'
@@ -233,7 +233,7 @@ export function createDefinitionProvider(
             textDocument: sourcegraph.TextDocument,
             position: sourcegraph.Position
         ): AsyncGenerator<sourcegraph.Definition | undefined, void, undefined> {
-            const { repo } = parseGitURI(new URL(textDocument.uri))
+            const { repo } = parseGitURI(textDocument.uri)
             const repoId = (await api.resolveRepo(repo)).id
             const emitter = new TelemetryEmitter(languageID, repoId, !quiet)
             const commonFields = { provider: 'definition', repo, textDocument, position, emitter, logger }
@@ -324,7 +324,7 @@ export function createReferencesProvider(
             position: sourcegraph.Position,
             context: sourcegraph.ReferenceContext
         ): AsyncGenerator<sourcegraph.Location[] | null, void, undefined> {
-            const { repo } = parseGitURI(new URL(textDocument.uri))
+            const { repo } = parseGitURI(textDocument.uri)
             const repoId = (await api.resolveRepo(repo)).id
             const emitter = new TelemetryEmitter(languageID, repoId)
             const commonFields = { repo, textDocument, position, emitter, logger, provider: 'references' }
@@ -432,7 +432,7 @@ export function createImplementationsProvider(
             textDocument: sourcegraph.TextDocument,
             position: sourcegraph.Position
         ): AsyncGenerator<sourcegraph.Location[] | null, void, undefined> {
-            const { repo } = parseGitURI(new URL(textDocument.uri))
+            const { repo } = parseGitURI(textDocument.uri)
             const repoId = (await api.resolveRepo(repo)).id
             const emitter = new TelemetryEmitter(languageID, repoId)
             const commonFields = { repo, textDocument, position, emitter, logger, provider: 'implementations' }
@@ -465,7 +465,7 @@ function logLocationResults<T extends sourcegraph.Badged<sourcegraph.Location>, 
     logger,
 }: {
     provider: string
-    action: string
+    action: CodeIntelActions
     repo: string
     textDocument: sourcegraph.TextDocument
     position: sourcegraph.Position
@@ -473,11 +473,11 @@ function logLocationResults<T extends sourcegraph.Badged<sourcegraph.Location>, 
     emitter?: TelemetryEmitter
     logger?: Logger
 }): void {
-    emitter?.emitOnce(action)
+    emitter?.emitOnce(false, action)
 
     // Emit xrepo event if we contain a result from another repository
-    if (asArray(results).some(location => parseGitURI(location.uri).repo !== repo)) {
-        emitter?.emitOnce(action + '.xrepo')
+    if (asArray(results).some(location => parseGitURI(location.uri.toString()).repo !== repo)) {
+        emitter?.emitOnce(true, action)
     }
 
     if (logger) {
@@ -492,7 +492,7 @@ function logLocationResults<T extends sourcegraph.Badged<sourcegraph.Location>, 
             arrayResults = arrayResults.slice(0, 500)
         }
 
-        const { path } = parseGitURI(new URL(textDocument.uri))
+        const { path } = parseGitURI(textDocument.uri)
         const { line, character } = position
 
         logger.log({
@@ -533,7 +533,7 @@ export function createHoverProvider(
             textDocument: sourcegraph.TextDocument,
             position: sourcegraph.Position
         ): AsyncGenerator<sourcegraph.Badged<sourcegraph.Hover> | null | undefined, void, undefined> {
-            const { repo, path } = parseGitURI(new URL(textDocument.uri))
+            const { repo, path } = parseGitURI(textDocument.uri)
             const repoId = (await api.resolveRepo(repo)).id
             const emitter = new TelemetryEmitter(languageID, repoId)
             const commonLogFields = { path, line: position.line, character: position.character }
@@ -555,7 +555,7 @@ export function createHoverProvider(
                     }
                 }
 
-                emitter.emitOnce('lsifHover')
+                emitter.emitOnce(false, 'lsifHover')
                 logger?.log({ provider: 'hover', precise: true, ...commonLogFields })
                 yield badgeHoverResult(
                     lsifWrapper.hover,
@@ -582,6 +582,7 @@ export function createHoverProvider(
                     continue
                 }
 
+                emitter.emitOnce(false, 'searchHover')
                 logger?.log({ provider: 'hover', precise: false, ...commonLogFields })
 
                 if (hasPreciseDefinition) {
@@ -625,7 +626,7 @@ export function createDocumentHighlightProvider(
             textDocument: sourcegraph.TextDocument,
             position: sourcegraph.Position
         ): AsyncGenerator<sourcegraph.DocumentHighlight[] | null | undefined, void, undefined> {
-            const { repo } = parseGitURI(new URL(textDocument.uri))
+            const { repo } = parseGitURI(textDocument.uri)
             const repoId = (await api.resolveRepo(repo)).id
             const emitter = new TelemetryEmitter(languageID, repoId)
 
@@ -633,14 +634,14 @@ export function createDocumentHighlightProvider(
 
             for await (const lsifResult of lsifProvider(textDocument, position)) {
                 if (lsifResult) {
-                    emitter.emitOnce('lsifDocumentHighlight')
+                    emitter.emitOnce(false, 'lsifDocumentHighlight')
                     yield lsifResult
                     hasLsifResults = true
                 }
             }
 
             if (!hasLsifResults) {
-                emitter.emitOnce('searchDocumentHighlight')
+                emitter.emitOnce(false, 'searchDocumentHighlight')
                 for await (const searchResult of searchProvider(textDocument, position)) {
                     if (searchResult) {
                         yield searchResult

@@ -3,25 +3,27 @@ package auth
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"testing"
 
-	"github.com/davecgh/go-spew/spew"
-	"github.com/sergi/go-diff/diffmatchpatch"
+	mockrequire "github.com/derision-test/go-mockgen/v2/testutil/require"
+	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/sourcegraph/log"
+	"github.com/sourcegraph/log/logtest"
+
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/auth/userpasswd"
 	"github.com/sourcegraph/sourcegraph/internal/actor"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/database/dbmocks"
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc"
+	"github.com/sourcegraph/sourcegraph/internal/telemetry/telemetrytest"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
-
-func init() {
-	spew.Config.DisablePointerAddresses = true
-	spew.Config.SortKeys = true
-	spew.Config.SpewKeys = true
-}
 
 // TestGetAndSaveUser ensures the correctness of the GetAndSaveUser function.
 //
@@ -37,15 +39,17 @@ func TestGetAndSaveUser(t *testing.T) {
 		createIfNotExistIrrelevant bool
 
 		// expected return values
-		expUserID  int32
-		expSafeErr string
-		expErr     error
+		expUserID         int32
+		expSafeErr        string
+		expErr            error
+		expNewUserCreated bool
 
 		// expected side effects
 		expSavedExtAccts                 map[int32][]extsvc.AccountSpec
 		expUpdatedUsers                  map[int32][]database.UserUpdate
 		expCreatedUsers                  map[int32]database.NewUser
 		expCalledGrantPendingPermissions bool
+		expCalledCreateUserSyncJob       bool
 	}
 	type outerCase struct {
 		description string
@@ -71,6 +75,13 @@ func TestGetAndSaveUser(t *testing.T) {
 		UserProps:        userProps("nonexistent", "nonexistent@example.com"),
 		CreateIfNotExist: true,
 	}
+
+	userpasswd.MockAddRandomSuffix = func(s string) (string, error) {
+		return fmt.Sprintf("%s-ubioa", s), nil
+	}
+	t.Cleanup(func() {
+		userpasswd.MockAddRandomSuffix = nil
+	})
 
 	mainCase := outerCase{
 		description: "no unexpected errors",
@@ -110,6 +121,7 @@ func TestGetAndSaveUser(t *testing.T) {
 				expSavedExtAccts: map[int32][]extsvc.AccountSpec{
 					1: {ext("st1", "s1", "c1", "s1/u1")},
 				},
+				expNewUserCreated: false,
 			},
 			{
 				description: "ext acct exists, username and email don't exist",
@@ -124,6 +136,7 @@ func TestGetAndSaveUser(t *testing.T) {
 				expSavedExtAccts: map[int32][]extsvc.AccountSpec{
 					1: {ext("st1", "s1", "c1", "s1/u1")},
 				},
+				expNewUserCreated: false,
 			},
 			{
 				description: "ext acct exists, email belongs to another user",
@@ -138,6 +151,7 @@ func TestGetAndSaveUser(t *testing.T) {
 				expSavedExtAccts: map[int32][]extsvc.AccountSpec{
 					1: {ext("st1", "s1", "c1", "s1/u1")},
 				},
+				expNewUserCreated: false,
 			},
 			{
 				description: "ext acct doesn't exist, user with username and email exists",
@@ -151,17 +165,27 @@ func TestGetAndSaveUser(t *testing.T) {
 					1: {ext("st1", "s-new", "c1", "s-new/u1")},
 				},
 				expCalledGrantPendingPermissions: true,
+				expCalledCreateUserSyncJob:       true,
+				expNewUserCreated:                false,
 			},
 			{
-				description: "ext acct doesn't exist, user with username exists but email doesn't exist",
+				description: "ext acct doesn't exist, user with username exists but email doesn't exist, append random suffix",
 				// Note: if the email doesn't match, the user effectively doesn't exist from our POV
 				op: GetAndSaveUserOp{
 					ExternalAccount:  ext("st1", "s-new", "c1", "s-new/u1"),
 					UserProps:        userProps("u1", "doesnotmatch@example.com"),
 					CreateIfNotExist: true,
 				},
-				expSafeErr: "Username \"u1\" already exists, but no verified email matched \"doesnotmatch@example.com\"",
-				expErr:     database.MockCannotCreateUserUsernameExistsErr,
+				expSavedExtAccts: map[int32][]extsvc.AccountSpec{
+					10001: {ext("st1", "s-new", "c1", "s-new/u1")},
+				},
+				expCreatedUsers: map[int32]database.NewUser{
+					10001: userProps("u1-ubioa", "doesnotmatch@example.com"),
+				},
+				expNewUserCreated:                true,
+				expUserID:                        10001,
+				expCalledCreateUserSyncJob:       true,
+				expCalledGrantPendingPermissions: true,
 			},
 			{
 				description: "ext acct doesn't exist, user with email exists but username doesn't exist",
@@ -176,6 +200,8 @@ func TestGetAndSaveUser(t *testing.T) {
 					1: {ext("st1", "s-new", "c1", "s-new/u1")},
 				},
 				expCalledGrantPendingPermissions: true,
+				expCalledCreateUserSyncJob:       true,
+				expNewUserCreated:                false,
 			},
 			{
 				description: "ext acct doesn't exist, username and email don't exist, should create user",
@@ -192,6 +218,8 @@ func TestGetAndSaveUser(t *testing.T) {
 					10001: userProps("u-new", "u-new@example.com"),
 				},
 				expCalledGrantPendingPermissions: true,
+				expCalledCreateUserSyncJob:       true,
+				expNewUserCreated:                true,
 			},
 			{
 				description: "ext acct doesn't exist, username and email don't exist, should NOT create user",
@@ -200,8 +228,9 @@ func TestGetAndSaveUser(t *testing.T) {
 					UserProps:        userProps("u-new", "u-new@example.com"),
 					CreateIfNotExist: false,
 				},
-				expSafeErr: "User account with verified email \"u-new@example.com\" does not exist. Ask a site admin to create your account and then verify your email.",
-				expErr:     database.MockUserNotFoundErr,
+				expSafeErr:        "User account with verified email \"u-new@example.com\" does not exist. Ask a site admin to create your account and then verify your email.",
+				expErr:            database.MockUserNotFoundErr,
+				expNewUserCreated: false,
 			},
 			{
 				description: "ext acct exists, (ignore username and email), authenticated",
@@ -216,6 +245,8 @@ func TestGetAndSaveUser(t *testing.T) {
 					2: {ext("st1", "s1", "c1", "s1/u2")},
 				},
 				expCalledGrantPendingPermissions: true,
+				expCalledCreateUserSyncJob:       true,
+				expNewUserCreated:                false,
 			},
 			{
 				description: "ext acct doesn't exist, email and username match, authenticated",
@@ -230,6 +261,8 @@ func TestGetAndSaveUser(t *testing.T) {
 					1: {ext("st1", "s1", "c1", "s1/u1")},
 				},
 				expCalledGrantPendingPermissions: true,
+				expCalledCreateUserSyncJob:       true,
+				expNewUserCreated:                false,
 			},
 			{
 				description: "ext acct doesn't exist, email matches but username doesn't, authenticated",
@@ -245,6 +278,8 @@ func TestGetAndSaveUser(t *testing.T) {
 					1: {ext("st1", "s1", "c1", "s1/u1")},
 				},
 				expCalledGrantPendingPermissions: true,
+				expCalledCreateUserSyncJob:       true,
+				expNewUserCreated:                false,
 			},
 			{
 				description: "ext acct doesn't exist, email doesn't match existing user, authenticated",
@@ -263,6 +298,8 @@ func TestGetAndSaveUser(t *testing.T) {
 					1: {ext("st1", "s-new", "c1", "s-new/u1")},
 				},
 				expCalledGrantPendingPermissions: true,
+				expCalledCreateUserSyncJob:       true,
+				expNewUserCreated:                false,
 			},
 			{
 				description: "ext acct doesn't exist, user has same username, lookupByUsername=true",
@@ -277,13 +314,47 @@ func TestGetAndSaveUser(t *testing.T) {
 					1: {ext("st1", "s1", "c1", "doesnotexist")},
 				},
 				expCalledGrantPendingPermissions: true,
+				expCalledCreateUserSyncJob:       true,
+				expNewUserCreated:                false,
+			},
+			{
+				description: "single identity per user mode rejects multiple external identities from same provider",
+				op: GetAndSaveUserOp{
+					ExternalAccount:       ext("st1", "s1", "c1", "s1/u1-new"),
+					UserProps:             userProps("u1", "u1@example.com"), // This user exists in the DB already and has an external account for st1, s1, c1
+					SingleIdentityPerUser: true,
+				},
+				createIfNotExistIrrelevant:       true,
+				expSafeErr:                       "Another identity for this user from this provider already exists. Remove the link to the other identity from your account.",
+				expErr:                           errors.New("duplicate identity for single identity provider"),
+				expCalledGrantPendingPermissions: false,
+				expCalledCreateUserSyncJob:       false,
+				expNewUserCreated:                false,
+				expSavedExtAccts:                 map[int32][]extsvc.AccountSpec{},
+			},
+			{
+				description: "single identity per user mode accepts the same external identity from same provider",
+				actorUID:    1,
+				op: GetAndSaveUserOp{
+					ExternalAccount:       ext("st1", "s1", "c1", "s1/u1"),
+					UserProps:             userProps("u1", "u1@example.com"), // This user exists in the DB already and has an external account for st1, s1, c1
+					SingleIdentityPerUser: true,
+				},
+				createIfNotExistIrrelevant: true,
+				expUserID:                  1,
+				expSavedExtAccts: map[int32][]extsvc.AccountSpec{
+					1: {ext("st1", "s1", "c1", "s1/u1")},
+				},
+				expCalledGrantPendingPermissions: true,
+				expCalledCreateUserSyncJob:       true,
+				expNewUserCreated:                false,
 			},
 		},
 	}
 	errorCases := []outerCase{
 		{
-			description: "lookupUserAndSaveErr",
-			mock:        mockParams{lookupUserAndSaveErr: unexpectedErr, userInfos: oneUser},
+			description: "externalAccountUpdateErr",
+			mock:        mockParams{externalAccountUpdateErr: unexpectedErr, userInfos: oneUser},
 			innerCases: []innerCase{{
 				op:                         getOneUserOp,
 				createIfNotExistIrrelevant: true,
@@ -293,16 +364,16 @@ func TestGetAndSaveUser(t *testing.T) {
 		},
 		{
 			description: "createUserAndSaveErr",
-			mock:        mockParams{createUserAndSaveErr: unexpectedErr, userInfos: oneUser},
+			mock:        mockParams{createWithExternalAccountErr: unexpectedErr, userInfos: oneUser},
 			innerCases: []innerCase{{
 				op:         getNonExistentUserCreateIfNotExistOp,
 				expSafeErr: "Unable to create a new user account due to a unexpected error. Ask a site admin for help.",
-				expErr:     unexpectedErr,
+				expErr:     errors.Wrapf(unexpectedErr, `username: "nonexistent", email: "nonexistent@example.com"`),
 			}},
 		},
 		{
-			description: "associateUserAndSaveErr",
-			mock:        mockParams{associateUserAndSaveErr: unexpectedErr, userInfos: oneUser},
+			description: "upsertErr",
+			mock:        mockParams{upsertErr: unexpectedErr, userInfos: oneUser},
 			innerCases: []innerCase{{
 				op: GetAndSaveUserOp{
 					ExternalAccount: ext("st1", "s1", "c1", "nonexistent"),
@@ -381,8 +452,8 @@ func TestGetAndSaveUser(t *testing.T) {
 					if len(createIfNotExistVals) == 2 {
 						description = fmt.Sprintf("%s, createIfNotExist=%v", description, createIfNotExist)
 					}
-					t.Run("", func(t *testing.T) {
-						t.Logf("Description: %q", description)
+					t.Run(description, func(t *testing.T) {
+						t.Logf("Description: %q", description) // for readability
 						m := newMocks(t, oc.mock)
 
 						ctx := context.Background()
@@ -391,34 +462,154 @@ func TestGetAndSaveUser(t *testing.T) {
 						}
 						op := c.op
 						op.CreateIfNotExist = createIfNotExist
-						userID, safeErr, err := GetAndSaveUser(ctx, m.DB(), op)
-						for _, v := range []struct {
-							label string
-							got   any
-							want  any
-						}{
-							{"userID", userID, c.expUserID},
-							{"safeErr", safeErr, c.expSafeErr},
-							{"err", err, c.expErr},
-							{"savedExtAccts (side-effect)", m.savedExtAccts, c.expSavedExtAccts},
-							{"updatedUsers (side-effect)", m.updatedUsers, c.expUpdatedUsers},
-							{"createdUsers (side-effect)", m.createdUsers, c.expCreatedUsers},
-						} {
-							if label, got, want := v.label, v.got, v.want; !reflect.DeepEqual(got, want) {
-								dmp := diffmatchpatch.New()
-								t.Errorf("%s: got != want\n%#v != %#v\ndiff(got, want):\n%s",
-									label, got, want, dmp.DiffPrettyText(dmp.DiffMain(spew.Sdump(want), spew.Sdump(got), false)))
-							}
+
+						recorder, eventsStore := telemetrytest.NewRecorder()
+
+						logger := logtest.ScopedWith(t, logtest.LoggerOptions{Level: log.LevelDebug})
+						newUserCreated, userID, safeErr, err := GetAndSaveUser(
+							ctx, logger, m.DB(), recorder, op)
+
+						if userID != c.expUserID {
+							t.Errorf("mismatched userID, want: %v, but got %v", c.expUserID, userID)
+						}
+
+						if diff := cmp.Diff(safeErr, c.expSafeErr); diff != "" {
+							t.Errorf("mismatched safeErr, got != want, diff(-got, +want):\n%s", diff)
+						}
+
+						if !errors.Is(err, c.expErr) {
+							t.Errorf("mismatched errors, want %#v, but got %#v", c.expErr, err)
+						}
+
+						if diff := cmp.Diff(m.savedExtAccts, c.expSavedExtAccts); diff != "" {
+							t.Errorf("mismatched side-effect savedExtAccts, got != want, diff(-got, +want):\n%s", diff)
+						}
+
+						if diff := cmp.Diff(m.updatedUsers, c.expUpdatedUsers); diff != "" {
+							t.Errorf("mismatched side-effect updatedUsers, got != want, diff(-got, +want):\n%s", diff)
+						}
+
+						if diff := cmp.Diff(m.createdUsers, c.expCreatedUsers); diff != "" {
+							t.Errorf("mismatched side-effect createdUsers, got != want, diff(-got, +want):\n%s", diff)
+						}
+
+						if c.expCalledCreateUserSyncJob != m.calledCreateUserSyncJob {
+							t.Fatalf("calledCreateUserSyncJob: want %v but got %v", c.expCalledGrantPendingPermissions, m.calledCreateUserSyncJob)
 						}
 
 						if c.expCalledGrantPendingPermissions != m.calledGrantPendingPermissions {
 							t.Fatalf("calledGrantPendingPermissions: want %v but got %v", c.expCalledGrantPendingPermissions, m.calledGrantPendingPermissions)
+						}
+
+						if newUserCreated != c.expNewUserCreated {
+							t.Errorf("mismatched newUserCreated, want %v but got %v", c.expNewUserCreated, newUserCreated)
+						}
+
+						// All telemetry should have the expected user (or lack
+						// of user) attached, and all code paths should generate
+						// at least 1 user event if a new user was created.
+						gotEvents := eventsStore.CollectStoredEvents()
+						if c.expNewUserCreated {
+							assert.NotEmpty(t, gotEvents)
+						} else {
+							assert.Empty(t, gotEvents)
+						}
+						for _, ev := range gotEvents {
+							switch {
+							// We are expecting a specific user ID
+							case c.expUserID != 0:
+								assert.Equalf(t, int64(c.expUserID), ev.GetUser().GetUserId(),
+									"Event '%s#%s' does not have expected user ID", ev.GetFeature(), ev.GetAction())
+
+							// Scenarios where we should have a user found
+							case oc.mock.updateErr != nil ||
+								oc.mock.getByIDErr != nil ||
+								oc.mock.upsertErr != nil ||
+								c.op.SingleIdentityPerUser:
+								assert.NotEmptyf(t, ev.GetUser().GetUserId(),
+									"Event '%s#%s' should have a user ID", ev.GetFeature(), ev.GetAction())
+
+							// Scenarios where we should not have any user found
+							case oc.mock.getByUsernameErr != nil ||
+								oc.mock.getByVerifiedEmailErr != nil ||
+								oc.mock.externalAccountUpdateErr != nil ||
+								oc.mock.createWithExternalAccountErr != nil ||
+								!c.op.CreateIfNotExist:
+								assert.Nil(t, ev.GetUser(),
+									"Event '%s#%s' should not have user ID, found: %s",
+									ev.GetFeature(), ev.GetAction(), ev.GetUser().GetUserId())
+
+							default:
+								assert.Failf(t, "no telemetry handling available for test case",
+									"got event: %s", ev.String())
+							}
 						}
 					})
 				}
 			}
 		})
 	}
+
+	t.Run("Sourcegraph operator actor should be propagated", func(t *testing.T) {
+		ctx := context.Background()
+
+		errNotFound := &errcode.Mock{
+			IsNotFound: true,
+		}
+		gss := dbmocks.NewMockGlobalStateStore()
+		gss.GetFunc.SetDefaultReturn(database.GlobalState{SiteID: "a"}, nil)
+		usersStore := dbmocks.NewMockUserStore()
+		usersStore.GetByVerifiedEmailFunc.SetDefaultReturn(nil, errNotFound)
+		usersStore.CreateWithExternalAccountFunc.SetDefaultHook(func(ctx context.Context, _ database.NewUser, _ *extsvc.Account) (*types.User, error) {
+			require.True(t, actor.FromContext(ctx).SourcegraphOperator, "the actor should be a Sourcegraph operator")
+			return &types.User{ID: 1}, nil
+		})
+		externalAccountsStore := dbmocks.NewMockUserExternalAccountsStore()
+		externalAccountsStore.UpdateFunc.SetDefaultReturn(nil, errNotFound)
+		eventLogsStore := dbmocks.NewMockEventLogStore()
+		eventLogsStore.BulkInsertFunc.SetDefaultHook(func(ctx context.Context, _ []*database.Event) error {
+			require.True(t, actor.FromContext(ctx).SourcegraphOperator, "the actor should be a Sourcegraph operator")
+			return nil
+		})
+		permsSyncJobsStore := dbmocks.NewMockPermissionSyncJobStore()
+		db := dbmocks.NewMockDB()
+		db.GlobalStateFunc.SetDefaultReturn(gss)
+		db.UsersFunc.SetDefaultReturn(usersStore)
+		db.UserExternalAccountsFunc.SetDefaultReturn(externalAccountsStore)
+		db.AuthzFunc.SetDefaultReturn(dbmocks.NewMockAuthzStore())
+		db.EventLogsFunc.SetDefaultReturn(eventLogsStore)
+		db.TelemetryEventsExportQueueFunc.SetDefaultReturn(dbmocks.NewMockTelemetryEventsExportQueueStore())
+		db.PermissionSyncJobsFunc.SetDefaultReturn(permsSyncJobsStore)
+
+		recorder, eventsStore := telemetrytest.NewRecorder()
+
+		_, _, _, err := GetAndSaveUser(
+			ctx,
+			logtest.Scoped(t),
+			db,
+			recorder,
+			GetAndSaveUserOp{
+				UserProps: database.NewUser{
+					EmailIsVerified: true,
+				},
+				ExternalAccount: extsvc.AccountSpec{
+					ServiceType: auth.SourcegraphOperatorProviderType,
+				},
+				ExternalAccountData: extsvc.AccountData{},
+				CreateIfNotExist:    true,
+			},
+		)
+		require.NoError(t, err)
+		mockrequire.Called(t, usersStore.CreateWithExternalAccountFunc)
+
+		// All telemetry should have the expected user attached
+		gotEvents := eventsStore.CollectStoredEvents()
+		assert.NotEmpty(t, gotEvents)
+		for _, ev := range gotEvents {
+			assert.Equalf(t, int64(1), ev.GetUser().GetUserId(),
+				"Event '%s#%s' does not have expected user ID", ev.GetFeature(), ev.GetAction())
+		}
+	})
 }
 
 type userInfo struct {
@@ -471,9 +662,12 @@ func newMocks(t *testing.T, m mockParams) *mocks {
 func TestMetadataOnlyAutomaticallySetOnFirstOccurrence(t *testing.T) {
 	t.Parallel()
 
+	gss := dbmocks.NewMockGlobalStateStore()
+	gss.GetFunc.SetDefaultReturn(database.GlobalState{SiteID: "a"}, nil)
+
 	user := &types.User{ID: 1, DisplayName: "", AvatarURL: ""}
 
-	users := database.NewMockUserStore()
+	users := dbmocks.NewMockUserStore()
 	users.GetByIDFunc.SetDefaultReturn(user, nil)
 	users.UpdateFunc.SetDefaultHook(func(_ context.Context, userID int32, update database.UserUpdate) error {
 		user.DisplayName = *update.DisplayName
@@ -481,12 +675,15 @@ func TestMetadataOnlyAutomaticallySetOnFirstOccurrence(t *testing.T) {
 		return nil
 	})
 
-	externalAccounts := database.NewMockUserExternalAccountsStore()
-	externalAccounts.LookupUserAndSaveFunc.SetDefaultReturn(user.ID, nil)
+	externalAccounts := dbmocks.NewMockUserExternalAccountsStore()
+	externalAccounts.UpdateFunc.SetDefaultReturn(&extsvc.Account{UserID: user.ID}, nil)
 
-	db := database.NewMockDB()
+	db := dbmocks.NewMockDB()
+	db.GlobalStateFunc.SetDefaultReturn(gss)
 	db.UsersFunc.SetDefaultReturn(users)
 	db.UserExternalAccountsFunc.SetDefaultReturn(externalAccounts)
+	db.EventLogsFunc.SetDefaultReturn(dbmocks.NewMockEventLogStore())
+	db.TelemetryEventsExportQueueFunc.SetDefaultReturn(dbmocks.NewMockTelemetryEventsExportQueueStore())
 
 	// Customers can always set their own display name and avatar URL values, but when
 	// we encounter them via e.g. code host logins, we don't want to override anything
@@ -521,7 +718,8 @@ func TestMetadataOnlyAutomaticallySetOnFirstOccurrence(t *testing.T) {
 				ExternalAccount: ext("github", "fake-service", "fake-client", "account-u1"),
 				UserProps:       database.NewUser{DisplayName: test.displayName, AvatarURL: test.avatarURL},
 			}
-			if _, _, err := GetAndSaveUser(ctx, db, op); err != nil {
+			recorder := telemetrytest.NewDebugRecorder(t)
+			if _, _, _, err := GetAndSaveUser(ctx, logtest.Scoped(t), db, recorder, op); err != nil {
 				t.Fatal(err)
 			}
 			if user.DisplayName != test.wantDisplayName {
@@ -535,14 +733,14 @@ func TestMetadataOnlyAutomaticallySetOnFirstOccurrence(t *testing.T) {
 }
 
 type mockParams struct {
-	userInfos               []userInfo
-	lookupUserAndSaveErr    error
-	createUserAndSaveErr    error
-	associateUserAndSaveErr error
-	getByVerifiedEmailErr   error
-	getByUsernameErr        error //nolint:structcheck
-	getByIDErr              error
-	updateErr               error
+	userInfos                    []userInfo
+	externalAccountUpdateErr     error
+	createWithExternalAccountErr error
+	upsertErr                    error
+	getByVerifiedEmailErr        error
+	getByUsernameErr             error //nolint:structcheck
+	getByIDErr                   error
+	updateErr                    error
 }
 
 // mocks provide mocking. It should only be used for one call of auth.GetAndSaveUser, because saves
@@ -566,65 +764,109 @@ type mocks struct {
 
 	// calledGrantPendingPermissions tracks if database.Authz.GrantPendingPermissions method is called.
 	calledGrantPendingPermissions bool
+
+	// calledCreateUserSyncJob tracks if database.PermissionsSyncJobs.CreateUserSyncJob method is called.
+	calledCreateUserSyncJob bool
 }
 
 func (m *mocks) DB() database.DB {
-	externalAccounts := database.NewMockUserExternalAccountsStore()
-	externalAccounts.LookupUserAndSaveFunc.SetDefaultHook(m.LookupUserAndSave)
-	externalAccounts.AssociateUserAndSaveFunc.SetDefaultHook(m.AssociateUserAndSave)
-	externalAccounts.CreateUserAndSaveFunc.SetDefaultHook(m.CreateUserAndSave)
+	gss := dbmocks.NewMockGlobalStateStore()
+	gss.GetFunc.SetDefaultReturn(database.GlobalState{SiteID: "a"}, nil)
 
-	users := database.NewMockUserStore()
+	externalAccounts := dbmocks.NewMockUserExternalAccountsStore()
+	externalAccounts.UpdateFunc.SetDefaultHook(m.ExternalAccountUpdate)
+	externalAccounts.UpsertFunc.SetDefaultHook(m.Upsert)
+	externalAccounts.ListFunc.SetDefaultHook(func(ctx context.Context, ealo database.ExternalAccountsListOptions) ([]*extsvc.Account, error) {
+		for _, ui := range m.mockParams.userInfos {
+			if ealo.UserID != 0 && ui.user.ID != ealo.UserID {
+				continue
+			}
+			eas := make([]*extsvc.Account, 0)
+			for _, acc := range ui.extAccts {
+				if ealo.ServiceType != "" && ealo.ServiceType != acc.ServiceType {
+					continue
+				}
+				if ealo.ServiceID != "" && ealo.ServiceID != acc.ServiceID {
+					continue
+				}
+				if ealo.ClientID != "" && ealo.ClientID != acc.ClientID {
+					continue
+				}
+				eas = append(eas, &extsvc.Account{
+					UserID: ealo.UserID,
+					AccountSpec: extsvc.AccountSpec{
+						ServiceType: acc.ServiceType,
+						ServiceID:   acc.ServiceID,
+						AccountID:   acc.AccountID,
+						ClientID:    acc.ClientID,
+					},
+				})
+			}
+			return eas, nil
+		}
+
+		return nil, errors.New("no ext accts for user")
+	})
+
+	users := dbmocks.NewMockUserStore()
 	users.GetByIDFunc.SetDefaultHook(m.GetByID)
 	users.GetByVerifiedEmailFunc.SetDefaultHook(m.GetByVerifiedEmail)
 	users.GetByUsernameFunc.SetDefaultHook(m.GetByUsername)
 	users.UpdateFunc.SetDefaultHook(m.Update)
+	users.CreateWithExternalAccountFunc.SetDefaultHook(m.CreateWithExternalAccountFunc)
 
-	authzStore := database.NewMockAuthzStore()
+	authzStore := dbmocks.NewMockAuthzStore()
 	authzStore.GrantPendingPermissionsFunc.SetDefaultHook(m.GrantPendingPermissions)
 
-	db := database.NewMockDB()
+	permsSyncStore := dbmocks.NewMockPermissionSyncJobStore()
+	permsSyncStore.CreateUserSyncJobFunc.SetDefaultHook(m.CreateUserSyncJobFunc)
+
+	db := dbmocks.NewMockDB()
+	db.GlobalStateFunc.SetDefaultReturn(gss)
 	db.UserExternalAccountsFunc.SetDefaultReturn(externalAccounts)
 	db.UsersFunc.SetDefaultReturn(users)
 	db.AuthzFunc.SetDefaultReturn(authzStore)
-	db.EventLogsFunc.SetDefaultReturn(database.NewMockEventLogStore())
+	db.EventLogsFunc.SetDefaultReturn(dbmocks.NewMockEventLogStore())
+	db.TelemetryEventsExportQueueFunc.SetDefaultReturn(dbmocks.NewMockTelemetryEventsExportQueueStore())
+	db.PermissionSyncJobsFunc.SetDefaultReturn(permsSyncStore)
 	return db
 }
 
-// LookupUserAndSave mocks database.ExternalAccounts.LookupUserAndSave
-func (m *mocks) LookupUserAndSave(_ context.Context, spec extsvc.AccountSpec, data extsvc.AccountData) (userID int32, err error) {
-	if m.lookupUserAndSaveErr != nil {
-		return 0, m.lookupUserAndSaveErr
+// ExternalAccountUpdate mocks database.ExternalAccounts.Update
+func (m *mocks) ExternalAccountUpdate(_ context.Context, acct *extsvc.Account) (*extsvc.Account, error) {
+	if m.externalAccountUpdateErr != nil {
+		return nil, m.externalAccountUpdateErr
 	}
 
 	for _, u := range m.userInfos {
 		for _, a := range u.extAccts {
-			if a == spec {
-				m.savedExtAccts[u.user.ID] = append(m.savedExtAccts[u.user.ID], spec)
-				return u.user.ID, nil
+			if a == acct.AccountSpec {
+				m.savedExtAccts[u.user.ID] = append(m.savedExtAccts[u.user.ID], acct.AccountSpec)
+				acct.UserID = u.user.ID
+				return acct, nil
 			}
 		}
 	}
-	return 0, &errcode.Mock{IsNotFound: true}
+	return nil, &errcode.Mock{IsNotFound: true}
 }
 
-// CreateUserAndSave mocks database.ExternalAccounts.CreateUserAndSave
-func (m *mocks) CreateUserAndSave(_ context.Context, newUser database.NewUser, spec extsvc.AccountSpec, data extsvc.AccountData) (createdUserID int32, err error) {
-	if m.createUserAndSaveErr != nil {
-		return 0, m.createUserAndSaveErr
+// CreateWithExternalACcountFunc mocks database.Users.CreateWithExternalAccountFunc
+func (m *mocks) CreateWithExternalAccountFunc(_ context.Context, newUser database.NewUser, acct *extsvc.Account) (createdUser *types.User, err error) {
+	if m.createWithExternalAccountErr != nil {
+		return &types.User{}, m.createWithExternalAccountErr
 	}
 
 	// Check if username already exists
 	for _, u := range m.userInfos {
 		if u.user.Username == newUser.Username {
-			return 0, database.MockCannotCreateUserUsernameExistsErr
+			return &types.User{}, database.MockCannotCreateUserUsernameExistsErr
 		}
 	}
 	// Check if email already exists
 	for _, u := range m.userInfos {
 		for _, email := range u.emails {
 			if email == newUser.Email {
-				return 0, database.MockCannotCreateUserEmailExistsErr
+				return &types.User{}, database.MockCannotCreateUserEmailExistsErr
 			}
 		}
 	}
@@ -638,28 +880,28 @@ func (m *mocks) CreateUserAndSave(_ context.Context, newUser database.NewUser, s
 	m.createdUsers[userID] = newUser
 
 	// Save ext acct
-	m.savedExtAccts[userID] = append(m.savedExtAccts[userID], spec)
+	m.savedExtAccts[userID] = append(m.savedExtAccts[userID], acct.AccountSpec)
 
-	return userID, nil
+	return &types.User{ID: userID}, nil
 }
 
-// AssociateUserAndSave mocks database.ExternalAccounts.AssociateUserAndSave
-func (m *mocks) AssociateUserAndSave(_ context.Context, userID int32, spec extsvc.AccountSpec, data extsvc.AccountData) (err error) {
-	if m.associateUserAndSaveErr != nil {
-		return m.associateUserAndSaveErr
+// Upsert mocks database.ExternalAccounts.Upsert
+func (m *mocks) Upsert(_ context.Context, acct *extsvc.Account) (_ *extsvc.Account, err error) {
+	if m.upsertErr != nil {
+		return nil, m.upsertErr
 	}
 
 	// Check if ext acct is associated with different user
 	for _, u := range m.userInfos {
 		for _, a := range u.extAccts {
-			if a == spec && u.user.ID != userID {
-				return errors.Errorf("unable to change association of external account from user %d to user %d (delete the external account and then try again)", u.user.ID, userID)
+			if a == acct.AccountSpec && u.user.ID != acct.UserID {
+				return nil, errors.Errorf("unable to change association of external account from user %d to user %d (delete the external account and then try again)", u.user.ID, acct.UserID)
 			}
 		}
 	}
 
-	m.savedExtAccts[userID] = append(m.savedExtAccts[userID], spec)
-	return nil
+	m.savedExtAccts[acct.UserID] = append(m.savedExtAccts[acct.UserID], acct.AccountSpec)
+	return acct, nil
 }
 
 // GetByVerifiedEmail mocks database.Users.GetByVerifiedEmail
@@ -725,6 +967,11 @@ func (m *mocks) Update(ctx context.Context, id int32, update database.UserUpdate
 // GrantPendingPermissions mocks database.Authz.GrantPendingPermissions
 func (m *mocks) GrantPendingPermissions(context.Context, *database.GrantPendingPermissionsArgs) error {
 	m.calledGrantPendingPermissions = true
+	return nil
+}
+
+func (m *mocks) CreateUserSyncJobFunc(context.Context, int32, database.PermissionSyncJobOpts) error {
+	m.calledCreateUserSyncJob = true
 	return nil
 }
 

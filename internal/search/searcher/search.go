@@ -6,27 +6,27 @@ import (
 	"unicode/utf8"
 
 	"github.com/grafana/regexp"
-	otlog "github.com/opentracing/opentracing-go/log"
 	"github.com/sourcegraph/log"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/sourcegraph/sourcegraph/cmd/searcher/protocol"
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	"github.com/sourcegraph/sourcegraph/internal/database"
 	"github.com/sourcegraph/sourcegraph/internal/endpoint"
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver"
-	"github.com/sourcegraph/sourcegraph/internal/mutablelimiter"
+	"github.com/sourcegraph/sourcegraph/internal/grpc/defaults"
+	"github.com/sourcegraph/sourcegraph/internal/limiter"
 	"github.com/sourcegraph/sourcegraph/internal/search"
 	"github.com/sourcegraph/sourcegraph/internal/search/job"
 	"github.com/sourcegraph/sourcegraph/internal/search/result"
 	"github.com/sourcegraph/sourcegraph/internal/search/streaming"
+	"github.com/sourcegraph/sourcegraph/internal/searcher/protocol"
 	"github.com/sourcegraph/sourcegraph/internal/trace"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 )
 
 // A global limiter on number of concurrent searcher searches.
-var textSearchLimiter = mutablelimiter.New(32)
+var textSearchLimiter = limiter.NewMutable(32)
 
 type TextSearchJob struct {
 	PatternInfo *search.TextPatternInfo
@@ -38,6 +38,8 @@ type TextSearchJob struct {
 	// to communicate whether searcher should call Zoekt search on these
 	// repos).
 	Indexed bool
+
+	NumContextLines int
 
 	// UseFullDeadline indicates that the search should try do as much work as
 	// it can within context.Deadline. If false the search should try and be
@@ -72,10 +74,9 @@ func (s *TextSearchJob) Run(ctx context.Context, clients job.RuntimeClients, str
 		fetchTimeout = 500 * time.Millisecond
 	}
 
-	tr.LogFields(
-		otlog.Int64("fetch_timeout_ms", fetchTimeout.Milliseconds()),
-		otlog.Int64("repos_count", int64(len(s.Repos))),
-	)
+	tr.SetAttributes(
+		attribute.Int64("fetch_timeout_ms", fetchTimeout.Milliseconds()),
+		attribute.Int64("repos_count", int64(len(s.Repos))))
 
 	if len(s.Repos) == 0 {
 		return nil, nil
@@ -109,17 +110,21 @@ func (s *TextSearchJob) Run(ctx context.Context, clients job.RuntimeClients, str
 					ctx, done := limitCtx, limitDone
 					defer done()
 
-					repoLimitHit, err := s.searchFilesInRepo(ctx, clients.DB, clients.SearcherURLs, repo, repo.Name, rev, s.Indexed, s.PatternInfo, fetchTimeout, stream)
+					repoLimitHit, err := s.searchFilesInRepo(ctx, clients.Gitserver, clients.SearcherURLs, clients.SearcherGRPCConnectionCache, repo, repo.Name, rev, s.Indexed, s.PatternInfo, s.NumContextLines, fetchTimeout, stream)
 					if err != nil {
-						tr.LogFields(otlog.String("repo", string(repo.Name)), otlog.Error(err), otlog.Bool("timeout", errcode.IsTimeout(err)), otlog.Bool("temporary", errcode.IsTemporary(err)))
+						tr.SetAttributes(
+							repo.Name.Attr(),
+							trace.Error(err),
+							attribute.Bool("timeout", errcode.IsTimeout(err)),
+							attribute.Bool("temporary", errcode.IsTemporary(err)))
 						clients.Logger.Warn("searchFilesInRepo failed", log.Error(err), log.String("repo", string(repo.Name)))
 					}
 					// non-diff search reports timeout through err, so pass false for timedOut
-					status, limitHit, err := search.HandleRepoSearchResult(repo.ID, []string{rev}, repoLimitHit, false, err)
+					status, err := search.HandleRepoSearchResult(repo.ID, []string{rev}, repoLimitHit, false, err)
 					stream.Send(streaming.SearchEvent{
 						Stats: streaming.Stats{
 							Status:     status,
-							IsLimitHit: limitHit,
+							IsLimitHit: repoLimitHit,
 						},
 					})
 					return err
@@ -137,19 +142,19 @@ func (s *TextSearchJob) Name() string {
 	return "SearcherTextSearchJob"
 }
 
-func (s *TextSearchJob) Fields(v job.Verbosity) (res []otlog.Field) {
+func (s *TextSearchJob) Attributes(v job.Verbosity) (res []attribute.KeyValue) {
 	switch v {
 	case job.VerbosityMax:
 		res = append(res,
-			otlog.Bool("useFullDeadline", s.UseFullDeadline),
-			trace.Scoped("patternInfo", s.PatternInfo.Fields()...),
-			otlog.Int("numRepos", len(s.Repos)),
-			otlog.Object("pathRegexps", s.PathRegexps),
+			attribute.Bool("useFullDeadline", s.UseFullDeadline),
+			attribute.Stringer("patternInfo", s.PatternInfo),
+			attribute.Int("numRepos", len(s.Repos)),
+			trace.Stringers("pathRegexps", s.PathRegexps),
 		)
 		fallthrough
 	case job.VerbosityBasic:
 		res = append(res,
-			otlog.Bool("indexed", s.Indexed),
+			attribute.Bool("indexed", s.Indexed),
 		)
 	}
 	return res
@@ -170,13 +175,15 @@ var MockSearchFilesInRepo func(
 
 func (s *TextSearchJob) searchFilesInRepo(
 	ctx context.Context,
-	db database.DB,
+	client gitserver.Client,
 	searcherURLs *endpoint.Map,
+	searcherGRPCConnectionCache *defaults.ConnectionCache,
 	repo types.MinimalRepo,
 	gitserverRepo api.RepoName,
 	rev string,
 	index bool,
 	info *search.TextPatternInfo,
+	contextLines int,
 	fetchTimeout time.Duration,
 	stream streaming.Sender,
 ) (bool, error) {
@@ -188,27 +195,18 @@ func (s *TextSearchJob) searchFilesInRepo(
 	// backend.{GitRepo,Repos.ResolveRev}) because that would slow this operation
 	// down by a lot (if we're looping over many repos). This means that it'll fail if a
 	// repo is not on gitserver.
-	commit, err := gitserver.NewClient(db).ResolveRevision(ctx, gitserverRepo, rev, gitserver.ResolveRevisionOptions{NoEnsureRevision: true})
+	commit, err := client.ResolveRevision(ctx, gitserverRepo, rev, gitserver.ResolveRevisionOptions{EnsureRevision: false})
 	if err != nil {
 		return false, err
 	}
 
-	// Structural and hybrid search both speak to zoekt so need the endpoints.
-	var indexerEndpoints []string
-	if info.IsStructuralPat || s.Features.HybridSearch {
-		indexerEndpoints, err = search.Indexers().Map.Endpoints()
-		if err != nil {
-			return false, err
-		}
-	}
-
-	onMatches := func(searcherMatches []*protocol.FileMatch) {
+	onMatch := func(searcherMatch *protocol.FileMatch) {
 		stream.Send(streaming.SearchEvent{
-			Results: convertMatches(repo, commit, &rev, searcherMatches, s.PathRegexps),
+			Results: convertMatches(repo, commit, &rev, []*protocol.FileMatch{searcherMatch}, s.PathRegexps),
 		})
 	}
 
-	return Search(ctx, searcherURLs, gitserverRepo, repo.ID, rev, commit, index, info, fetchTimeout, indexerEndpoints, s.Features, onMatches)
+	return Search(ctx, searcherURLs, searcherGRPCConnectionCache, gitserverRepo, repo.ID, rev, commit, index, info, fetchTimeout, s.Features, contextLines, onMatch)
 }
 
 // convert converts a set of searcher matches into []result.Match
@@ -270,6 +268,8 @@ func convertMatches(repo types.MinimalRepo, commit api.CommitID, rev *string, se
 				Repo:     repo,
 				CommitID: commit,
 				InputRev: rev,
+				// Pass on the detected language. It's not always available and may be empty.
+				PreciseLanguage: fm.Language,
 			},
 			ChunkMatches: chunkMatches,
 			PathMatches:  pathMatches,

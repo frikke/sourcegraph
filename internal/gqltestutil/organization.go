@@ -34,47 +34,6 @@ query Organization($name: String!) {
 	return resp.Data.Organization, nil
 }
 
-// OrganizationMember contains basic information of an organization member.
-type OrganizationMember struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
-}
-
-// OrganizationMembers returns a list of members of the given organization.
-func (c *Client) OrganizationMembers(id string) ([]*OrganizationMember, error) {
-	const query = `
-query OrganizationMembers($id: ID!) {
-	node(id: $id) {
-		... on Org {
-			members {
-				nodes {
-					id
-					username
-				}
-			}
-		}
-	}
-}
-`
-	variables := map[string]any{
-		"id": id,
-	}
-	var resp struct {
-		Data struct {
-			Node struct {
-				Members struct {
-					Nodes []*OrganizationMember `json:"nodes"`
-				} `json:"members"`
-			} `json:"node"`
-		} `json:"data"`
-	}
-	err := c.GraphQL("", query, variables, &resp)
-	if err != nil {
-		return nil, errors.Wrap(err, "request GraphQL")
-	}
-	return resp.Data.Node.Members.Nodes, nil
-}
-
 // InviteUserToOrganizationResult contains information of a user invitation to
 // an organization.
 type InviteUserToOrganizationResult struct {
@@ -83,10 +42,10 @@ type InviteUserToOrganizationResult struct {
 }
 
 // InviteUserToOrganization invites a user to the given organization.
-func (c *Client) InviteUserToOrganization(orgID, username string, email string) (*InviteUserToOrganizationResult, error) {
+func (c *Client) InviteUserToOrganization(orgID, username string) (*InviteUserToOrganizationResult, error) {
 	const query = `
-mutation InviteUserToOrganization($organization: ID!, $username: String, $email: String) {
-	inviteUserToOrganization(organization: $organization, username: $username, email: $email) {
+mutation InviteUserToOrganization($organization: ID!, $username: String!) {
+	inviteUserToOrganization(organization: $organization, username: $username) {
 		... on InviteUserToOrganizationResult {
 			sentInvitationEmail
 			invitationURL
@@ -97,7 +56,6 @@ mutation InviteUserToOrganization($organization: ID!, $username: String, $email:
 	variables := map[string]any{
 		"organization": orgID,
 		"username":     username,
-		"email":        email,
 	}
 	var resp struct {
 		Data struct {

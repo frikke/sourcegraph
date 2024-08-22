@@ -1,9 +1,9 @@
-import { ReactElement } from 'react'
+import type { ReactElement } from 'react'
 
 import { H3, Text } from '../../../../Typography'
 import { DEFAULT_FALLBACK_COLOR } from '../../../constants'
 import { TooltipList, TooltipListItem } from '../../../core'
-import { Category } from '../utils/get-grouped-categories'
+import type { Category } from '../utils/get-grouped-categories'
 
 import styles from './TooltipContent.module.scss'
 
@@ -13,11 +13,13 @@ interface BarTooltipContentProps<Datum> {
     getDatumName: (datum: Datum) => string
     getDatumValue: (datum: Datum) => number
     getDatumHover?: (datum: Datum) => string
+    getDatumHoverValueLabel?: (datum: Datum) => string
     getDatumColor: (datum: Datum) => string | undefined
 }
 
 export function BarTooltipContent<Datum>(props: BarTooltipContentProps<Datum>): ReactElement {
-    const { category, getDatumName, getDatumHover, getDatumValue, getDatumColor, activeBar } = props
+    const { category, getDatumName, getDatumHover, getDatumHoverValueLabel, getDatumValue, getDatumColor, activeBar } =
+        props
     const getName = getDatumHover ?? getDatumName
     const activeDatumHover = getName(activeBar)
 
@@ -25,7 +27,7 @@ export function BarTooltipContent<Datum>(props: BarTooltipContentProps<Datum>): 
     if (category.data.length === 1) {
         const datum = category.data[0]
         const name = getName(datum)
-        const value = getDatumValue(datum)
+        const value = getDatumHoverValueLabel?.(datum) || getDatumValue(datum)
 
         return (
             <Text className={styles.oneLineTooltip}>

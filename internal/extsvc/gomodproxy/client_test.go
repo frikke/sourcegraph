@@ -8,15 +8,19 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/grafana/regexp"
-	"github.com/inconshreveable/log15"
-	"github.com/sourcegraph/sourcegraph/internal/conf/reposource"
+	"github.com/inconshreveable/log15" //nolint:logging // TODO move all logging to sourcegraph/log
 	"golang.org/x/mod/module"
+	"golang.org/x/time/rate"
+
+	"github.com/sourcegraph/sourcegraph/internal/conf/reposource"
+	"github.com/sourcegraph/sourcegraph/internal/ratelimit"
 
 	"github.com/sourcegraph/sourcegraph/internal/httpcli"
 	"github.com/sourcegraph/sourcegraph/internal/httptestutil"
@@ -75,7 +79,20 @@ func TestClient_GetZip(t *testing.T) {
 			mod = ps[0]
 		}
 
-		zipBytes, err := cli.GetZip(ctx, reposource.PackageName(mod), version)
+		zipStream, err := cli.GetZip(ctx, reposource.PackageName(mod), version)
+		t.Cleanup(func() {
+			if zipStream != nil {
+				_ = zipStream.Close()
+			}
+		})
+
+		var zipBytes []byte
+		if zipStream != nil {
+			zipBytes, err = io.ReadAll(zipStream)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 
 		r := result{Error: fmt.Sprint(err)}
 
@@ -131,16 +148,15 @@ func newTestClient(t testing.TB, name string, update bool) *Client {
 		}
 	})
 
-	hc, err := httpcli.NewFactory(nil, httptestutil.NewRecorderOpt(rec)).Doer()
-	if err != nil {
-		t.Fatal(err)
-	}
+	hc := httpcli.NewFactory(nil, httptestutil.NewRecorderOpt(rec))
 
 	c := &schema.GoModulesConnection{
 		Urls: []string{"https://proxy.golang.org"},
 	}
 
-	return NewClient("urn", c.Urls, hc)
+	cli := NewClient("urn", c.Urls, hc)
+	cli.limiter = ratelimit.NewInstrumentedLimiter("gomod", rate.NewLimiter(100, 10))
+	return cli
 }
 
 var normalizer = lazyregexp.New("[^A-Za-z0-9-]+")

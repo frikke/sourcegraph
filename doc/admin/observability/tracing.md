@@ -9,7 +9,7 @@ There are currently three modes:
 
 `"selective"` is the recommended default, because collecting traces on all requests can be quite memory- and network-intensive.
 If you have a large Sourcegraph instance (e.g,. more than 10k repositories), turn this on with caution.
-Note that the policies above are implemented at an application level - to sample all traces, please configure your tracing backend directly.
+Note that the policies above are implemented at an application level—to sample all traces, please configure your tracing backend directly.
 
 We support the following tracing backend types:
 
@@ -33,7 +33,7 @@ We generally follow the following algorithm to root-cause issues with traces:
    1. items near the leaves that take up a significant portion of the overall request time.
    2. spans that have errors attached to them
    3. [log entries](./logs.md) that correspond to spans in the trace (using the `TraceId` and `SpanId` fields)
-3. Report this information to Sourcegraph (via [issue](https://github.com/sourcegraph/sourcegraph/issues/new) or [reaching out directly](https://about.sourcegraph.com/contact/request-info/)) by screenshotting the relevant trace or sharing the trace JSON.
+3. Report this information to Sourcegraph (via [issue](https://github.com/sourcegraph/sourcegraph/issues/new) or [reaching out directly](https://sourcegraph.com/contact/request-info/)) by screenshotting the relevant trace or sharing the trace JSON.
 
 ### Trace a search query
 
@@ -47,14 +47,21 @@ Note that getting a trace URL requires `urlTemplate` to be configured.
 ### Trace a GraphQL request
 
 To receive a traceID on a GraphQL request, include the header `X-Sourcegraph-Should-Trace: true` with the request.
-The response headers of the response will now include an `x-trace` entry, which will have a URL the [exported trace](#tracing-backends).
+The response headers of the response will now include an `x-trace-url` entry, which will have a URL the [exported trace](#tracing-backends).
 
 Note that getting a trace URL requires `urlTemplate` to be configured.
+
+Alternatively you can use the GraphQL API console: Log in to your Sourcegraph instance of choice, navigate
+to `/api/console` (e.g. https://sourcegraph.sourcegraph.com/api/console) and add the query parameter `trace=1` to your browser's URL.
+Open the developer tools' network tab to inspect your request and find the tracing link in the response headers.
 
 ## Tracing backends
 
 Tracing backends can be configured for Sourcegraph to export traces to.
 We support exporting traces via [OpenTelemetry](#opentelemetry) (recommended), or directly to [Jaeger](#jaeger).
+
+When you use `sg`, you can run `sg start otel` to start the tracing backend. Requests with `trace=1` or the according
+tracing header will then contain a response header with a link to your local tracing backend.
 
 ### OpenTelemetry
 
@@ -84,7 +91,7 @@ There are two ways to export traces to Jaeger:
 1. **Recommended:** Configuring the [OpenTelemetry Collector](opentelemetry.md) (`"type": "opentelemetry"` in `observability.tracing`) to [send traces to a Jaeger instance](opentelemetry.md#jaeger).
 2. Using the legacy `"type": "jaeger"` configuration in `observability.tracing` to send spans directly to Jaeger.
 
-We strongly recommend using option 1 to use Jaeger, which is supported via opt-in mechanisms for each of our core deployment methods - to learn more, refer to the [Jaeger exporter documentation](opentelemetry.md#jaeger).
+We strongly recommend using option 1 to use Jaeger, which is supported via opt-in mechanisms for each of our core deployment methods—to learn more, refer to the [Jaeger exporter documentation](opentelemetry.md#jaeger).
 
 To use option 2 instead, which enables behaviour similar to how Sourcegraph exported traces before Sourcegraph 4.0, [Jaeger client environment variables](https://github.com/jaegertracing/jaeger-client-go#environment-variables) must be set on all services for traces to export to Jaeger correctly using `"observability.tracing": { "type": "jaeger" }`.
 
@@ -102,13 +109,3 @@ Once set up, you can use the following URL template for traces exported to Jaege
 ```
 
 You can test the exporter by [tracing a search query](#trace-a-search-query).
-
-### net/trace
-
-Sourcegraph uses the [`net/trace`](https://pkg.go.dev/golang.org/x/net/trace) package in its backend
-services, in addition to the other tracing mechanisms listed above.
-This provides simple tracing information within a single process.
-It can be used as an alternative when Jaeger is not available or as a supplement to Jaeger.
-
-Site admins can access `net/trace` information at https://sourcegraph.example.com/-/debug/. From
-there, click **Requests** to view the traces for that service.

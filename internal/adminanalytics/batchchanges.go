@@ -9,10 +9,11 @@ import (
 )
 
 type BatchChanges struct {
+	Ctx       context.Context
 	DateRange string
 	Grouping  string
 	DB        database.DB
-	Cache     bool
+	Cache     KeyValue
 }
 
 var changesetsCreatedNodesQuery = `

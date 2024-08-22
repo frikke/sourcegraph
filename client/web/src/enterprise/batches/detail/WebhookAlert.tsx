@@ -7,7 +7,7 @@ import { Button, useObservable, Link, H4, Text } from '@sourcegraph/wildcard'
 
 import { authenticatedUser } from '../../../auth'
 import { DismissibleAlert } from '../../../components/DismissibleAlert'
-import { BatchChangeFields } from '../../../graphql-operations'
+import type { BatchChangeFields } from '../../../graphql-operations'
 import { CodeHost } from '../CodeHost'
 
 import styles from './WebhookAlert.module.scss'
@@ -48,7 +48,7 @@ export const WebhookAlert: React.FunctionComponent<React.PropsWithChildren<Props
         return null
     }
 
-    const SITE_ADMIN_CONFIG_DOC_URL = 'https://docs.sourcegraph.com/batch_changes/how-tos/site_admin_configuration'
+    const SITE_ADMIN_CONFIG_DOC_URL = '/help/batch_changes/how-tos/site_admin_configuration'
 
     return (
         <DismissibleAlert variant="warning" partialStorageKey={id}>

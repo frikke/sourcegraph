@@ -20,7 +20,7 @@
       "examples": ["https://gitlab.com", "https://gitlab.example.com"]
     },
     "token": {
-      "description": "A GitLab access token with \"api\" scope. Can be a personal access token (PAT) or an OAuth token. If you are enabling permissions with identity provider type \"external\", this token should also have \"sudo\" scope.",
+      "description": "A GitLab access token with \"api\" scope. Can be a personal access token (PAT) or an OAuth token. If you are enabling permissions with identity provider type \"username\", this token should also have \"sudo\" scope.",
       "type": "string",
       "minLength": 1
     },
@@ -62,7 +62,7 @@
       }
     },
     "gitURLType": {
-      "description": "The type of Git URLs to use for cloning and fetching Git repositories on this GitLab instance.\n\nIf \"http\", Sourcegraph will access GitLab repositories using Git URLs of the form http(s)://gitlab.example.com/myteam/myproject.git (using https: if the GitLab instance uses HTTPS).\n\nIf \"ssh\", Sourcegraph will access GitLab repositories using Git URLs of the form git@example.gitlab.com:myteam/myproject.git. See the documentation for how to provide SSH private keys and known_hosts: https://docs.sourcegraph.com/admin/repo/auth#repositories-that-need-http-s-or-ssh-authentication.",
+      "description": "The type of Git URLs to use for cloning and fetching Git repositories on this GitLab instance.\n\nIf \"http\", Sourcegraph will access GitLab repositories using Git URLs of the form http(s)://gitlab.example.com/myteam/myproject.git (using https: if the GitLab instance uses HTTPS).\n\nIf \"ssh\", Sourcegraph will access GitLab repositories using Git URLs of the form git@example.gitlab.com:myteam/myproject.git. See the documentation for how to provide SSH private keys and known_hosts: https://sourcegraph.com/docs/admin/repo/auth#repositories-that-need-http-s-or-ssh-authentication.",
       "type": "string",
       "enum": ["http", "ssh"],
       "default": "http"
@@ -106,7 +106,12 @@
         "type": "object",
         "title": "ExcludedGitLabProject",
         "additionalProperties": false,
-        "anyOf": [{ "required": ["name"] }, { "required": ["id"] }],
+        "anyOf": [
+          { "required": ["name"] },
+          { "required": ["id"] },
+          { "required": ["emptyRepos"] },
+          { "required": ["pattern"] }
+        ],
         "properties": {
           "name": {
             "description": "The name of a GitLab project (\"group/name\") to exclude from mirroring.",
@@ -116,11 +121,20 @@
           "id": {
             "description": "The ID of a GitLab project (as returned by the GitLab instance's API) to exclude from mirroring.",
             "type": "integer"
+          },
+          "emptyRepos": {
+            "description": "Whether to exclude empty repositories.",
+            "type": "boolean"
+          },
+          "pattern": {
+            "description": "Regular expression which matches against the name of a GitLab project (\"group/name\").",
+            "type": "string",
+            "format": "regex"
           }
         }
       },
       "examples": [
-        [{ "name": "group/name" }, { "id": 42 }],
+        [{ "name": "group/name" }, { "id": 42 }, { "emptyRepos": true }],
         [{ "name": "gitlab-org/gitlab-ee" }, { "name": "gitlab-com/www-gitlab-com" }]
       ]
     },
@@ -163,6 +177,11 @@
       "description": "Deprecated and ignored field which will be removed entirely in the next release. GitLab repositories can no longer be enabled or disabled explicitly.",
       "type": "boolean"
     },
+    "markInternalReposAsPublic": {
+      "description": "If true, internal repositories will be accessible to all users on Sourcegraph as if they were public, and user permission syncs will no longer check for public repositories. This overrides repository permissions but allows easier discovery and access to internal repositories, and may be desirable if all users on the Sourcegraph instance should have access to all internal repositories anyways. Defaults to false.",
+      "type": "boolean",
+      "default": false
+    },
     "authorization": {
       "title": "GitLabAuthorization",
       "description": "If non-null, enforces GitLab repository permissions. This requires that there be an item in the `auth.providers` field of type \"gitlab\" with the same `url` field as specified in this `GitLabConnection`.",
@@ -177,14 +196,10 @@
           "properties": {
             "type": {
               "type": "string",
-              "enum": ["oauth", "username", "external"]
+              "enum": ["oauth", "username"]
             }
           },
-          "oneOf": [
-            { "$ref": "#/definitions/OAuthIdentity" },
-            { "$ref": "#/definitions/UsernameIdentity" },
-            { "$ref": "#/definitions/ExternalIdentity" }
-          ],
+          "oneOf": [{ "$ref": "#/definitions/OAuthIdentity" }, { "$ref": "#/definitions/UsernameIdentity" }],
           "!go": {
             "taggedUnionType": true
           }
@@ -193,6 +208,7 @@
     },
     "webhooks": {
       "description": "An array of webhook configurations",
+      "deprecationMessage": "Deprecated in favour of first class webhooks. See https://sourcegraph.com/docs/admin/config/webhooks/incoming#deprecation-notice",
       "type": "array",
       "items": {
         "type": "object",
@@ -207,19 +223,6 @@
           }
         }
       }
-    },
-    "cloudGlobal": {
-      "title": "CloudGlobal",
-      "description": "When set to true, this external service will be chosen as our 'Global' GitLab service. Only valid on Sourcegraph.com. Only one service can have this flag set.",
-      "type": "boolean",
-      "default": false,
-      "deprecationMessage": "DEPRECATED: The cloud_default flag should be set in the database instead"
-    },
-    "cloudDefault": {
-      "title": "CloudDefault",
-      "description": "Only used to override the cloud_default column from a config file specified by EXTSVC_CONFIG_FILE",
-      "type": "boolean",
-      "default": false
     }
   },
   "definitions": {
@@ -242,29 +245,6 @@
         "type": {
           "type": "string",
           "const": "username"
-        }
-      }
-    },
-    "ExternalIdentity": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["type", "authProviderID", "authProviderType", "gitlabProvider"],
-      "properties": {
-        "type": {
-          "type": "string",
-          "const": "external"
-        },
-        "authProviderID": {
-          "type": "string",
-          "description": "The value of the `configID` field of the targeted authentication provider."
-        },
-        "authProviderType": {
-          "type": "string",
-          "description": "The `type` field of the targeted authentication provider."
-        },
-        "gitlabProvider": {
-          "type": "string",
-          "description": "The name that identifies the authentication provider to GitLab. This is passed to the `?provider=` query parameter in calls to the GitLab Users API. If you're not sure what this value is, you can look at the `identities` field of the GitLab Users API result (`curl  -H 'PRIVATE-TOKEN: $YOUR_TOKEN' $GITLAB_URL/api/v4/users`)."
         }
       }
     },

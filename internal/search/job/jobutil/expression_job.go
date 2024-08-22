@@ -3,9 +3,9 @@ package jobutil
 import (
 	"context"
 
-	"github.com/opentracing/opentracing-go/log"
+	"github.com/sourcegraph/conc/pool"
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/atomic"
-	"golang.org/x/sync/semaphore"
 
 	"github.com/sourcegraph/sourcegraph/internal/search"
 	"github.com/sourcegraph/sourcegraph/internal/search/job"
@@ -34,21 +34,15 @@ func (a *AndJob) Run(ctx context.Context, clients job.RuntimeClients, stream str
 	defer func() { finish(alert, err) }()
 
 	var (
-		g           errors.Group
+		p           = pool.New().WithContext(ctx).WithMaxGoroutines(16)
 		maxAlerter  search.MaxAlerter
 		limitHit    atomic.Bool
 		sentResults atomic.Bool
-		sem         = semaphore.NewWeighted(16)
 		merger      = result.NewMerger(len(a.children))
 	)
 	for childNum, child := range a.children {
 		childNum, child := childNum, child
-		g.Go(func() error {
-			if err := sem.Acquire(ctx, 1); err != nil {
-				return err
-			}
-			defer sem.Release(1)
-
+		p.Go(func(ctx context.Context) error {
 			intersectingStream := streaming.StreamFunc(func(event streaming.SearchEvent) {
 				if event.Stats.IsLimitHit {
 					limitHit.Store(true)
@@ -68,19 +62,14 @@ func (a *AndJob) Run(ctx context.Context, clients job.RuntimeClients, stream str
 		})
 	}
 
-	err = g.Wait()
-
-	if !sentResults.Load() && limitHit.Load() {
-		maxAlerter.Add(search.AlertForCappedAndExpression())
-	}
-	return maxAlerter.Alert, g.Wait()
+	return maxAlerter.Alert, p.Wait()
 }
 
 func (a *AndJob) Name() string {
 	return "AndJob"
 }
 
-func (a *AndJob) Fields(job.Verbosity) []log.Field { return nil }
+func (a *AndJob) Attributes(job.Verbosity) []attribute.KeyValue { return nil }
 
 func (a *AndJob) Children() []job.Describer {
 	res := make([]job.Describer, len(a.children))
@@ -149,18 +138,12 @@ func (j *OrJob) Run(ctx context.Context, clients job.RuntimeClients, stream stre
 
 	var (
 		maxAlerter search.MaxAlerter
-		g          errors.Group
-		sem        = semaphore.NewWeighted(16)
+		p          = pool.New().WithContext(ctx).WithMaxGoroutines(16)
 		merger     = result.NewMerger(len(j.children))
 	)
 	for childNum, child := range j.children {
 		childNum, child := childNum, child
-		g.Go(func() error {
-			if err := sem.Acquire(ctx, 1); err != nil {
-				return err
-			}
-			defer sem.Release(1)
-
+		p.Go(func(ctx context.Context) error {
 			unioningStream := streaming.StreamFunc(func(event streaming.SearchEvent) {
 				event.Results = merger.AddMatches(event.Results, childNum)
 				if len(event.Results) > 0 || !event.Stats.Zero() {
@@ -174,7 +157,7 @@ func (j *OrJob) Run(ctx context.Context, clients job.RuntimeClients, stream stre
 		})
 	}
 
-	err = g.Wait()
+	err = p.Wait()
 
 	// Send results that were only seen by some of the sources, regardless of
 	// whether we got an error from any of our children.
@@ -192,7 +175,7 @@ func (j *OrJob) Name() string {
 	return "OrJob"
 }
 
-func (j *OrJob) Fields(job.Verbosity) []log.Field { return nil }
+func (j *OrJob) Attributes(job.Verbosity) []attribute.KeyValue { return nil }
 
 func (j *OrJob) Children() []job.Describer {
 	res := make([]job.Describer, len(j.children))

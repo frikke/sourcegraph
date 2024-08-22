@@ -12,53 +12,57 @@ import (
 )
 
 type operations struct {
-	getReferences                        *observation.Operation
-	getImplementations                   *observation.Operation
-	getDiagnostics                       *observation.Operation
-	getHover                             *observation.Operation
-	getDefinitions                       *observation.Operation
-	getRanges                            *observation.Operation
-	getStencil                           *observation.Operation
-	getMonikersByPosition                *observation.Operation
-	getBulkMonikerLocations              *observation.Operation
-	getPackageInformation                *observation.Operation
-	getUploadsWithDefinitionsForMonikers *observation.Operation
-	getUploadIDsWithReferences           *observation.Operation
-	getDumpsByIDs                        *observation.Operation
-	getClosestDumpsForBlob               *observation.Operation
+	getReferences                     *observation.Operation
+	getImplementations                *observation.Operation
+	getPrototypes                     *observation.Operation
+	getDiagnostics                    *observation.Operation
+	getHover                          *observation.Operation
+	getDefinitions                    *observation.Operation
+	getRanges                         *observation.Operation
+	getStencil                        *observation.Operation
+	getClosestCompletedUploadsForBlob *observation.Operation
+	snapshotForDocument               *observation.Operation
+	visibleUploadsForPath             *observation.Operation
+	preciseUsages                     *observation.Operation
+	syntacticUsages                   *observation.Operation
+	searchBasedUsages                 *observation.Operation
 }
 
-func newOperations(observationContext *observation.Context) *operations {
-	metrics := metrics.NewREDMetrics(
-		observationContext.Registerer,
-		"codeintel_codenav",
-		metrics.WithLabels("op"),
-		metrics.WithCountHelp("Total number of method invocations."),
-	)
+var m = new(metrics.SingletonREDMetrics)
+
+func newOperations(observationCtx *observation.Context) *operations {
+	redMetrics := m.Get(func() *metrics.REDMetrics {
+		return metrics.NewREDMetrics(
+			observationCtx.Registerer,
+			"codeintel_codenav",
+			metrics.WithLabels("op"),
+			metrics.WithCountHelp("Total number of method invocations."),
+		)
+	})
 
 	op := func(name string) *observation.Operation {
-		return observationContext.Operation(observation.Op{
+		return observationCtx.Operation(observation.Op{
 			Name:              fmt.Sprintf("codeintel.codenav.%s", name),
 			MetricLabelValues: []string{name},
-			Metrics:           metrics,
+			Metrics:           redMetrics,
 		})
 	}
 
 	return &operations{
-		getReferences:                        op("getReferences"),
-		getImplementations:                   op("getImplementations"),
-		getDiagnostics:                       op("getDiagnostics"),
-		getHover:                             op("getHover"),
-		getDefinitions:                       op("getDefinitions"),
-		getRanges:                            op("getRanges"),
-		getStencil:                           op("getStencil"),
-		getMonikersByPosition:                op("GetMonikersByPosition"),
-		getBulkMonikerLocations:              op("GetBulkMonikerLocations"),
-		getPackageInformation:                op("GetPackageInformation"),
-		getUploadsWithDefinitionsForMonikers: op("GetUploadsWithDefinitionsForMonikers"),
-		getUploadIDsWithReferences:           op("GetUploadIDsWithReferences"),
-		getDumpsByIDs:                        op("GetDumpsByIDs"),
-		getClosestDumpsForBlob:               op("GetClosestDumpsForBlob"),
+		getReferences:                     op("getReferences"),
+		getImplementations:                op("getImplementations"),
+		getPrototypes:                     op("getPrototypes"),
+		getDiagnostics:                    op("getDiagnostics"),
+		getHover:                          op("getHover"),
+		getDefinitions:                    op("getDefinitions"),
+		getRanges:                         op("getRanges"),
+		getStencil:                        op("getStencil"),
+		getClosestCompletedUploadsForBlob: op("GetClosestCompletedUploadsForBlob"),
+		snapshotForDocument:               op("SnapshotForDocument"),
+		visibleUploadsForPath:             op("VisibleUploadsForPath"),
+		preciseUsages:                     op("PreciseUsages"),
+		syntacticUsages:                   op("SyntacticUsages"),
+		searchBasedUsages:                 op("SearchBasedUsages"),
 	}
 }
 

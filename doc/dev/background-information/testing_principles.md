@@ -19,7 +19,10 @@ Engineers should budget an appropriate amount of time for ensuring [test plans](
 
 **All pull requests must provide test plans** that indicate what has been done to test the changes being introduced. This can be done with a "Test plan" section within a pull request's description.
 
-Some pull requests may not require a rigorous test plan - see [Exceptions](#exceptions).
+These plans are here to demonstrate we're complying with industry standards which are critical for our customers. They may be read by auditors, customers, who are seeking to understand if with we uphold these standards.
+Therefore, it's perfectly fine to be succint as long as the substance is here. And because the audience for these test plans are engineers, they will understand the context. Changing a README for example can simply covered by stating you rendered it locally and it was fine.
+
+Some pull requests may not require a rigorous test plan in certain situations, see [Exceptions](#exceptions).
 
 ## Types of tests
 
@@ -37,7 +40,7 @@ The testing pyramid is a helpful way to determine the most appropriate type of t
 
 ![Testing pyramid](testing-pyramid.svg)
 
-The closer a test is to the bottom, the larger the scope of that test is. It means that failures will be harder to link to the actual cause. Tests at the bottom are notoriously slower than at the top.
+The closer a test is to the top, the larger the scope of that test is. It means that failures will be harder to link to the actual cause. Tests at the top are notoriously slower than at the bottom.
 
 It's important to take these trade-offs into account when deciding at which level to implement a test. Please refer to each testing level below for more details.
 
@@ -63,7 +66,7 @@ Benefits:
 
 - To the extent that fewer systems are under test compared to e2e tests, they are faster to run, easier to debug, have clearer ownership, and less vulnerable to [flakiness](#flaky-tests).
 - They only need to run on changes that touch code which could make the test fail, which makes CI faster and minimizes the impact of any [flakiness](#flaky-tests).
-- For UI behavior, they run in an actual browser - rather than a JSDOM environment.
+- For UI behavior, they run in an actual browser—rather than a JSDOM environment.
 
 Tradeoffs:
 
@@ -73,7 +76,6 @@ Tradeoffs:
 Examples:
 
 - Tests that call our search API to test the behavior of our entire search system.
-- Tests that validate UI styles, through [visual testing](#visual-testing).
 - Tests that validate UI behavior in the browser while mocking out all network requests so no backend is required.
   - Note: We still typically prefer unit tests here, only fall back to integration tests if you need to test some very specific behavior that cannot be covered in a unit test.
 
@@ -98,14 +100,6 @@ Examples:
 - Run our Sourcegraph Docker image and verify that site admins can complete the registration flow.
 - Run our Sourcegraph Docker image and verify that users can sign in and perform a search.
 
-#### Visual testing
-
-Visual testing is useful to catch visual regressions and verify designs for new features. [More info about visual testing philosophy](testing_web_code.md#visual-regressions)
-
-We use [Chromatic Storybook](https://www.chromatic.com/) to detect visual changes in specific React components. Post a message in #dev-chat that you need access to Chromatic, and someone will add you to our organization (you will also receive an invitation via e-mail). You should sign into Chromatic with your GitHub account. If a PR you author has visual changes, a UI Review in Chromatic will be generated. It is recommended that a designer approves the UI review.
-
-We use [Percy](https://percy.io/) to detect visual changes in Sourcegraph features during browser-based tests (client integration tests and end-to-end tests). You may need permissions to update screenshots if your feature introduces visual changes. Post a message in #dev-chat that you need access to Percy, and someone will add you to our organization (you will also receive an invitation via e-mail). Once you've been invited to the Sourcegraph organization and created a Percy account, you should then link it to your GitHub account.
-
 ### Other testing strategies
 
 - Targeted [code reviews](pull_request_reviews.md) can help ensure changes are appropriately tested.
@@ -118,11 +112,17 @@ We use [Percy](https://percy.io/) to detect visual changes in Sourcegraph featur
   - Introduce adequate [observability measures](observability/index.md) so that issues can easily be detected and monitored.
 - Documentation can help ensure that changes are easy to understand if anything goes wrong, and should be added to [sources of truth](https://handbook.sourcegraph.com/company-info-and-process/communication#sources-of-truth).
   - If the documentation will be published to docs.sourcegraph.com, it can be tested by running `sg run docsite` and navigating to the corrected page.
-- Some changes are easy to test manually - test plans can include what was done to perform this manual testing.
+- Some changes are easy to test manually—test plans can include what was done to perform this manual testing.
 
 ## Exceptions
 
 If for a situational reason, a pull request needs to be exempted from the testing guidelines, skipping reviews or not providing a [test plan](#test-plans) will trigger an automated process that create and link an issue requesting that the author document a reason for the exception within [sourcegraph/sec-pr-audit-trail](https://github.com/sourcegraph/sec-pr-audit-trail).
+
+### Why does it matter?
+
+In order to comply with industry standards that we share with our customers, we have to demonstrate that even when we're deviating from the standard process we're taking the necessary actions. This exception process is what gives us the flexibility to deal with edge cases when the normal process would slow us down to land some changes that we need to be merged right now. This automated exception mechanism gives us flexibility rather than forcing us to blindly comply with the process even if the situation clearly requires to go around it.
+
+Remember that auditors may look at these exception explanations, and might eventually ask you about what happened exactly six month from now. It's a small price to pay for a bit of flexibility. The created issues contains example on how to explain the most common scenarios to help you write a good explanation.
 
 ### Fixed exceptions
 
@@ -130,7 +130,6 @@ The list below designates source code exempt from the testing guidelines because
 
 - [sourcegraph/sourcegraph](https://github.com/sourcegraph/sourcegraph)
   - `dev/*`: internal tools, scripts for the local environment and continuous integration.
-  - `enterprise/dev/*`: internal tools, scripts for the local environment and continuous integration that fall under the [Sourcegraph Enterprise license](https://github.com/sourcegraph/sourcegraph/blob/main/LICENSE.enterprise).
   - Dev environment configuration (e.g. `.editorconfig`, `shell.nix`, etc.)
 
 To indicate exceptions like these, simply write `n/a` within your pull request's [test plan](#test-plans).
@@ -145,6 +144,9 @@ For these PRs a review may not be required. This can be indicated by creating a 
 
 No review required: deploys tested changes.
 ```
+
+Or, you may also attach `automerge` or `no-review-required` label to the PR to indicate the status of the PR and include a normal test plan without the `No review required:` prefix.
+
 
 ## Test health
 
@@ -161,6 +163,13 @@ Why are flaky tests undesirable? Because these tests stop being an informative s
 When fixing a flaky test, make sure to re-run the test in a loop to assess whether the fix actually worked. ([Go example](languages/testing_go_code.md#verifying-fixes-to-flaky-tests))
 
 Other kinds of flakes include [flaky steps](ci/index.md#flaky-steps) and [flaky infrastructure](ci/index.md#laky-infrastructure)
+
+#### Analytics about flakes
+
+Our pipeline exports test results to Buildkite Test Analytics. Rather than doing it at the individual test level, we record them at the test suite level (Bazel test targets). Therefore, any kind of test suite running with Bazel is recorded.
+You can find the statistics for all targets in the [`sourcegraph-bazel`](https://buildkite.com/organizations/sourcegraph/analytics/suites/sourcegraph-bazel?branch=main) dashboard.
+
+These numbers are extremely useful to prioritize work toward making a test suite more stable: you can instantly see if a test suite is failing often and costs time to every engineer, or if that's a rare occurence.
 
 ## Ownership
 

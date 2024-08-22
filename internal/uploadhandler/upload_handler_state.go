@@ -2,22 +2,41 @@ package uploadhandler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
+
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 type uploadState[T any] struct {
 	uploadID         int
+	suppliedUploadID bool
 	numParts         int
 	uploadedParts    []int
 	multipart        bool
-	suppliedIndex    bool
+	// suppliedIndex is true if the part index was supplied in the query parameters.
+	suppliedIndex bool
+	// index is 0-based part number for multi-part uploads
 	index            int
 	done             bool
 	uncompressedSize *int64
 	metadata         T
+}
+
+func (uploadState *uploadState[T]) Attrs() []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.Int("uploadID", uploadState.uploadID),
+		attribute.Int("numParts", uploadState.numParts),
+		attribute.Int("numUploadedParts", len(uploadState.uploadedParts)),
+		attribute.Bool("multipart", uploadState.multipart),
+		attribute.Bool("suppliedIndex", uploadState.suppliedIndex),
+		attribute.Int("index", uploadState.index),
+		attribute.Bool("done", uploadState.done),
+		attribute.String("metadata", fmt.Sprintf("%#v", uploadState.metadata)),
+	}
 }
 
 // constructUploadState reads the query args of the given HTTP request and populates an upload state object.
@@ -25,13 +44,14 @@ type uploadState[T any] struct {
 // backfilled/denormalized from the database, depending on the type of request.
 func (h *UploadHandler[T]) constructUploadState(ctx context.Context, r *http.Request) (uploadState[T], int, error) {
 	uploadState := uploadState[T]{
-		uploadID:      getQueryInt(r, "uploadId"),
-		suppliedIndex: hasQuery(r, "index"),
-		index:         getQueryInt(r, "index"),
-		done:          hasQuery(r, "done"),
+		suppliedUploadID: hasQuery(r, "uploadId"),
+		uploadID:         getQueryInt(r, "uploadId"),
+		suppliedIndex:    hasQuery(r, "index"),
+		index:            getQueryInt(r, "index"),
+		done:             hasQuery(r, "done"),
 	}
 
-	if uploadState.uploadID == 0 {
+	if !uploadState.suppliedUploadID {
 		return h.hydrateUploadStateFromRequest(ctx, r, uploadState)
 	}
 

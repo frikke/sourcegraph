@@ -5,11 +5,11 @@ import (
 
 	"github.com/sourcegraph/sourcegraph/internal/metrics"
 	"github.com/sourcegraph/sourcegraph/internal/observation"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 type operations struct {
 	createSandbox              *observation.Operation
-	inferIndexJobHints         *observation.Operation
 	inferIndexJobs             *observation.Operation
 	invokeLinearizedRecognizer *observation.Operation
 	invokeRecognizers          *observation.Operation
@@ -18,25 +18,34 @@ type operations struct {
 	setupRecognizers           *observation.Operation
 }
 
-func newOperations(observationContext *observation.Context) *operations {
-	metrics := metrics.NewREDMetrics(
-		observationContext.Registerer,
-		"codeintel_autoindexing_inference",
-		metrics.WithLabels("op"),
-		metrics.WithCountHelp("Total number of method invocations."),
-	)
+var m = new(metrics.SingletonREDMetrics)
+
+func newOperations(observationCtx *observation.Context) *operations {
+	redMetrics := m.Get(func() *metrics.REDMetrics {
+		return metrics.NewREDMetrics(
+			observationCtx.Registerer,
+			"codeintel_autoindexing_inference",
+			metrics.WithLabels("op"),
+			metrics.WithCountHelp("Total number of method invocations."),
+		)
+	})
 
 	op := func(name string) *observation.Operation {
-		return observationContext.Operation(observation.Op{
+		return observationCtx.Operation(observation.Op{
 			Name:              fmt.Sprintf("codeintel.autoindexing.inference.%s", name),
 			MetricLabelValues: []string{name},
-			Metrics:           metrics,
+			Metrics:           redMetrics,
+			ErrorFilter: func(err error) observation.ErrorFilterBehaviour {
+				if errors.As(err, &LimitError{}) {
+					return observation.EmitForNone
+				}
+				return observation.EmitForDefault
+			},
 		})
 	}
 
 	return &operations{
 		createSandbox:              op("createSandbox"),
-		inferIndexJobHints:         op("InferIndexJobHints"),
 		inferIndexJobs:             op("InferIndexJobs"),
 		invokeLinearizedRecognizer: op("invokeLinearizedRecognizer"),
 		invokeRecognizers:          op("invokeRecognizers"),

@@ -66,15 +66,17 @@ func TestMain(m *testing.M) {
 		log.Fatal("Failed to check if site needs init:", err)
 	}
 
+	client, err = gqltestutil.NewClient(*baseURL)
+	if err != nil {
+		log.Fatal("Failed to create gql client: ", err)
+	}
 	if needsSiteInit {
-		client, err = gqltestutil.SiteAdminInit(*baseURL, *email, *username, *password)
-		if err != nil {
-			log.Fatal("Failed to create site admin:", err)
+		if err := client.SiteAdminInit(*email, *username, *password); err != nil {
+			log.Fatal("Failed to create site admin: ", err)
 		}
 		log.Println("Site admin has been created:", *username)
 	} else {
-		client, err = gqltestutil.SignIn(*baseURL, *email, *password)
-		if err != nil {
+		if err := client.SignIn(*email, *password); err != nil {
 			log.Fatal("Failed to sign in:", err)
 		}
 		log.Println("Site admin authenticated:", *username)
@@ -82,7 +84,7 @@ func TestMain(m *testing.M) {
 
 	licenseKey := os.Getenv("SOURCEGRAPH_LICENSE_KEY")
 	if licenseKey != "" {
-		siteConfig, err := client.SiteConfiguration()
+		siteConfig, lastID, err := client.SiteConfiguration()
 		if err != nil {
 			log.Fatal("Failed to get site configuration:", err)
 		}
@@ -94,7 +96,7 @@ func TestMain(m *testing.M) {
 			}
 
 			siteConfig.LicenseKey = licenseKey
-			err = client.UpdateSiteConfiguration(siteConfig)
+			err = client.UpdateSiteConfiguration(siteConfig, lastID)
 			if err != nil {
 				return errors.Wrap(err, "update site configuration")
 			}

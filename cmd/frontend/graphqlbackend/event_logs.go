@@ -3,30 +3,21 @@ package graphqlbackend
 import (
 	"context"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/envvar"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/graphqlbackend/graphqlutil"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/gqlutil"
 )
 
 type eventLogsArgs struct {
-	graphqlutil.ConnectionArgs
+	gqlutil.ConnectionArgs
 	EventName *string // return only event logs matching the event name
 }
 
 func (r *UserResolver) EventLogs(ctx context.Context, args *eventLogsArgs) (*userEventLogsConnectionResolver, error) {
-	// 🚨 SECURITY: Only the authenticated user can view their event logs on
-	// Sourcegraph.com.
-	if envvar.SourcegraphDotComMode() {
-		if err := backend.CheckSameUser(ctx, r.user.ID); err != nil {
-			return nil, err
-		}
-	} else {
-		// 🚨 SECURITY: Only the authenticated user and site admins can view users'
-		// event logs.
-		if err := backend.CheckSiteAdminOrSameUser(ctx, r.db, r.user.ID); err != nil {
-			return nil, err
-		}
+	// 🚨 SECURITY: Only the authenticated user and site admins can view users'
+	// event logs.
+	if err := auth.CheckSiteAdminOrSameUser(ctx, r.db, r.user.ID); err != nil {
+		return nil, err
 	}
 
 	var opt database.EventLogsListOptions
@@ -68,7 +59,7 @@ func (r *userEventLogsConnectionResolver) TotalCount(ctx context.Context) (int32
 	return int32(count), err
 }
 
-func (r *userEventLogsConnectionResolver) PageInfo(ctx context.Context) (*graphqlutil.PageInfo, error) {
+func (r *userEventLogsConnectionResolver) PageInfo(ctx context.Context) (*gqlutil.PageInfo, error) {
 	var count int
 	var err error
 
@@ -81,5 +72,5 @@ func (r *userEventLogsConnectionResolver) PageInfo(ctx context.Context) (*graphq
 	if err != nil {
 		return nil, err
 	}
-	return graphqlutil.HasNextPage(r.opt.LimitOffset != nil && count > r.opt.Limit), nil
+	return gqlutil.HasNextPage(r.opt.LimitOffset != nil && count > r.opt.Limit), nil
 }

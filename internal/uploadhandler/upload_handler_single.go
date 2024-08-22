@@ -2,14 +2,12 @@ package uploadhandler
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 
 	sglog "github.com/sourcegraph/log"
-
-	"github.com/opentracing/opentracing-go/log"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/sourcegraph/sourcegraph/internal/observation"
 )
@@ -17,48 +15,26 @@ import (
 // handleEnqueueSinglePayload handles a non-multipart upload. This creates an upload record
 // with state 'queued', proxies the data to the bundle manager, and returns the generated ID.
 func (h *UploadHandler[T]) handleEnqueueSinglePayload(ctx context.Context, uploadState uploadState[T], body io.Reader) (_ any, statusCode int, err error) {
-	ctx, trace, endObservation := h.operations.handleEnqueueSinglePayload.With(ctx, &err, observation.Args{})
+	ctx, _, endObservation := h.operations.handleEnqueueSinglePayload.With(ctx, &err, observation.Args{})
 	defer func() {
-		endObservation(1, observation.Args{LogFields: []log.Field{
-			log.Int("statusCode", statusCode),
+		endObservation(1, observation.Args{Attrs: []attribute.KeyValue{
+			attribute.Int("statusCode", statusCode),
 		}})
 	}()
 
-	tx, err := h.dbStore.Transact(ctx)
-	if err != nil {
-		return nil, http.StatusInternalServerError, err
-	}
-	defer func() { err = tx.Done(err) }()
+	uploadResult, err := h.enqueuer.EnqueueSinglePayload(ctx, uploadState.metadata, uploadState.uncompressedSize, body)
 
-	id, err := tx.InsertUpload(ctx, Upload[T]{
-		State:            "uploading",
-		NumParts:         1,
-		UploadedParts:    []int{0},
-		UncompressedSize: uploadState.uncompressedSize,
-		Metadata:         uploadState.metadata,
-	})
 	if err != nil {
-		return nil, http.StatusInternalServerError, err
-	}
-	trace.Log(log.Int("uploadID", id))
-
-	size, err := h.uploadStore.Upload(ctx, fmt.Sprintf("upload-%d.lsif.gz", id), body)
-	if err != nil {
-		return nil, http.StatusInternalServerError, err
-	}
-	trace.Log(log.Int("gzippedUploadSize", int(size)))
-
-	if err := tx.MarkQueued(ctx, id, &size); err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
 
 	h.logger.Info(
 		"uploadhandler: enqueued upload",
-		sglog.Int("id", id),
+		sglog.Int("id", uploadResult.UploadID),
 	)
 
 	// older versions of src-cli expect a string
 	return struct {
 		ID string `json:"id"`
-	}{ID: strconv.Itoa(id)}, 0, nil
+	}{ID: strconv.Itoa(uploadResult.UploadID)}, 0, nil
 }

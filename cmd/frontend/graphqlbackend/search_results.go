@@ -9,36 +9,30 @@ import (
 	"sync"
 	"time"
 
-	"github.com/inconshreveable/log15"
-	"github.com/neelance/parallel"
-	"github.com/opentracing/opentracing-go"
-	"github.com/opentracing/opentracing-go/ext"
+	"github.com/inconshreveable/log15" //nolint:logging // TODO move all logging to sourcegraph/log
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/sourcegraph/conc/pool"
 	"github.com/sourcegraph/log"
 
 	searchlogs "github.com/sourcegraph/sourcegraph/cmd/frontend/internal/search/logs"
-	"github.com/sourcegraph/sourcegraph/internal/actor"
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	"github.com/sourcegraph/sourcegraph/internal/authz"
 	"github.com/sourcegraph/sourcegraph/internal/database"
-	"github.com/sourcegraph/sourcegraph/internal/deviceid"
-	"github.com/sourcegraph/sourcegraph/internal/featureflag"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver"
-	"github.com/sourcegraph/sourcegraph/internal/goroutine"
 	"github.com/sourcegraph/sourcegraph/internal/honey"
 	searchhoney "github.com/sourcegraph/sourcegraph/internal/honey/search"
 	"github.com/sourcegraph/sourcegraph/internal/rcache"
+	"github.com/sourcegraph/sourcegraph/internal/redispool"
 	"github.com/sourcegraph/sourcegraph/internal/search"
+	searchclient "github.com/sourcegraph/sourcegraph/internal/search/client"
 	"github.com/sourcegraph/sourcegraph/internal/search/job/jobutil"
 	"github.com/sourcegraph/sourcegraph/internal/search/query"
 	"github.com/sourcegraph/sourcegraph/internal/search/result"
 	"github.com/sourcegraph/sourcegraph/internal/search/streaming"
 	"github.com/sourcegraph/sourcegraph/internal/trace"
-	"github.com/sourcegraph/sourcegraph/internal/trace/ot"
 	"github.com/sourcegraph/sourcegraph/internal/types"
-	"github.com/sourcegraph/sourcegraph/internal/usagestats"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
@@ -85,11 +79,12 @@ func (c *SearchResultsResolver) repositoryResolvers(ctx context.Context, ids []a
 		return nil, nil
 	}
 
+	gsClient := gitserver.NewClient("graphql.search.results.repositories")
 	resolvers := make([]*RepositoryResolver, 0, len(ids))
 	err := c.db.Repos().StreamMinimalRepos(ctx, database.ReposListOptions{
 		IDs: ids,
 	}, func(repo *types.MinimalRepo) {
-		resolvers = append(resolvers, NewRepositoryResolver(c.db, gitserver.NewClient(c.db), repo.ToRepo()))
+		resolvers = append(resolvers, NewMinimalRepositoryResolver(c.db, gsClient, repo.ID, repo.Name))
 	})
 	if err != nil {
 		return nil, err
@@ -118,7 +113,7 @@ func (c *SearchResultsResolver) Missing(ctx context.Context) ([]*RepositoryResol
 }
 
 func (c *SearchResultsResolver) Timedout(ctx context.Context) ([]*RepositoryResolver, error) {
-	return c.repositoryResolvers(ctx, c.repoIDsByStatus(search.RepoStatusTimedout))
+	return c.repositoryResolvers(ctx, c.repoIDsByStatus(search.RepoStatusTimedOut))
 }
 
 func (c *SearchResultsResolver) IndexUnavailable() bool {
@@ -134,18 +129,14 @@ func (sr *SearchResultsResolver) Results() []SearchResultResolver {
 }
 
 func matchesToResolvers(db database.DB, matches []result.Match) []SearchResultResolver {
-	type repoKey struct {
-		Name types.MinimalRepo
-		Rev  string
-	}
-	repoResolvers := make(map[repoKey]*RepositoryResolver, 10)
-	getRepoResolver := func(repoName types.MinimalRepo, rev string) *RepositoryResolver {
-		if existing, ok := repoResolvers[repoKey{repoName, rev}]; ok {
+	repoResolvers := make(map[types.MinimalRepo]*RepositoryResolver, 10)
+	gsClient := gitserver.NewClient("graphql.search.results")
+	getRepoResolver := func(repoName types.MinimalRepo) *RepositoryResolver {
+		if existing, ok := repoResolvers[repoName]; ok {
 			return existing
 		}
-		resolver := NewRepositoryResolver(db, gitserver.NewClient(db), repoName.ToRepo())
-		resolver.RepoMatch.Rev = rev
-		repoResolvers[repoKey{repoName, rev}] = resolver
+		resolver := NewMinimalRepositoryResolver(db, gsClient, repoName.ID, repoName.Name)
+		repoResolvers[repoName] = resolver
 		return resolver
 	}
 
@@ -156,15 +147,17 @@ func matchesToResolvers(db database.DB, matches []result.Match) []SearchResultRe
 			resolvers = append(resolvers, &FileMatchResolver{
 				db:           db,
 				FileMatch:    *v,
-				RepoResolver: getRepoResolver(v.Repo, ""),
+				RepoResolver: getRepoResolver(v.Repo),
 			})
 		case *result.RepoMatch:
-			resolvers = append(resolvers, getRepoResolver(v.RepoName(), v.Rev))
+			resolvers = append(resolvers, getRepoResolver(v.RepoName()))
 		case *result.CommitMatch:
 			resolvers = append(resolvers, &CommitSearchResultResolver{
 				db:          db,
 				CommitMatch: *v,
 			})
+		case *result.OwnerMatch:
+			// todo(own): add OwnerSearchResultResolver
 		}
 	}
 	return resolvers
@@ -179,7 +172,7 @@ func (sr *SearchResultsResolver) ResultCount() int32 { return sr.MatchCount() }
 
 func (sr *SearchResultsResolver) ApproximateResultCount() string {
 	count := sr.MatchCount()
-	if sr.LimitHit() || sr.Stats.Status.Any(search.RepoStatusCloning|search.RepoStatusTimedout) {
+	if sr.LimitHit() || sr.Stats.Status.Any(search.RepoStatusCloning|search.RepoStatusTimedOut) {
 		return fmt.Sprintf("%d+", count)
 	}
 	return strconv.Itoa(int(count))
@@ -194,8 +187,8 @@ func (sr *SearchResultsResolver) ElapsedMilliseconds() int32 {
 }
 
 func (sr *SearchResultsResolver) DynamicFilters(ctx context.Context) []*searchFilterResolver {
-	tr, _ := trace.New(ctx, "DynamicFilters", "", trace.Tag{Key: "resolver", Value: "SearchResultsResolver"})
-	defer tr.Finish()
+	tr, _ := trace.New(ctx, "DynamicFilters", attribute.String("resolver", "SearchResultsResolver"))
+	defer tr.End()
 
 	var filters streaming.SearchFilters
 	filters.Update(streaming.SearchEvent{
@@ -227,48 +220,54 @@ func (sf *searchFilterResolver) Count() int32 {
 }
 
 func (sf *searchFilterResolver) LimitHit() bool {
-	return sf.filter.IsLimitHit
+	// TODO(camdencheek): calculate exhaustiveness correctly
+	return true
 }
 
 func (sf *searchFilterResolver) Kind() string {
-	return sf.filter.Kind
+	return string(sf.filter.Kind)
 }
 
 // blameFileMatch blames the specified file match to produce the time at which
 // the first line match inside of it was authored.
 func (sr *SearchResultsResolver) blameFileMatch(ctx context.Context, fm *result.FileMatch) (t time.Time, err error) {
-	span, ctx := ot.StartSpanFromContext(ctx, "blameFileMatch")
-	defer func() {
-		if err != nil {
-			ext.Error.Set(span, true)
-			span.SetTag("err", err.Error())
-		}
-		span.Finish()
-	}()
+	tr, ctx := trace.New(ctx, "SearchResultsResolver.blameFileMatch")
+	defer tr.EndWithErr(&err)
 
 	// Blame the first line match.
 	if len(fm.ChunkMatches) == 0 {
 		// No line match
 		return time.Time{}, nil
 	}
+
 	hm := fm.ChunkMatches[0]
-	hunks, err := gitserver.NewClient(sr.db).BlameFile(ctx, authz.DefaultSubRepoPermsChecker, fm.Repo.Name, fm.Path, &gitserver.BlameOptions{
+	hr, err := gitserver.NewClient("graphql.search.results.blame").StreamBlameFile(ctx, fm.Repo.Name, fm.Path, &gitserver.BlameOptions{
 		NewestCommit: fm.CommitID,
-		StartLine:    hm.Ranges[0].Start.Line,
-		EndLine:      hm.Ranges[0].Start.Line,
+		Range: &gitserver.BlameRange{
+			StartLine: hm.Ranges[0].Start.Line,
+			EndLine:   hm.Ranges[0].Start.Line,
+		},
 	})
 	if err != nil {
 		return time.Time{}, err
 	}
+	defer hr.Close()
 
-	return hunks[0].Author.Date, nil
+	// We are only interested in the first hunk, so we consume one and then return
+	// which calls hr.Close above.
+	hunk, err := hr.Read()
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	return hunk.Author.Date, nil
 }
 
 func (sr *SearchResultsResolver) Sparkline(ctx context.Context) (sparkline []int32, err error) {
 	var (
-		days     = 30                 // number of days the sparkline represents
-		maxBlame = 100                // maximum number of file results to blame for date/time information.
-		run      = parallel.NewRun(8) // number of concurrent blame ops
+		days     = 30  // number of days the sparkline represents
+		maxBlame = 100 // maximum number of file results to blame for date/time information.
+		p        = pool.New().WithMaxGoroutines(8)
 	)
 
 	var (
@@ -301,8 +300,8 @@ loop:
 	for _, r := range sr.Matches {
 		r := r // shadow so it doesn't change in the goroutine
 		switch m := r.(type) {
-		case *result.RepoMatch:
-			// We don't care about repo results here.
+		case *result.RepoMatch, *result.OwnerMatch:
+			// We don't care about repo or owner results here.
 			continue
 		case *result.CommitMatch:
 			// Diff searches are cheap, because we implicitly have author date info.
@@ -318,12 +317,8 @@ loop:
 				continue loop
 			}
 
-			run.Acquire()
-			goroutine.Go(func() {
-				defer run.Release()
-
+			p.Go(func() {
 				// Blame the file match in order to retrieve date informatino.
-				var err error
 				t, err := sr.blameFileMatch(ctx, m)
 				if err != nil {
 					log15.Warn("failed to blame fileMatch during sparkline generation", "error", err)
@@ -335,9 +330,7 @@ loop:
 			panic("SearchResults.Sparkline unexpected union type state")
 		}
 	}
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span.SetTag("blame_ops", blameOps)
-	}
+	p.Wait()
 	return sparkline, nil
 }
 
@@ -353,89 +346,6 @@ var (
 		Buckets: []float64{0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 20, 30},
 	}, []string{"status", "alert_type", "source", "request_name"})
 )
-
-// LogSearchLatency records search durations in the event database. This
-// function may only be called after a search result is performed, because it
-// relies on the invariant that query and pattern error checking has already
-// been performed.
-func LogSearchLatency(ctx context.Context, db database.DB, si *search.Inputs, durationMs int32) {
-	tr, ctx := trace.New(ctx, "LogSearchLatency", "")
-	defer tr.Finish()
-	var types []string
-	resultTypes, _ := si.Query.StringValues(query.FieldType)
-	for _, typ := range resultTypes {
-		switch typ {
-		case "repo", "symbol", "diff", "commit":
-			types = append(types, typ)
-		case "path":
-			// Map type:path to file
-			types = append(types, "file")
-		case "file":
-			switch {
-			case si.PatternType == query.SearchTypeStandard:
-				types = append(types, "standard")
-			case si.PatternType == query.SearchTypeStructural:
-				types = append(types, "structural")
-			case si.PatternType == query.SearchTypeLiteral:
-				types = append(types, "literal")
-			case si.PatternType == query.SearchTypeRegex:
-				types = append(types, "regexp")
-			case si.PatternType == query.SearchTypeLucky:
-				types = append(types, "lucky")
-			}
-		}
-	}
-
-	// Don't record composite searches that specify more than one type:
-	// because we can't break down the search timings into multiple
-	// categories.
-	if len(types) > 1 {
-		return
-	}
-
-	q, err := query.ToBasicQuery(si.Query)
-	if err != nil {
-		// Can't convert to a basic query, can't guarantee accurate reporting.
-		return
-	}
-	if !query.IsPatternAtom(q) {
-		// Not an atomic pattern, can't guarantee accurate reporting.
-		return
-	}
-
-	// If no type: was explicitly specified, infer the result type.
-	if len(types) == 0 {
-		// If a pattern was specified, a content search happened.
-		if q.IsLiteral() {
-			types = append(types, "literal")
-		} else if q.IsRegexp() {
-			types = append(types, "regexp")
-		} else if q.IsStructural() {
-			types = append(types, "structural")
-		} else if si.Query.Exists(query.FieldFile) {
-			// No search pattern specified and file: is specified.
-			types = append(types, "file")
-		} else {
-			// No search pattern or file: is specified, assume repo.
-			// This includes accounting for searches of fields that
-			// specify repohasfile: and repohascommitafter:.
-			types = append(types, "repo")
-		}
-	}
-
-	// Only log the time if we successfully resolved one search type.
-	if len(types) == 1 {
-		a := actor.FromContext(ctx)
-		if a.IsAuthenticated() && !a.IsMockUser() { // Do not log in tests
-			value := fmt.Sprintf(`{"durationMs": %d}`, durationMs)
-			eventName := fmt.Sprintf("search.latencies.%s", types[0])
-			err := usagestats.LogBackendEvent(db, a.UID, deviceid.FromContext(ctx), eventName, json.RawMessage(value), json.RawMessage(value), featureflag.GetEvaluatedFlagSet(ctx), nil)
-			if err != nil {
-				log15.Warn("Could not log search latency", "err", err)
-			}
-		}
-	}
-}
 
 func logPrometheusBatch(status, alertType, requestSource, requestName string, elapsed time.Duration) {
 	searchResponseCounter.WithLabelValues(
@@ -453,17 +363,9 @@ func logPrometheusBatch(status, alertType, requestSource, requestName string, el
 	).Observe(elapsed.Seconds())
 }
 
-func logBatch(ctx context.Context, db database.DB, searchInputs *search.Inputs, srr *SearchResultsResolver, err error) {
-	var wg sync.WaitGroup
-	defer wg.Wait()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		LogSearchLatency(ctx, db, searchInputs, srr.ElapsedMilliseconds())
-	}()
-
+func logBatch(ctx context.Context, searchInputs *search.Inputs, srr *SearchResultsResolver, err error) {
 	var status, alertType string
-	status = DetermineStatusForLogs(srr.SearchAlert, srr.Stats, err)
+	status = searchclient.DetermineStatusForLogs(srr.SearchAlert, srr.Stats, err)
 	if srr.SearchAlert != nil {
 		alertType = srr.SearchAlert.PrometheusType
 	}
@@ -484,6 +386,7 @@ func logBatch(ctx context.Context, db database.DB, searchInputs *search.Inputs, 
 			Status:        status,
 			AlertType:     alertType,
 			DurationMs:    srr.elapsed.Milliseconds(),
+			LatencyMs:     nil, // no latency for batch requests
 			ResultSize:    n,
 			Error:         err,
 		})
@@ -502,7 +405,7 @@ func (r *searchResolver) Results(ctx context.Context) (*SearchResultsResolver, e
 	alert, err := r.client.Execute(ctx, agg, r.SearchInputs)
 	srr := r.resultsToResolver(agg.Results, alert, agg.Stats)
 	srr.elapsed = time.Since(start)
-	logBatch(ctx, r.db, r.SearchInputs, srr, err)
+	logBatch(ctx, r.SearchInputs, srr, err)
 	return srr, err
 }
 
@@ -512,25 +415,6 @@ func (r *searchResolver) resultsToResolver(matches result.Matches, alert *search
 		SearchAlert: alert,
 		Stats:       stats,
 		db:          r.db,
-	}
-}
-
-// DetermineStatusForLogs determines the final status of a search for logging
-// purposes.
-func DetermineStatusForLogs(alert *search.Alert, stats streaming.Stats, err error) string {
-	switch {
-	case err == context.DeadlineExceeded:
-		return "timeout"
-	case err != nil:
-		return "error"
-	case stats.Status.All(search.RepoStatusTimedout) && stats.Status.Len() == len(stats.Repos):
-		return "timeout"
-	case stats.Status.Any(search.RepoStatusTimedout):
-		return "partial_timeout"
-	case alert != nil:
-		return "alert"
-	default:
-		return "success"
 	}
 }
 
@@ -551,7 +435,7 @@ func (srs *searchResultsStats) ApproximateResultCount() string { return srs.JApp
 func (srs *searchResultsStats) Sparkline() []int32             { return srs.JSparkline }
 
 var (
-	searchResultsStatsCache   = rcache.NewWithTTL("search_results_stats", 3600) // 1h
+	searchResultsStatsCache   = rcache.NewWithTTL(redispool.Cache, "search_results_stats", 3600) // 1h
 	searchResultsStatsCounter = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "src_graphql_search_results_stats_cache_hit",
 		Help: "Counts cache hits and misses for search results stats (e.g. sparklines).",
@@ -559,17 +443,6 @@ var (
 )
 
 func (r *searchResolver) Stats(ctx context.Context) (stats *searchResultsStats, err error) {
-	// Override user context to ensure that stats for this query are cached
-	// regardless of the user context's cancellation. For example, if
-	// stats/sparklines are slow to load on the homepage and all users navigate
-	// away from that page before they load, no user would ever see them and we
-	// would never cache them. This fixes that by ensuring the first request
-	// 'kicks off loading' and places the result into cache regardless of
-	// whether or not the original querier of this information still wants it.
-	originalCtx := ctx
-	ctx = context.Background()
-	ctx = opentracing.ContextWithSpan(ctx, opentracing.SpanFromContext(originalCtx))
-
 	cacheKey := r.SearchInputs.OriginalQuery
 	// Check if value is in the cache.
 	jsonRes, ok := searchResultsStatsCache.Get(cacheKey)
@@ -578,7 +451,7 @@ func (r *searchResolver) Stats(ctx context.Context) (stats *searchResultsStats, 
 		if err := json.Unmarshal(jsonRes, &stats); err != nil {
 			return nil, err
 		}
-		stats.logger = r.logger.Scoped("searchResultsStats", "provides status on search results")
+		stats.logger = r.logger.Scoped("searchResultsStats")
 		stats.sr = r
 		return stats, nil
 	}
@@ -598,6 +471,7 @@ func (r *searchResolver) Stats(ctx context.Context) (stats *searchResultsStats, 
 		if err != nil {
 			return nil, err
 		}
+		j = jobutil.NewLogJob(r.SearchInputs, j)
 		agg := streaming.NewAggregatingStream()
 		alert, err := j.Run(ctx, r.client.JobClients(), agg)
 		if err != nil {
@@ -609,7 +483,7 @@ func (r *searchResolver) Stats(ctx context.Context) (stats *searchResultsStats, 
 		}
 
 		status := v.Stats.Status
-		if !status.Any(search.RepoStatusCloning) && !status.Any(search.RepoStatusTimedout) {
+		if !status.Any(search.RepoStatusCloning) && !status.Any(search.RepoStatusTimedOut) {
 			break // zero results, but no cloning or timed out repos. No point in retrying.
 		}
 
@@ -617,7 +491,7 @@ func (r *searchResolver) Stats(ctx context.Context) (stats *searchResultsStats, 
 		status.Filter(search.RepoStatusCloning, func(api.RepoID) {
 			cloning++
 		})
-		status.Filter(search.RepoStatusTimedout, func(api.RepoID) {
+		status.Filter(search.RepoStatusTimedOut, func(api.RepoID) {
 			timedout++
 		})
 
@@ -638,7 +512,7 @@ func (r *searchResolver) Stats(ctx context.Context) (stats *searchResultsStats, 
 		return nil, err // sparkline generation failed, so don't cache.
 	}
 	stats = &searchResultsStats{
-		logger:                  r.logger.Scoped("searchResultsStats", "provides status on search results"),
+		logger:                  r.logger.Scoped("searchResultsStats"),
 		JApproximateResultCount: v.ApproximateResultCount(),
 		JSparkline:              sparkline,
 		sr:                      r,

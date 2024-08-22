@@ -1,23 +1,32 @@
 import React, { useCallback, useEffect } from 'react'
 
-import * as H from 'history'
-import { Observable, of } from 'rxjs'
+import { of, type Observable } from 'rxjs'
 
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
 import { LoadingSpinner } from '@sourcegraph/wildcard'
 
-import { FilteredConnection, FilteredConnectionQueryArguments } from '../../components/FilteredConnection'
+import { FilteredConnection, type FilteredConnectionQueryArguments } from '../../components/FilteredConnection'
 import { PageTitle } from '../../components/PageTitle'
-import { GitRefType, Scalars, GitRefConnectionFields, GitRefFields, RepositoryFields } from '../../graphql-operations'
-import { eventLogger } from '../../tracking/eventLogger'
-import { GitReferenceNode, queryGitReferences as queryGitReferencesFromBackend } from '../GitReference'
+import {
+    GitRefType,
+    type GitRefConnectionFields,
+    type GitRefFields,
+    type RepositoryFields,
+    type Scalars,
+} from '../../graphql-operations'
+import {
+    GitReferenceNode,
+    queryGitReferences as queryGitReferencesFromBackend,
+    type GitReferenceNodeProps,
+} from '../GitReference'
 
-interface Props {
+interface Props extends TelemetryV2Props {
     repo: RepositoryFields | undefined
-    history: H.History
-    location: H.Location
+    isPackage?: boolean
     queryGitReferences?: (args: {
         repo: Scalars['ID']
-        first?: number
+        first?: number | null
         query?: string
         type: GitRefType
         withBehindAhead?: boolean
@@ -27,13 +36,14 @@ interface Props {
 /** A page that shows all of a repository's tags. */
 export const RepositoryReleasesTagsPage: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
     repo,
-    history,
-    location,
-    queryGitReferences: queryGitReferences = queryGitReferencesFromBackend,
+    isPackage,
+    queryGitReferences = queryGitReferencesFromBackend,
+    telemetryRecorder,
 }) => {
     useEffect(() => {
-        eventLogger.logViewEvent('RepositoryReleasesTags')
-    }, [])
+        EVENT_LOGGER.logViewEvent('RepositoryReleasesTags')
+        telemetryRecorder.recordEvent('repo.releasesTags', 'view')
+    }, [telemetryRecorder])
 
     const queryTags = useCallback(
         (args: FilteredConnectionQueryArguments): Observable<GitRefConnectionFields> => {
@@ -52,21 +62,19 @@ export const RepositoryReleasesTagsPage: React.FunctionComponent<React.PropsWith
 
     return (
         <div className="repository-releases-page">
-            <PageTitle title="Tags" />
-            <FilteredConnection<GitRefFields>
+            <PageTitle title={isPackage ? 'Versions' : 'Tags'} />
+            <FilteredConnection<GitRefFields, Partial<GitReferenceNodeProps>>
                 className="my-3"
                 listClassName="list-group list-group-flush test-filtered-tags-connection"
-                noun="tag"
-                pluralNoun="tags"
+                {...(isPackage ? { noun: 'version', pluralNoun: 'versions' } : { noun: 'tag', pluralNoun: 'tags' })}
                 queryConnection={queryTags}
                 nodeComponent={GitReferenceNode}
+                nodeComponentProps={{ isPackageVersion: isPackage }}
                 ariaLabelFunction={(tagDisplayName: string) =>
                     `View this repository using ${tagDisplayName} as the selected revision`
                 }
                 defaultFirst={20}
                 autoFocus={true}
-                history={history}
-                location={location}
             />
         </div>
     )

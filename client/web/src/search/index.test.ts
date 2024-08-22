@@ -1,11 +1,14 @@
-import { createBrowserHistory, History, Location } from 'history'
-import { of, Subscription, Observable } from 'rxjs'
-import { first, startWith, tap, last } from 'rxjs/operators'
+import { type Location, createPath } from 'react-router-dom'
+import { Subscription, Subject, lastValueFrom } from 'rxjs'
+import { tap, last } from 'rxjs/operators'
+import { afterEach, beforeEach, describe, expect, it, test } from 'vitest'
 
-import { resetAllMemoizationCaches } from '@sourcegraph/common'
+import { logger, resetAllMemoizationCaches } from '@sourcegraph/common'
+import { SearchMode } from '@sourcegraph/shared/src/search'
+import { createBarrier } from '@sourcegraph/testing'
+import { renderWithBrandedContext } from '@sourcegraph/wildcard/src/testing'
 
 import { SearchPatternType } from '../graphql-operations'
-import { observeLocation } from '../util/location'
 
 import { parseSearchURL, repoFilterForRepoRevision, getQueryStateFromLocation } from '.'
 
@@ -22,6 +25,7 @@ describe('search/index', () => {
             query: 'TEST repo:sourcegraph/sourcegraph',
             patternType: SearchPatternType.standard,
             caseSensitive: true,
+            searchMode: SearchMode.Precise,
         })
 
         expect(
@@ -30,6 +34,7 @@ describe('search/index', () => {
             query: 'TEST repo:sourcegraph/sourcegraph',
             patternType: SearchPatternType.standard,
             caseSensitive: false,
+            searchMode: SearchMode.Precise,
         })
 
         expect(
@@ -38,12 +43,14 @@ describe('search/index', () => {
             query: 'TEST repo:sourcegraph/sourcegraph',
             patternType: SearchPatternType.regexp,
             caseSensitive: true,
+            searchMode: SearchMode.Precise,
         })
 
         expect(parseSearchURL('q=TEST+repo:sourcegraph/sourcegraph+case:yes&patternType=standard')).toStrictEqual({
             query: 'TEST repo:sourcegraph/sourcegraph',
             patternType: SearchPatternType.standard,
             caseSensitive: true,
+            searchMode: SearchMode.Precise,
         })
 
         expect(
@@ -54,12 +61,14 @@ describe('search/index', () => {
             query: 'TEST repo:sourcegraph/sourcegraph',
             patternType: SearchPatternType.regexp,
             caseSensitive: false,
+            searchMode: SearchMode.Precise,
         })
 
         expect(parseSearchURL('q=TEST+repo:sourcegraph/sourcegraph&patternType=standard')).toStrictEqual({
             query: 'TEST repo:sourcegraph/sourcegraph',
             patternType: SearchPatternType.standard,
             caseSensitive: false,
+            searchMode: SearchMode.Precise,
         })
     })
 
@@ -72,6 +81,7 @@ describe('search/index', () => {
             query: 'TEST repo:sourcegraph/sourcegraph case:yes',
             patternType: SearchPatternType.standard,
             caseSensitive: true,
+            searchMode: SearchMode.Precise,
         })
 
         expect(
@@ -82,6 +92,7 @@ describe('search/index', () => {
             query: 'TEST repo:sourcegraph/sourcegraph',
             patternType: SearchPatternType.standard,
             caseSensitive: false,
+            searchMode: SearchMode.Precise,
         })
 
         expect(
@@ -92,6 +103,7 @@ describe('search/index', () => {
             query: 'TEST repo:sourcegraph/sourcegraph case:yes',
             patternType: SearchPatternType.regexp,
             caseSensitive: true,
+            searchMode: SearchMode.Precise,
         })
 
         expect(
@@ -102,6 +114,7 @@ describe('search/index', () => {
             query: 'TEST repo:sourcegraph/sourcegraph case:yes',
             patternType: SearchPatternType.standard,
             caseSensitive: true,
+            searchMode: SearchMode.Precise,
         })
 
         expect(
@@ -113,6 +126,7 @@ describe('search/index', () => {
             query: 'TEST repo:sourcegraph/sourcegraph',
             patternType: SearchPatternType.regexp,
             caseSensitive: false,
+            searchMode: SearchMode.Precise,
         })
 
         expect(
@@ -121,33 +135,14 @@ describe('search/index', () => {
             query: 'TEST repo:sourcegraph/sourcegraph',
             patternType: SearchPatternType.standard,
             caseSensitive: false,
-        })
-    })
-
-    test('parseSearchURL preserves literal search compatibility', () => {
-        expect(parseSearchURL('q=/a literal pattern/&patternType=literal')).toStrictEqual({
-            query: 'content:"/a literal pattern/"',
-            patternType: SearchPatternType.standard,
-            caseSensitive: false,
-        })
-
-        expect(parseSearchURL('q=not /a literal pattern/&patternType=literal')).toStrictEqual({
-            query: 'not content:"/a literal pattern/"',
-            patternType: SearchPatternType.standard,
-            caseSensitive: false,
-        })
-
-        expect(parseSearchURL('q=un.*touched&patternType=literal')).toStrictEqual({
-            query: 'un.*touched',
-            patternType: SearchPatternType.standard,
-            caseSensitive: false,
+            searchMode: SearchMode.Precise,
         })
     })
 })
 
 describe('repoFilterForRepoRevision escapes values with spaces', () => {
     test('escapes spaces in value', () => {
-        expect(repoFilterForRepoRevision('7 is my final answer', false)).toMatchInlineSnapshot(
+        expect(repoFilterForRepoRevision('7 is my final answer')).toMatchInlineSnapshot(
             '"^7\\\\ is\\\\ my\\\\ final\\\\ answer$"'
         )
     })
@@ -166,83 +161,37 @@ describe('updateQueryStateFromURL', () => {
         resetAllMemoizationCaches()
     })
 
-    function createHistoryObservable(search: string): [Observable<Location>, History] {
-        const history = createBrowserHistory()
-        history.replace({ search })
+    function createHistoryObservable(search: string): [Subject<Location>, Location] {
+        const { locationRef } = renderWithBrandedContext(null, { route: createPath({ search }) })
+        const locationSubject = new Subject<Location>()
 
-        return [observeLocation(history).pipe(startWith(history.location)), history]
+        return [locationSubject, locationRef.current!]
     }
 
     const isSearchContextAvailable = () => Promise.resolve(true)
-    const showSearchContext = of(false)
 
     describe('search context', () => {
-        it('should extract the search context from the query', () => {
-            const [location] = createHistoryObservable('q=context:me+test')
+        it('should extract the search context from the query', async () => {
+            const { wait, done } = createBarrier()
+            const [locationSubject, location] = createHistoryObservable('q=context:me+test')
 
-            return getQueryStateFromLocation({
-                location: location.pipe(first()),
-                isSearchContextAvailable,
-                showSearchContext,
-            })
-                .pipe(
+            lastValueFrom(
+                getQueryStateFromLocation({
+                    location: locationSubject,
+                    isSearchContextAvailable,
+                }).pipe(
                     last(),
-                    tap(({ searchContextSpec }) => {
-                        expect(searchContextSpec).toEqual('me')
+                    tap(({ searchContextSpec, query }) => {
+                        expect(searchContextSpec?.spec).toEqual('me')
+                        expect(query).toEqual('context:me test')
+                        done()
                     })
                 )
-                .toPromise()
-        })
+            ).catch(logger.error)
 
-        it('remove the context filter from the URL if search contexts are enabled and available', () => {
-            const [location] = createHistoryObservable('q=context:me+test')
-
-            return getQueryStateFromLocation({
-                location: location.pipe(first()),
-                isSearchContextAvailable: () => Promise.resolve(true),
-                showSearchContext: of(true),
-            })
-                .pipe(
-                    last(),
-                    tap(({ processedQuery }) => {
-                        expect(processedQuery).toBe('test')
-                    })
-                )
-                .toPromise()
-        })
-
-        it('should not remove the context filter from the URL if search context is not available', () => {
-            const [location] = createHistoryObservable('q=context:me+test')
-
-            return getQueryStateFromLocation({
-                location: location.pipe(first()),
-                showSearchContext: of(true),
-                isSearchContextAvailable: () => Promise.resolve(false),
-            })
-                .pipe(
-                    last(),
-                    tap(({ processedQuery }) => {
-                        expect(processedQuery).toBe('context:me test')
-                    })
-                )
-                .toPromise()
-        })
-
-        it('should not remove the context filter from the URL if search contexts are disabled', () => {
-            const [location] = createHistoryObservable('q=context:me+test')
-
-            return getQueryStateFromLocation({
-                location: location.pipe(first()),
-                showSearchContext: of(false),
-                isSearchContextAvailable: () => Promise.resolve(true),
-            })
-                .pipe(
-                    last(),
-                    tap(({ processedQuery }) => {
-                        expect(processedQuery).toBe('context:me test')
-                    })
-                )
-                .toPromise()
+            locationSubject.next(location)
+            locationSubject.complete()
+            await wait
         })
     })
 })

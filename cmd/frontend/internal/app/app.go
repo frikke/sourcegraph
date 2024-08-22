@@ -2,20 +2,17 @@ package app
 
 import (
 	"net/http"
-	"time"
 
-	"github.com/NYTimes/gziphandler"
 	"github.com/sourcegraph/log"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/globals"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/app/errorutil"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/app/router"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/app/ui"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/auth/accessrequest"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/auth/userpasswd"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/session"
-	registry "github.com/sourcegraph/sourcegraph/cmd/frontend/registry/api"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/telemetry/telemetryrecorder"
 	"github.com/sourcegraph/sourcegraph/internal/trace"
 )
 
@@ -23,12 +20,8 @@ import (
 //
 // 🚨 SECURITY: The caller MUST wrap the returned handler in middleware that checks authentication
 // and sets the actor in the request context.
-func NewHandler(db database.DB, logger log.Logger, githubAppSetupHandler http.Handler) http.Handler {
-	session.SetSessionStore(session.NewRedisStore(func() bool {
-		return globals.ExternalURL().Scheme == "https"
-	}))
-
-	logger = logger.Scoped("appHandler", "handles routes for all app related requests")
+func NewHandler(db database.DB, logger log.Logger) http.Handler {
+	logger = logger.Scoped("appHandler")
 
 	r := router.Router()
 
@@ -49,29 +42,26 @@ func NewHandler(db database.DB, logger log.Logger, githubAppSetupHandler http.Ha
 	})))
 
 	r.Get(router.GopherconLiveBlog).Handler(trace.Route(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "https://about.sourcegraph.com/go", http.StatusFound)
+		http.Redirect(w, r, "https://sourcegraph.com/go", http.StatusFound)
 	})))
 
 	r.Get(router.UI).Handler(ui.Router())
 
-	lockoutOptions := conf.AuthLockout()
-	lockoutStore := userpasswd.NewLockoutStore(
-		lockoutOptions.FailedAttemptThreshold,
-		time.Duration(lockoutOptions.LockoutPeriod)*time.Second,
-		time.Duration(lockoutOptions.ConsecutivePeriod)*time.Second,
-	)
-	r.Get(router.SignUp).Handler(trace.Route(userpasswd.HandleSignUp(logger, db)))
-	r.Get(router.SiteInit).Handler(trace.Route(userpasswd.HandleSiteInit(logger, db)))
-	r.Get(router.SignIn).Handler(trace.Route(userpasswd.HandleSignIn(logger, db, lockoutStore)))
-	r.Get(router.SignOut).Handler(trace.Route(serveSignOutHandler(db)))
+	lockoutStore := userpasswd.NewLockoutStoreFromConf(conf.AuthLockout())
+	eventRecorder := telemetryrecorder.New(db)
+
+	r.Get(router.SignUp).Handler(trace.Route(userpasswd.HandleSignUp(logger, db, eventRecorder)))
+	r.Get(router.RequestAccess).Handler(trace.Route(accessrequest.HandleRequestAccess(logger, db)))
+	r.Get(router.SiteInit).Handler(trace.Route(userpasswd.HandleSiteInit(logger, db, eventRecorder)))
+	r.Get(router.SignIn).Handler(trace.Route(userpasswd.HandleSignIn(logger, db, lockoutStore, eventRecorder)))
+	r.Get(router.SignOut).Handler(trace.Route(serveSignOutHandler(logger, db)))
 	r.Get(router.UnlockAccount).Handler(trace.Route(userpasswd.HandleUnlockAccount(logger, db, lockoutStore)))
+	r.Get(router.UnlockUserAccount).Handler(trace.Route(userpasswd.HandleUnlockUserAccount(logger, db, lockoutStore)))
 	r.Get(router.ResetPasswordInit).Handler(trace.Route(userpasswd.HandleResetPasswordInit(logger, db)))
 	r.Get(router.ResetPasswordCode).Handler(trace.Route(userpasswd.HandleResetPasswordCode(logger, db)))
 	r.Get(router.VerifyEmail).Handler(trace.Route(serveVerifyEmail(db)))
 
 	r.Get(router.CheckUsernameTaken).Handler(trace.Route(userpasswd.HandleCheckUsernameTaken(logger, db)))
-
-	r.Get(router.RegistryExtensionBundle).Handler(trace.Route(gziphandler.GzipHandler(registry.HandleRegistryExtensionBundle(db))))
 
 	// Usage statistics ZIP download
 	r.Get(router.UsageStatsDownload).Handler(trace.Route(usageStatsArchiveHandler(db)))
@@ -81,10 +71,6 @@ func NewHandler(db database.DB, logger log.Logger, githubAppSetupHandler http.Ha
 
 	// Ping retrieval
 	r.Get(router.LatestPing).Handler(trace.Route(latestPingHandler(db)))
-
-	// Sourcegraph GitHub App setup (Cloud and on-prem)
-	r.Get(router.SetupGitHubAppCloud).Handler(trace.Route(githubAppSetupHandler))
-	r.Get(router.SetupGitHubApp).Handler(trace.Route(githubAppSetupHandler))
 
 	r.Get(router.Editor).Handler(trace.Route(errorutil.Handler(serveEditor(db))))
 

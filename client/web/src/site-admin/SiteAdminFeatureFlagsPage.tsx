@@ -1,25 +1,26 @@
-import React, { useCallback, useMemo } from 'react'
+import React, { useCallback, useEffect, useMemo } from 'react'
 
 import { mdiChevronRight } from '@mdi/js'
 import classNames from 'classnames'
-import { RouteComponentProps } from 'react-router'
-import { of, Observable, forkJoin } from 'rxjs'
+import { forkJoin, of, type Observable } from 'rxjs'
 import { catchError, map, mergeMap } from 'rxjs/operators'
 
-import { asError, ErrorLike, isErrorLike, pluralize } from '@sourcegraph/common'
-import { aggregateStreamingSearch, ContentMatch, LATEST_VERSION } from '@sourcegraph/shared/src/search/stream'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { Link, PageHeader, Container, Code, H3, Text, Icon, Tooltip, ButtonLink } from '@sourcegraph/wildcard'
+import { asError, isErrorLike, pluralize, type ErrorLike } from '@sourcegraph/common'
+import { LATEST_VERSION, aggregateStreamingSearch, type ContentMatch } from '@sourcegraph/shared/src/search/stream'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { Alert, ButtonLink, Code, Container, H3, Icon, Link, PageHeader, Text, Tooltip } from '@sourcegraph/wildcard'
 
-import { FilteredConnection, FilteredConnectionFilter } from '../components/FilteredConnection'
+import { FilteredConnection, type Filter } from '../components/FilteredConnection'
 import { PageTitle } from '../components/PageTitle'
-import { FeatureFlagFields, SearchPatternType } from '../graphql-operations'
+import { useFeatureFlag } from '../featureFlags/useFeatureFlag'
+import { SearchPatternType, type FeatureFlagFields } from '../graphql-operations'
 
 import { fetchFeatureFlags as defaultFetchFeatureFlags } from './backend'
 
 import styles from './SiteAdminFeatureFlagsPage.module.scss'
 
-interface SiteAdminFeatureFlagsPageProps extends RouteComponentProps<{}>, TelemetryProps {
+interface SiteAdminFeatureFlagsPageProps extends TelemetryProps, TelemetryV2Props {
     fetchFeatureFlags?: typeof defaultFetchFeatureFlags
     productVersion?: string
 }
@@ -53,13 +54,24 @@ export type FeatureFlagAndReferences = FeatureFlagFields & {
  * @returns git ref
  */
 export function parseProductReference(productVersion: string): string {
-    // Look for format 135331_2022-03-04_2bb6927bb028, where last segment is commit
+    // Look for format 214157_2023-04-19_5.0-89aa613e7e1e, where last segment is
+    // $VERSION-$COMMIT
     const parts = productVersion.split('_')
     if (parts.length === 3) {
-        return parts.pop() || 'main'
+        // We need to split $VERSION-$COMMIT - if any of these step fails, we
+        // fall back to main.
+        const versionAndCommit = parts.pop()?.split('-')
+        if (!versionAndCommit || versionAndCommit.length !== 2) {
+            return 'main'
+        }
+        return versionAndCommit[1]
+    }
+    // Unknown format, fall back to main
+    if (parts.length === 2) {
+        return 'main'
     }
     // Special case for dev tag
-    if (productVersion === '0.0.0') {
+    if (productVersion.startsWith('0.0.0')) {
         return 'main'
     }
     // Otherwise assume product version is probably a tag
@@ -92,12 +104,12 @@ export function getFeatureFlagReferences(flagName: string, productGitVersion: st
     )
 }
 
-const filters: FilteredConnectionFilter[] = [
+const filters: Filter[] = [
     {
         id: 'filters',
         label: 'Type',
         type: 'select',
-        values: [
+        options: [
             {
                 label: 'All',
                 value: 'all',
@@ -122,7 +134,7 @@ const filters: FilteredConnectionFilter[] = [
 
 export const SiteAdminFeatureFlagsPage: React.FunctionComponent<
     React.PropsWithChildren<SiteAdminFeatureFlagsPageProps>
-> = ({ fetchFeatureFlags = defaultFetchFeatureFlags, productVersion = window.context.version, ...props }) => {
+> = ({ fetchFeatureFlags = defaultFetchFeatureFlags, productVersion = window.context.version, telemetryRecorder }) => {
     // Try to parse out a git rev based on the product version, otherwise just fall back
     // to main.
     const productGitVersion = parseProductReference(productVersion)
@@ -178,17 +190,19 @@ export const SiteAdminFeatureFlagsPage: React.FunctionComponent<
         [featureFlagsOrErrorsObservable]
     )
 
+    const [isSourcegraphCloudManagedFeatureFlagsWarningShown] = useFeatureFlag(
+        'sourcegraph-cloud-managed-feature-flags-warning-shown'
+    )
+
+    useEffect(() => telemetryRecorder.recordEvent('admin.featureFlags', 'view'), [telemetryRecorder])
+
     return (
         <>
             <PageTitle title="Feature flags - Admin" />
 
             <PageHeader
                 headingElement="h2"
-                path={[
-                    {
-                        text: <>Feature flags</>,
-                    },
-                ]}
+                path={[{ text: 'Feature flags' }]}
                 description={
                     <>
                         Feature flags, as opposed to experimental features, are intended to be strictly short-lived.
@@ -200,13 +214,20 @@ export const SiteAdminFeatureFlagsPage: React.FunctionComponent<
                         .
                     </>
                 }
-                className="mb-3"
+                className={classNames(styles.pageHeader, 'mb-3')}
                 actions={
-                    <ButtonLink variant="primary" to="./feature-flags/configuration/new">
+                    <ButtonLink variant="primary" to="./configuration/new">
                         Create feature flag
                     </ButtonLink>
                 }
             />
+
+            {isSourcegraphCloudManagedFeatureFlagsWarningShown && (
+                <Alert variant="info">
+                    Feature flag settings are managed by Sourcegraph and will be overridden by updates. Contact support
+                    for help.
+                </Alert>
+            )}
 
             <Container>
                 <FilteredConnection<FeatureFlagAndReferences, {}>
@@ -216,9 +237,8 @@ export const SiteAdminFeatureFlagsPage: React.FunctionComponent<
                     pluralNoun="feature flags"
                     queryConnection={queryFeatureFlags}
                     nodeComponent={FeatureFlagNode}
-                    history={props.history}
-                    location={props.location}
                     filters={filters}
+                    withCenteredSummary={true}
                 />
             </Container>
         </>
@@ -276,7 +296,7 @@ const FeatureFlagNode: React.FunctionComponent<React.PropsWithChildren<FeatureFl
             </span>
 
             <span className={classNames(styles.button, 'd-none d-md-inline')}>
-                <Link to={`./feature-flags/configuration/${node.name}`} className="p-0">
+                <Link to={`./configuration/${node.name}`} className="p-0">
                     <Icon svgPath={mdiChevronRight} inline={false} aria-label="Configure" />
                 </Link>
             </span>

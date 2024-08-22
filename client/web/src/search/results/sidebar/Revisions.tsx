@@ -2,20 +2,19 @@ import React from 'react'
 
 import classNames from 'classnames'
 
+import { FilterLink, TabIndex, type RevisionsProps } from '@sourcegraph/branded'
+import { styles } from '@sourcegraph/branded/src/search-ui/results/sidebar/SearchFilterSection'
 import { dataOrThrowErrors, gql } from '@sourcegraph/http-client'
-import { FilterLink, RevisionsProps, TabIndex } from '@sourcegraph/search-ui'
-// eslint-disable-next-line no-restricted-imports
-import styles from '@sourcegraph/search-ui/src/results/sidebar/SearchFilterSection.module.scss'
-import { GitRefType } from '@sourcegraph/shared/src/schema'
 import { FilterType } from '@sourcegraph/shared/src/search/query/filters'
 import { useTemporarySetting } from '@sourcegraph/shared/src/settings/temporary/useTemporarySetting'
 import { Button, LoadingSpinner, Tab, TabList, TabPanel, TabPanels, Tabs, Text } from '@sourcegraph/wildcard'
 
-import { useConnection } from '../../../components/FilteredConnection/hooks/useConnection'
+import { useShowMorePagination } from '../../../components/FilteredConnection/hooks/useShowMorePagination'
 import {
-    SearchSidebarGitRefsResult,
-    SearchSidebarGitRefsVariables,
-    SearchSidebarGitRefFields,
+    GitRefType,
+    type SearchSidebarGitRefFields,
+    type SearchSidebarGitRefsResult,
+    type SearchSidebarGitRefsVariables,
 } from '../../../graphql-operations'
 
 import revisionStyles from './Revisions.module.scss'
@@ -27,7 +26,7 @@ export const GIT_REVS_QUERY = gql`
             ... on Repository {
                 __typename
                 id
-                gitRefs(first: $first, query: $query, type: $type, orderBy: AUTHORED_OR_COMMITTED_AT) {
+                gitRefs(first: $first, query: $query, type: $type) {
                     __typename
                     nodes {
                         ...SearchSidebarGitRefFields
@@ -64,14 +63,13 @@ const RevisionList: React.FunctionComponent<React.PropsWithChildren<RevisionList
     pluralNoun,
     query,
 }) => {
-    const { connection, fetchMore, hasNextPage, loading, error } = useConnection<
+    const { connection, fetchMore, hasNextPage, loading, error } = useShowMorePagination<
         SearchSidebarGitRefsResult,
         SearchSidebarGitRefsVariables,
         SearchSidebarGitRefFields
     >({
         query: GIT_REVS_QUERY,
         variables: {
-            first: DEFAULT_FIRST,
             repo: repoName,
             query,
             type,
@@ -82,6 +80,9 @@ const RevisionList: React.FunctionComponent<React.PropsWithChildren<RevisionList
                 throw new Error('Unable to fetch repo revisions.')
             }
             return data?.repository?.gitRefs
+        },
+        options: {
+            pageSize: DEFAULT_FIRST,
         },
     })
 
@@ -185,6 +186,5 @@ Revisions.displayName = 'Revisions'
 
 export const getRevisions = (props: Omit<RevisionsProps, 'query'>) =>
     function RevisionsSection(query: string) {
-        // eslint-disable-next-line no-restricted-syntax
         return <Revisions {...props} query={query} />
     }

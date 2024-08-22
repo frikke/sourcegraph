@@ -30,11 +30,15 @@ func (fm *FileMatchResolver) File() *GitTreeEntryResolver {
 	// NOTE(sqs): Omits other commit fields to avoid needing to fetch them
 	// (which would make it slow). This GitCommitResolver will return empty
 	// values for all other fields.
-	return NewGitTreeEntryResolver(fm.db, fm.Commit(), CreateFileInfo(fm.Path, false))
+	opts := GitTreeEntryResolverOpts{
+		Commit: fm.Commit(),
+		Stat:   CreateFileInfo(fm.Path, false),
+	}
+	return NewGitTreeEntryResolver(fm.db, gitserver.NewClient("graphql.filematch.tree"), opts)
 }
 
 func (fm *FileMatchResolver) Commit() *GitCommitResolver {
-	commit := NewGitCommitResolver(fm.db, gitserver.NewClient(fm.db), fm.RepoResolver, fm.CommitID, nil)
+	commit := NewGitCommitResolver(fm.db, gitserver.NewClient("graphql.filematch.commit"), fm.RepoResolver, fm.CommitID, nil)
 	commit.inputRev = fm.InputRev
 	return commit
 }
@@ -71,6 +75,18 @@ func (fm *FileMatchResolver) ChunkMatches() []chunkMatchResolver {
 		r = append(r, chunkMatchResolver{cm})
 	}
 	return r
+}
+
+func (fm *FileMatchResolver) PathMatches() []searchRangeResolver {
+	r := make([]searchRangeResolver, 0, len(fm.FileMatch.PathMatches))
+	for _, pm := range fm.FileMatch.PathMatches {
+		r = append(r, searchRangeResolver{pm})
+	}
+	return r
+}
+
+func (fm *FileMatchResolver) Languages() []string {
+	return fm.FileMatch.Languages()
 }
 
 func (fm *FileMatchResolver) LimitHit() bool {

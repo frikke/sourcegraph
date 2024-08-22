@@ -1,17 +1,18 @@
-import { EditorView } from '@codemirror/view'
-import { Page } from 'puppeteer'
+import type { EditorView } from '@codemirror/view'
+import { merge } from 'lodash'
+import type { Page } from 'puppeteer'
 
-import { SearchGraphQlOperations } from '@sourcegraph/search'
-import { SharedGraphQlOperations } from '@sourcegraph/shared/src/graphql-operations'
-import { Settings, SettingsExperimentalFeatures } from '@sourcegraph/shared/src/schema/settings.schema'
-import { Driver, percySnapshot } from '@sourcegraph/shared/src/testing/driver'
-import { readEnvironmentBoolean } from '@sourcegraph/shared/src/testing/utils'
+import type { SharedGraphQlOperations } from '@sourcegraph/shared/src/graphql-operations'
+import type { Settings } from '@sourcegraph/shared/src/schema/settings.schema'
+import type { Driver } from '@sourcegraph/shared/src/testing/driver'
 
-import { WebGraphQlOperations } from '../graphql-operations'
+import type { WebGraphQlOperations } from '../graphql-operations'
 
-const CODE_HIGHLIGHTING_QUERIES: Partial<
-    keyof (WebGraphQlOperations & SharedGraphQlOperations & SearchGraphQlOperations)
->[] = ['highlightCode', 'Blob', 'HighlightedFile']
+const CODE_HIGHLIGHTING_QUERIES: Partial<keyof (WebGraphQlOperations & SharedGraphQlOperations)>[] = [
+    'highlightCode',
+    'Blob',
+    'HighlightedFile',
+]
 
 /**
  * Matches a URL against an expected query that will handle code highlighting.
@@ -39,17 +40,11 @@ const waitForCodeHighlighting = async (page: Page): Promise<void> => {
 
 type ColorScheme = 'dark' | 'light'
 
-/**
- * Percy couldn't capture <img /> since they have `src` values with testing domain name.
- * We need to call this function before asking Percy to take snapshots,
- * <img /> with base64 data would be visible on Percy snapshot
- */
 export const convertImgSourceHttpToBase64 = async (page: Page): Promise<void> => {
     await page.evaluate(() => {
-        // Skip images with data-skip-percy
         // Skip images with .cm-widgetBuffer, which CodeMirror uses when using a widget decoration
         // See https://github.com/sourcegraph/sourcegraph/issues/28949
-        const imgs = document.querySelectorAll<HTMLImageElement>('img:not([data-skip-percy]):not(.cm-widgetBuffer)')
+        const imgs = document.querySelectorAll<HTMLImageElement>('img:not(.cm-widgetBuffer)')
 
         for (const img of imgs) {
             if (img.src.startsWith('data:image')) {
@@ -91,46 +86,7 @@ export const setColorScheme = async (
     ])
 }
 
-export interface PercySnapshotConfig {
-    /**
-     * How long to wait for the UI to settle before taking a screenshot.
-     */
-    timeout: number
-    waitForCodeHighlighting: boolean
-}
-
-/**
- * Takes a Percy snapshot in 2 variants: dark/light
- */
-export const percySnapshotWithVariants = async (
-    page: Page,
-    name: string,
-    { timeout = 1000, waitForCodeHighlighting = false } = {}
-): Promise<void> => {
-    const percyEnabled = readEnvironmentBoolean({ variable: 'PERCY_ON', defaultValue: false })
-
-    if (!percyEnabled) {
-        return
-    }
-
-    // Theme-dark
-    await setColorScheme(page, 'dark', waitForCodeHighlighting)
-    // Wait for the UI to settle before converting images and taking the
-    // screenshot.
-    await page.waitForTimeout(timeout)
-    await convertImgSourceHttpToBase64(page)
-    await percySnapshot(page, `${name} - dark theme`)
-
-    // Theme-light
-    await setColorScheme(page, 'light', waitForCodeHighlighting)
-    // Wait for the UI to settle before converting images and taking the
-    // screenshot.
-    await page.waitForTimeout(timeout)
-    await convertImgSourceHttpToBase64(page)
-    await percySnapshot(page, `${name} - light theme`)
-}
-
-type Editor = NonNullable<SettingsExperimentalFeatures['editor']>
+type Editor = 'monaco' | 'codemirror6' | 'v2'
 
 export interface EditorAPI {
     name: Editor
@@ -232,14 +188,14 @@ const editors: Record<Editor, (driver: Driver, rootSelector: string) => EditorAP
             },
             async focus() {
                 await api.waitForIt()
-                await driver.page.click(rootSelector)
+                await driver.page.click(readySelector)
             },
             getValue() {
                 return driver.page.evaluate((selector: string) => {
                     // Typecast "as any" is used to avoid TypeScript complaining
                     // about window not having this property. We decided that
                     // it's fine to use this in a test context
-                    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access,@typescript-eslint/no-explicit-any
+                    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
                     const fromDOM = (window as any).CodeMirrorFindFromDOM as
                         | typeof EditorView['findFromDOM']
                         | undefined
@@ -293,18 +249,37 @@ const editors: Record<Editor, (driver: Driver, rootSelector: string) => EditorAP
         }
         return api
     },
-}
+    v2: (driver: Driver, rootSelector: string) => {
+        // Selector to use to wait for the editor to be complete loaded
+        const completionSelector = `${rootSelector} [role="grid"]`
+        const completionLabelSelector = `${completionSelector} .test-option-label`
 
-/**
- * Creates the necessary user settings mock for enabling the specified editor.
- * The caller is responsible for mocking the response with the returned object.
- */
-export function enableEditor(editor: Editor): Partial<Settings> {
-    return {
-        experimentalFeatures: {
-            editor,
-        },
-    }
+        const api = {
+            ...editors.codemirror6(driver, `${rootSelector} .test-query-input`),
+            async waitForSuggestion(suggestion?: string) {
+                await driver.page.waitForSelector(completionSelector)
+                if (suggestion !== undefined) {
+                    await driver.findElementWithText(suggestion, {
+                        selector: completionLabelSelector,
+                        wait: { timeout: 5000 },
+                    })
+                }
+                // It seems CodeMirror needs some additional time before it
+                // recognizes events on the suggestions element (such as
+                // selecting a suggestion via the Tab key)
+                await driver.page.waitForTimeout(100)
+            },
+            async selectSuggestion(suggestion: string) {
+                await driver.page.waitForSelector(completionSelector)
+                await driver.findElementWithText(suggestion, {
+                    action: 'click',
+                    selector: completionLabelSelector,
+                    wait: { timeout: 5000 },
+                })
+            },
+        }
+        return api
+    },
 }
 
 /**
@@ -320,28 +295,72 @@ export const createEditorAPI = async (driver: Driver, rootSelector: string): Pro
         selector => (document.querySelector(selector) as HTMLElement).dataset.editor,
         rootSelector
     )
-    switch (editor) {
-        case 'monaco':
-        case 'codemirror6':
-            break
-        default:
-            throw new Error(`${editor} is not a supported editor`)
+    if (!editor) {
+        throw new Error("Can't determine editor, data-editor=... is not set.")
     }
-    const api = editors[editor](driver, rootSelector)
+    if (!Object.hasOwn(editors, editor)) {
+        throw new Error(`${editor} is not a supported editor`)
+    }
+    const api = editors[editor as Editor](driver, rootSelector)
     await api.waitForIt()
     return api
 }
 
+export type SearchQueryInput = Extract<Editor, 'codemirror6' | 'v2'>
+interface SearchQueryInputAPI {
+    /**
+     * The name of the currently used query input implementation. Can be used to dynamically generate
+     * test names.
+     */
+    name: SearchQueryInput
+    waitForInput: (driver: Driver, selector: string) => Promise<EditorAPI>
+    applySettings: (settings?: Settings) => Settings
+}
+
+const searchInputNames: SearchQueryInput[] = ['codemirror6', 'v2']
+
+const searchInputConfigs: Record<SearchQueryInput, SearchQueryInputAPI> = {
+    codemirror6: {
+        name: 'codemirror6',
+        waitForInput: (driver: Driver, rootSelector: string) => createEditorAPI(driver, rootSelector),
+        applySettings: (settings = {}) =>
+            merge(settings, { experimentalFeatures: { searchQueryInput: 'v1' } } satisfies Settings),
+    },
+    v2: {
+        name: 'v2',
+        waitForInput: (driver: Driver, rootSelector: string) => createEditorAPI(driver, rootSelector),
+        applySettings: (settings = {}) =>
+            merge(settings, { experimentalFeatures: { searchQueryInput: 'v2' } } satisfies Settings),
+    },
+}
+
+export const getSearchQueryInputConfig = (input: SearchQueryInput): SearchQueryInputAPI => searchInputConfigs[input]
+
 /**
  * Helper function for abstracting away testing different search query input
- * implementations. The callback function gets passed the editor name which can
- * be used with {@link enableEditor} and {@link createEditorAPI}.
+ * implementations. The callback function gets passed an object to interact with
+ * the input and to configure the necessary settings.
  */
-export const withSearchQueryInput = (callback: (editorName: Editor) => void): void => {
-    const editorNames: Editor[] = ['monaco', 'codemirror6']
-    for (const editor of editorNames) {
+export const withSearchQueryInput = (callback: (config: SearchQueryInputAPI) => void): void => {
+    for (const input of searchInputNames) {
         // This callback is supposed to be called multiple times
         // eslint-disable-next-line callback-return
-        callback(editor)
+        callback(getSearchQueryInputConfig(input))
     }
 }
+
+/**
+ * This helper function removes any context:... filter in the query (via regular expression)
+ * to make it easier to compare query inputs when the context doesn't amtter.
+ */
+export const removeContextFromQuery = (input: string): string => input.replace(/\s*context:\S*\s*/, '')
+
+export const isElementDisabled = (driver: Driver, query: string): Promise<boolean> =>
+    driver.page.evaluate((query: string) => {
+        const element = document.querySelector<HTMLButtonElement>(query)
+
+        const disabledAttribute = element!.disabled
+        const ariaDisabled = element!.getAttribute('aria-disabled')
+
+        return disabledAttribute || ariaDisabled === 'true'
+    }, query)

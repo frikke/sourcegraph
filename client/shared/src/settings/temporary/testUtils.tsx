@@ -3,7 +3,7 @@ import React from 'react'
 import { gql } from '@apollo/client'
 import { createMockClient } from '@apollo/client/testing'
 
-import { TemporarySettings } from './TemporarySettings'
+import type { TemporarySettings } from './TemporarySettings'
 import { TemporarySettingsContext } from './TemporarySettingsProvider'
 import { InMemoryMockSettingsBackend, TemporarySettingsStorage } from './TemporarySettingsStorage'
 
@@ -16,7 +16,7 @@ export const MockTemporarySettings: React.FunctionComponent<
     const mockClient = createMockClient(
         null,
         gql`
-            query {
+            query TemporarySettings {
                 temporarySettings {
                     contents
                 }

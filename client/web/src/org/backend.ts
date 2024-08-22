@@ -1,12 +1,14 @@
-import { concat, Observable } from 'rxjs'
+import { concat, lastValueFrom, type Observable } from 'rxjs'
 import { map, mergeMap } from 'rxjs/operators'
 
 import { createAggregateError } from '@sourcegraph/common'
 import { gql } from '@sourcegraph/http-client'
+import { TelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
 
 import { refreshAuthenticatedUser } from '../auth'
 import { requestGraphQL } from '../backend/graphql'
-import {
+import type {
     CreateOrganizationResult,
     CreateOrganizationVariables,
     RemoveUserFromOrganizationResult,
@@ -15,7 +17,44 @@ import {
     UpdateOrganizationResult,
     UpdateOrganizationVariables,
 } from '../graphql-operations'
-import { eventLogger } from '../tracking/eventLogger'
+
+export const ORGANIZATION_MEMBERS_QUERY = gql`
+    query OrganizationSettingsMembers(
+        $id: ID!
+        $first: Int
+        $after: String
+        $last: Int
+        $before: String
+        $query: String
+    ) {
+        node(id: $id) {
+            ... on Org {
+                __typename
+                viewerCanAdminister
+                members(query: $query, first: $first, after: $after, last: $last, before: $before) {
+                    nodes {
+                        ...OrganizationMemberNode
+                    }
+                    totalCount
+                    pageInfo {
+                        startCursor
+                        endCursor
+                        hasNextPage
+                        hasPreviousPage
+                    }
+                }
+            }
+        }
+    }
+
+    fragment OrganizationMemberNode on User {
+        __typename
+        id
+        username
+        displayName
+        avatarURL
+    }
+`
 
 /**
  * Sends a GraphQL mutation to create an organization and returns an Observable that emits the new organization,
@@ -26,31 +65,42 @@ export function createOrganization(args: {
     name: string
     /** The new organization's display name (e.g. full name) in the organization profile. */
     displayName?: string
+    telemetryRecorder: TelemetryRecorder
 }): Promise<CreateOrganizationResult['createOrganization']> {
-    return requestGraphQL<CreateOrganizationResult, CreateOrganizationVariables>(
-        gql`
-            mutation CreateOrganization($name: String!, $displayName: String) {
-                createOrganization(name: $name, displayName: $displayName) {
-                    id
-                    name
-                    settingsURL
+    return lastValueFrom(
+        requestGraphQL<CreateOrganizationResult, CreateOrganizationVariables>(
+            gql`
+                mutation CreateOrganization($name: String!, $displayName: String) {
+                    createOrganization(name: $name, displayName: $displayName) {
+                        id
+                        name
+                        settingsURL
+                    }
                 }
-            }
-        `,
-        { name: args.name, displayName: args.displayName ?? null }
-    )
-        .pipe(
+            `,
+            { name: args.name, displayName: args.displayName ?? null }
+        ).pipe(
             mergeMap(({ data, errors }) => {
-                if (!data || !data.createOrganization) {
-                    eventLogger.log('NewOrgFailed')
+                if (!data?.createOrganization) {
+                    EVENT_LOGGER.log('NewOrgFailed')
+                    args.telemetryRecorder.recordEvent('org', 'createFailed')
                     throw createAggregateError(errors)
                 }
-                eventLogger.log('NewOrgCreated')
+                EVENT_LOGGER.log('NewOrgCreated')
+                args.telemetryRecorder.recordEvent('org', 'create')
                 return concat(refreshAuthenticatedUser(), [data.createOrganization])
             })
         )
-        .toPromise()
+    )
 }
+
+export const REMOVE_USER_FROM_ORGANIZATION_QUERY = gql`
+    mutation RemoveUserFromOrganization($user: ID!, $organization: ID!) {
+        removeUserFromOrganization(user: $user, organization: $organization) {
+            alwaysNil
+        }
+    }
+`
 
 /**
  * Sends a GraphQL mutation to remove a user from an organization.
@@ -62,23 +112,20 @@ export function removeUserFromOrganization(args: {
     user: Scalars['ID']
     /** The organization's ID. */
     organization: Scalars['ID']
+    telemetryRecorder: TelemetryRecorder
 }): Observable<void> {
     return requestGraphQL<RemoveUserFromOrganizationResult, RemoveUserFromOrganizationVariables>(
-        gql`
-            mutation RemoveUserFromOrganization($user: ID!, $organization: ID!) {
-                removeUserFromOrganization(user: $user, organization: $organization) {
-                    alwaysNil
-                }
-            }
-        `,
+        REMOVE_USER_FROM_ORGANIZATION_QUERY,
         args
     ).pipe(
         mergeMap(({ errors }) => {
             if (errors && errors.length > 0) {
-                eventLogger.log('RemoveOrgMemberFailed')
+                EVENT_LOGGER.log('RemoveOrgMemberFailed')
+                args.telemetryRecorder.recordEvent('org.member', 'removeFailed')
                 throw createAggregateError(errors)
             }
-            eventLogger.log('OrgMemberRemoved')
+            EVENT_LOGGER.log('OrgMemberRemoved')
+            args.telemetryRecorder.recordEvent('org.member', 'remove')
             // Reload user data
             return concat(refreshAuthenticatedUser(), [undefined])
         })
@@ -90,40 +137,40 @@ export function removeUserFromOrganization(args: {
  *
  * @param id The ID of the organization.
  * @param displayName The display name of the organization.
+ * @param telemetryRecorder
  * @returns Observable that emits `undefined`, then completes
  */
-export function updateOrganization(id: Scalars['ID'], displayName: string): Promise<void> {
-    return requestGraphQL<UpdateOrganizationResult, UpdateOrganizationVariables>(
-        gql`
-            mutation UpdateOrganization($id: ID!, $displayName: String) {
-                updateOrganization(id: $id, displayName: $displayName) {
-                    id
+export function updateOrganization(
+    id: Scalars['ID'],
+    displayName: string,
+    telemetryRecorder: TelemetryRecorder
+): Promise<void> {
+    return lastValueFrom(
+        requestGraphQL<UpdateOrganizationResult, UpdateOrganizationVariables>(
+            gql`
+                mutation UpdateOrganization($id: ID!, $displayName: String) {
+                    updateOrganization(id: $id, displayName: $displayName) {
+                        id
+                    }
                 }
+            `,
+            {
+                id,
+                displayName,
             }
-        `,
-        {
-            id,
-            displayName,
-        }
-    )
-        .pipe(
+        ).pipe(
             map(({ data, errors }) => {
                 if (!data || (errors && errors.length > 0)) {
-                    eventLogger.log('UpdateOrgSettingsFailed')
+                    EVENT_LOGGER.log('UpdateOrgSettingsFailed')
+                    telemetryRecorder.recordEvent('org.settings', 'updateFailed')
                     throw createAggregateError(errors)
                 }
-                eventLogger.log('OrgSettingsUpdated')
+                EVENT_LOGGER.log('OrgSettingsUpdated')
+                telemetryRecorder.recordEvent('org.settings', 'update')
                 return
             })
         )
-        .toPromise()
+    )
 }
 
-export const GET_ORG_FEATURE_FLAG_VALUE = gql`
-    query OrgFeatureFlagValue($orgID: ID!, $flagName: String!) {
-        organizationFeatureFlagValue(orgID: $orgID, flagName: $flagName)
-    }
-`
 export const ORG_CODE_FEATURE_FLAG_EMAIL_INVITE = 'org-email-invites'
-export const GITHUB_APP_FEATURE_FLAG_NAME = 'github-app-cloud'
-export const ORG_DELETION_FEATURE_FLAG_NAME = 'org-deletion'

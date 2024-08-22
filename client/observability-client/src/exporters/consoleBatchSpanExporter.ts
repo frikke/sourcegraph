@@ -1,10 +1,8 @@
-import { Attributes } from '@opentelemetry/api'
-import { ExportResultCode, hrTimeToMilliseconds, ExportResult } from '@opentelemetry/core'
-import { SpanExporter, ReadableSpan } from '@opentelemetry/sdk-trace-base'
+import type { Attributes } from '@opentelemetry/api'
+import { ExportResultCode, hrTimeToMilliseconds, type ExportResult } from '@opentelemetry/core'
+import type { SpanExporter, ReadableSpan } from '@opentelemetry/sdk-trace-base'
 
 import { logger } from '@sourcegraph/common'
-
-import { parseAttributes } from '../sdk/pareAttributes'
 
 interface FormattedSpan {
     name?: string
@@ -37,7 +35,7 @@ export class ConsoleBatchSpanExporter implements SpanExporter {
             }
 
             formattedSpan.raw = span
-            formattedSpan.attrs = parseAttributes(attributes)
+            formattedSpan.attrs = attributes
             formattedSpan.name = `${span.name} - ${this.formatDuration(span)}`
 
             if (parentSpanId) {

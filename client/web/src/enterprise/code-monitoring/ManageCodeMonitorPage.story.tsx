@@ -1,6 +1,8 @@
-import { Meta, Story } from '@storybook/react'
+import type { Meta, StoryFn } from '@storybook/react'
 import { NEVER, of } from 'rxjs'
 import { fake } from 'sinon'
+
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 
 import { WebStory } from '../../components/WebStory'
 
@@ -15,16 +17,22 @@ export default config
 
 window.context.emailEnabled = true
 
-export const ManageCodeMonitorPageStory: Story = () => (
+export const ManageCodeMonitorPageStory: StoryFn = () => (
     <WebStory>
         {props => (
             <ManageCodeMonitorPage
                 {...props}
-                authenticatedUser={{ ...mockUser, id: 'foobar', username: 'alice', email: 'alice@alice.com' }}
+                authenticatedUser={{
+                    ...mockUser,
+                    id: 'foobar',
+                    username: 'alice',
+                    emails: [{ email: 'alice@alice.com', isPrimary: true, verified: true }],
+                }}
                 updateCodeMonitor={fake()}
                 fetchCodeMonitor={fake(() => of(mockCodeMonitor))}
                 deleteCodeMonitor={fake(() => NEVER)}
                 isSourcegraphDotCom={false}
+                telemetryRecorder={noOpTelemetryRecorder}
             />
         )}
     </WebStory>
@@ -34,8 +42,6 @@ ManageCodeMonitorPageStory.storyName = 'ManageCodeMonitorPage'
 ManageCodeMonitorPageStory.parameters = {
     design: {
         type: 'figma',
-        url:
-            'https://www.figma.com/file/Krh7HoQi0GFxtO2k399ZQ6/RFC-227-%E2%80%93-Code-monitoring-actions-and-notifications?node-id=246%3A11',
+        url: 'https://www.figma.com/file/Krh7HoQi0GFxtO2k399ZQ6/RFC-227-%E2%80%93-Code-monitoring-actions-and-notifications?node-id=246%3A11',
     },
-    chromatic: { disableSnapshot: false },
 }

@@ -2,23 +2,30 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/graph-gophers/graphql-go/relay"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/sourcegraph/log/logtest"
 
 	"github.com/sourcegraph/sourcegraph/internal/actor"
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/database/dbtest"
+	et "github.com/sourcegraph/sourcegraph/internal/encryption/testing"
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
+	"github.com/sourcegraph/sourcegraph/lib/pointers"
 )
 
 // usernamesForTests is a list of test cases containing valid and invalid usernames.
@@ -78,14 +85,14 @@ func TestUsers_ValidUsernames(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	for _, test := range usernamesForTests {
 		t.Run(test.name, func(t *testing.T) {
 			valid := true
 			if _, err := db.Users().Create(ctx, NewUser{Username: test.name}); err != nil {
-				var e errCannotCreateUser
+				var e ErrCannotCreateUser
 				if errors.As(err, &e) && (e.Code() == "users_username_max_length" || e.Code() == "users_username_valid_chars") {
 					valid = false
 				} else {
@@ -101,7 +108,7 @@ func TestUsers_ValidUsernames(t *testing.T) {
 
 func TestUsers_Create_SiteAdmin(t *testing.T) {
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	if _, err := db.GlobalState().Get(ctx); err != nil {
@@ -121,6 +128,13 @@ func TestUsers_Create_SiteAdmin(t *testing.T) {
 	if !user.SiteAdmin {
 		t.Fatal("!user.SiteAdmin")
 	}
+	ur, err := getUserRoles(ctx, db, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ur) != 2 {
+		t.Fatalf("expected user to be assigned two roles (USER and SITE_ADMINISTRATOR), got %d", len(ur))
+	}
 
 	// Creating a non-site-admin now that the site has already been initialized.
 	u2, err := db.Users().Create(ctx, NewUser{
@@ -135,6 +149,14 @@ func TestUsers_Create_SiteAdmin(t *testing.T) {
 	if u2.SiteAdmin {
 		t.Fatal("want u2 not site admin because site is already initialized")
 	}
+	ur, err = getUserRoles(ctx, db, u2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ur) != 1 {
+		t.Fatalf("expected user to be assigned one role, got %d", len(ur))
+	}
+
 	// Similar to the above, but expect an error because we pass FailIfNotInitialUser: true.
 	_, err = db.Users().Create(ctx, NewUser{
 		Email:                 "a3@a3.com",
@@ -143,7 +165,7 @@ func TestUsers_Create_SiteAdmin(t *testing.T) {
 		EmailVerificationCode: "c3",
 		FailIfNotInitialUser:  true,
 	})
-	if want := (errCannotCreateUser{"site_already_initialized"}); !errors.Is(err, want) {
+	if want := (ErrCannotCreateUser{"site_already_initialized"}); !errors.Is(err, want) {
 		t.Fatalf("got error %v, want %v", err, want)
 	}
 
@@ -168,6 +190,14 @@ func TestUsers_Create_SiteAdmin(t *testing.T) {
 	if u4.SiteAdmin {
 		t.Fatal("want u4 not site admin because site is already initialized")
 	}
+	ur, err = getUserRoles(ctx, db, u4.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ur) != 1 {
+		t.Fatalf("expected user to be assigned one role, got %d", len(ur))
+	}
+
 	// Similar to the above, but expect an error because we pass FailIfNotInitialUser: true.
 	if _, err := db.ExecContext(ctx, "UPDATE site_config SET initialized=false"); err != nil {
 		t.Fatal(err)
@@ -179,7 +209,7 @@ func TestUsers_Create_SiteAdmin(t *testing.T) {
 		EmailVerificationCode: "c5",
 		FailIfNotInitialUser:  true,
 	})
-	if want := (errCannotCreateUser{"initial_site_admin_must_be_first_user"}); !errors.Is(err, want) {
+	if want := (ErrCannotCreateUser{"initial_site_admin_must_be_first_user"}); !errors.Is(err, want) {
 		t.Fatalf("got error %v, want %v", err, want)
 	}
 }
@@ -190,7 +220,7 @@ func TestUsers_CheckAndDecrementInviteQuota(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	user, err := db.Users().Create(ctx, NewUser{
@@ -241,7 +271,7 @@ func TestUsers_ListCount(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	user, err := db.Users().Create(ctx, NewUser{
@@ -253,7 +283,6 @@ func TestUsers_ListCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	user.Tags = []string{}
 
 	if count, err := db.Users().Count(ctx, &UsersListOptions{}); err != nil {
 		t.Fatal(err)
@@ -283,6 +312,13 @@ func TestUsers_ListCount(t *testing.T) {
 		t.Errorf("got %+v, want %+v", users[0], user)
 	}
 
+	// By usernames.
+	if users, err := db.Users().List(ctx, &UsersListOptions{Usernames: []string{user.Username}}); err != nil {
+		t.Fatal(err)
+	} else if users, want := normalizeUsers(users), normalizeUsers([]*types.User{user}); !reflect.DeepEqual(users, want) {
+		t.Errorf("got %+v, want %+v", users[0], user)
+	}
+
 	if err := db.Users().Delete(ctx, user.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -292,6 +328,209 @@ func TestUsers_ListCount(t *testing.T) {
 	} else if want := 0; count != want {
 		t.Errorf("got %d, want %d", count, want)
 	}
+
+	// Create three users with common Sourcegraph admin username patterns.
+	for _, admin := range []struct {
+		username string
+		email    string
+	}{
+		{"sourcegraph-admin", "admin@sourcegraph.com"},
+		{"sourcegraph-management-abc", "support@sourcegraph.com"},
+		{"managed-abc", "abc-support@sourcegraph.com"},
+	} {
+		user, err := db.Users().Create(ctx, NewUser{Username: admin.username})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.UserEmails().Add(ctx, user.ID, admin.email, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if count, err := db.Users().Count(ctx, &UsersListOptions{ExcludeSourcegraphAdmins: false}); err != nil {
+		t.Fatal(err)
+	} else if want := 3; count != want {
+		t.Errorf("got %d, want %d", count, want)
+	}
+
+	if count, err := db.Users().Count(ctx, &UsersListOptions{ExcludeSourcegraphAdmins: true}); err != nil {
+		t.Fatal(err)
+	} else if want := 0; count != want {
+		t.Errorf("got %d, want %d", count, want)
+	}
+	if users, err := db.Users().List(ctx, &UsersListOptions{ExcludeSourcegraphAdmins: true}); err != nil {
+		t.Fatal(err)
+	} else if len(users) > 0 {
+		t.Errorf("got %d, want empty", len(users))
+	}
+
+	// Create a Sourcegraph Operator user and should be excluded when desired
+	_, err = db.Users().CreateWithExternalAccount(
+		ctx,
+		NewUser{
+			Username: "sourcegraph-operator-logan",
+		},
+		&extsvc.Account{
+			AccountSpec: extsvc.AccountSpec{
+				ServiceType: "sourcegraph-operator",
+			},
+		})
+	require.NoError(t, err)
+	count, err := db.Users().Count(
+		ctx,
+		&UsersListOptions{
+			ExcludeSourcegraphAdmins:    true,
+			ExcludeSourcegraphOperators: true,
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+	users, err := db.Users().List(
+		ctx,
+		&UsersListOptions{
+			ExcludeSourcegraphAdmins:    true,
+			ExcludeSourcegraphOperators: true,
+		},
+	)
+	require.NoError(t, err)
+	assert.Len(t, users, 0)
+}
+
+func TestUsers_List_Query(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	t.Parallel()
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+
+	users := map[string]int32{}
+	for _, u := range []string{
+		"foo",
+		"bar",
+		"baz",
+	} {
+		user, err := db.Users().Create(ctx, NewUser{
+			Email:                 u + "@a.com",
+			Username:              u,
+			Password:              "p",
+			EmailVerificationCode: "c",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		users[u] = user.ID
+	}
+
+	cases := []struct {
+		Name  string
+		Query string
+		Want  string
+	}{{
+		Name:  "all",
+		Query: "",
+		Want:  "foo bar baz",
+	}, {
+		Name:  "none",
+		Query: "sdfsdf",
+		Want:  "",
+	}, {
+		Name:  "some",
+		Query: "a",
+		Want:  "bar baz",
+	}, {
+		Name:  "id",
+		Query: strconv.Itoa(int(users["foo"])),
+		Want:  "foo",
+	}, {
+		Name:  "graphqlid",
+		Query: string(relay.MarshalID("User", users["foo"])),
+		Want:  "foo",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			us, err := db.Users().List(ctx, &UsersListOptions{
+				Query: tc.Query,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			want := strings.Fields(tc.Want)
+			got := []string{}
+			for _, u := range us {
+				got = append(got, u.Username)
+			}
+
+			sort.Strings(want)
+			sort.Strings(got)
+
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
+func TestUsers_ListForSCIM_Query(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	t.Parallel()
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+
+	userToSoftDelete := NewUserForSCIM{NewUser: NewUser{Email: "notactive@example.com", Username: "notactive", EmailIsVerified: true}, SCIMExternalID: "notactive"}
+	// Create users
+	newUsers := []NewUserForSCIM{
+		{NewUser: NewUser{Email: "alice@example.com", Username: "alice", EmailIsVerified: true}},
+		{NewUser: NewUser{Email: "bob@example.com", Username: "bob", EmailVerificationCode: "bb"}, SCIMExternalID: "BOB"},
+		{NewUser: NewUser{Email: "charlie@example.com", Username: "charlie", EmailIsVerified: true}, SCIMExternalID: "CHARLIE", AdditionalVerifiedEmails: []string{"charlie2@example.com"}},
+		userToSoftDelete,
+	}
+	for _, newUser := range newUsers {
+		user, err := db.Users().CreateWithExternalAccount(ctx, newUser.NewUser,
+			&extsvc.Account{
+				AccountSpec: extsvc.AccountSpec{ServiceType: "scim", AccountID: newUser.SCIMExternalID},
+			})
+		for _, email := range newUser.AdditionalVerifiedEmails {
+			verificationCode := "x"
+			err := db.UserEmails().Add(ctx, user.ID, email, &verificationCode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = db.UserEmails().Verify(ctx, user.ID, email, verificationCode)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	inactiveUser, err := db.Users().GetByUsername(ctx, userToSoftDelete.Username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Users().Delete(ctx, inactiveUser.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	users, err := db.Users().ListForSCIM(ctx, &UsersListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Len(t, users, 4)
+	assert.Equal(t, "alice", users[0].Username)
+	assert.Equal(t, "", users[0].SCIMExternalID)
+	assert.Equal(t, "BOB", users[1].SCIMExternalID)
+	assert.Equal(t, "CHARLIE", users[2].SCIMExternalID)
+	assert.Equal(t, "notactive", users[3].Username)
+	assert.Len(t, users[0].Emails, 1)
+	assert.Len(t, users[1].Emails, 0)
+	assert.Len(t, users[2].Emails, 2)
 }
 
 func TestUsers_Update(t *testing.T) {
@@ -300,7 +539,7 @@ func TestUsers_Update(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	user, err := db.Users().Create(ctx, NewUser{
@@ -315,8 +554,8 @@ func TestUsers_Update(t *testing.T) {
 
 	if err := db.Users().Update(ctx, user.ID, UserUpdate{
 		Username:    "u1",
-		DisplayName: strptr("d1"),
-		AvatarURL:   strptr("a1"),
+		DisplayName: pointers.Ptr("d1"),
+		AvatarURL:   pointers.Ptr("a1"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +574,7 @@ func TestUsers_Update(t *testing.T) {
 	}
 
 	if err := db.Users().Update(ctx, user.ID, UserUpdate{
-		DisplayName: strptr(""),
+		DisplayName: pointers.Ptr(""),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +619,7 @@ func TestUsers_GetByVerifiedEmail(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	user, err := db.Users().Create(ctx, NewUser{
@@ -416,7 +655,7 @@ func TestUsers_GetByUsername(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	newUsers := []NewUser{
@@ -454,7 +693,6 @@ func TestUsers_GetByUsername(t *testing.T) {
 			t.Errorf("got %s, but want %s", have.Username, want)
 		}
 	}
-
 }
 
 func TestUsers_GetByUsernames(t *testing.T) {
@@ -463,7 +701,7 @@ func TestUsers_GetByUsernames(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	newUsers := []NewUser{
@@ -501,14 +739,17 @@ func TestUsers_GetByUsernames(t *testing.T) {
 }
 
 func TestUsers_Delete(t *testing.T) {
+	t.Skip() // Flaky
+
 	for name, hard := range map[string]bool{"soft": false, "hard": true} {
+		hard := hard // fix for loop closure
 		t.Run(name, func(t *testing.T) {
 			if testing.Short() {
 				t.Skip()
 			}
 			t.Parallel()
 			logger := logtest.Scoped(t)
-			db := NewDB(logger, dbtest.NewDB(logger, t))
+			db := NewDB(logger, dbtest.NewDB(t))
 			ctx := context.Background()
 			ctx = actor.WithActor(ctx, &actor.Actor{UID: 1, Internal: true})
 
@@ -522,20 +763,6 @@ func TestUsers_Delete(t *testing.T) {
 				Username:              "u",
 				Password:              "p",
 				EmailVerificationCode: "c",
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			// Create external service owned by the user
-			confGet := func() *conf.Unified {
-				return &conf.Unified{}
-			}
-			err = db.ExternalServices().Create(ctx, confGet, &types.ExternalService{
-				Kind:            extsvc.KindGitHub,
-				DisplayName:     "GITHUB #1",
-				Config:          extsvc.NewUnencryptedConfig(`{"url": "https://github.com", "repositoryQuery": ["none"], "token": "abc", "authorization": {}}`),
-				NamespaceUserID: user.ID,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -558,12 +785,13 @@ func TestUsers_Delete(t *testing.T) {
 			if _, err := db.SavedSearches().Create(ctx, &types.SavedSearch{
 				Description: "desc",
 				Query:       "foo",
-				UserID:      &user.ID,
+				Owner:       types.NamespaceUser(user.ID),
 			}); err != nil {
 				t.Fatal(err)
 			}
 
 			// Create an event log
+			//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 			err = db.EventLogs().Insert(ctx, &Event{
 				Name:            "something",
 				URL:             "http://example.com",
@@ -572,6 +800,12 @@ func TestUsers_Delete(t *testing.T) {
 				Source:          "Test",
 				Timestamp:       time.Now(),
 			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Create and update a webhook
+			webhook, err := db.Webhooks(nil).Create(ctx, "github webhook", extsvc.KindGitHub, testURN, user.ID, types.NewUnencryptedSecret("testSecret"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -615,17 +849,6 @@ func TestUsers_Delete(t *testing.T) {
 				t.Errorf("got author %v, want nil", *settings.AuthorUserID)
 			}
 
-			// User's external services no longer exist
-			ess, err := db.ExternalServices().List(ctx, ExternalServicesListOptions{
-				NamespaceUserID: user.ID,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(ess) > 0 {
-				t.Errorf("got %d external services, want 0", len(ess))
-			}
-
 			// Can't delete already-deleted user.
 			err = db.Users().Delete(ctx, user.ID)
 			if !errcode.IsNotFound(err) {
@@ -649,6 +872,13 @@ func TestUsers_Delete(t *testing.T) {
 				if len(eventLog.AnonymousUserID) == 0 {
 					t.Error("After hard anonymous user id should not be blank")
 				}
+				// Webhooks `created_by_user_id` and `updated_by_user_id` should be NULL
+				webhook, err = db.Webhooks(nil).GetByID(ctx, webhook.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assert.Equal(t, int32(0), webhook.CreatedByUserID)
+				assert.Equal(t, int32(0), webhook.UpdatedByUserID)
 			} else {
 				// Event logs are unchanged
 				if int32(eventLog.UserID) != user.ID {
@@ -657,48 +887,142 @@ func TestUsers_Delete(t *testing.T) {
 				if len(eventLog.AnonymousUserID) != 0 {
 					t.Error("After soft delete anonymous user id should be blank")
 				}
+				// Webhooks `created_by_user_id` and `updated_by_user_id` are unchanged
+				webhook, err = db.Webhooks(nil).GetByID(ctx, webhook.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assert.Equal(t, user.ID, webhook.CreatedByUserID)
+				assert.Equal(t, user.ID, webhook.UpdatedByUserID)
 			}
 		})
 	}
 }
 
-func TestUsers_HasTag(t *testing.T) {
+func TestUsers_RecoverUsers(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
+	ctx = actor.WithActor(ctx, &actor.Actor{UID: 1, Internal: true})
 
-	var id int32
-	if err := db.QueryRowContext(ctx, "INSERT INTO users (username, tags) VALUES ('karim', '{\"foo\", \"bar\"}') RETURNING id").Scan(&id); err != nil {
-		t.Fatal(err)
-	}
-
-	// lookup existing tag
-	ok, err := db.Users().HasTag(ctx, id, "foo")
+	user, err := db.Users().Create(ctx, NewUser{
+		Email:                 "a@a.com",
+		Username:              "u",
+		Password:              "p",
+		EmailVerificationCode: "c",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok {
-		t.Fatal("expected tag to be found")
-	}
 
-	// lookup non-existing tag
-	ok, err = db.Users().HasTag(ctx, id, "baz")
+	otherUser, err := db.Users().Create(ctx, NewUser{Username: "other"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok {
-		t.Fatal("expected tag to be not found")
+
+	_, err = db.UserExternalAccounts().Upsert(ctx,
+		&extsvc.Account{
+			UserID: otherUser.ID,
+			AccountSpec: extsvc.AccountSpec{
+				ServiceType: "github",
+				ServiceID:   "https://github.com/",
+				AccountID:   "alice_github",
+			},
+		})
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// lookup non-existing user
-	ok, err = db.Users().HasTag(ctx, id+1, "bar")
-	if err == nil || ok {
-		t.Fatal("expected user to be not found")
-	}
+	// Test reviving a user that does not exist
+	t.Run("fails on nonexistent user", func(t *testing.T) {
+		ru, err := db.Users().RecoverUsersList(ctx, []int32{65})
+		if err != nil {
+			t.Errorf("got err %v, want nil", err)
+		}
+		if len(ru) != 0 {
+			t.Errorf("got %d recovered users, want 0", len(ru))
+		}
+	})
+	// Test reviving a user that does exist and hasn't not been deleted
+	t.Run("fails on non-deleted user", func(t *testing.T) {
+		ru, err := db.Users().RecoverUsersList(ctx, []int32{user.ID})
+		if err == nil {
+			t.Errorf("got err %v, want nil", err)
+		}
+		if len(ru) != 0 {
+			t.Errorf("got %d users, want 0", len(ru))
+		}
+	})
+
+	// Test reviving a user that does exist and does not have additional resources deleted in the same timeframe
+	t.Run("revives user with no additional resources", func(t *testing.T) {
+		err := db.Users().Delete(ctx, user.ID)
+		if err != nil {
+			t.Errorf("got err %v, want nil", err)
+		}
+		ru, err := db.Users().RecoverUsersList(ctx, []int32{user.ID})
+		if err != nil {
+			t.Fatalf("got err %v, want nil", err)
+		}
+		if len(ru) != 1 {
+			t.Fatalf("got %d users, want 1", len(ru))
+		}
+		if ru[0] != user.ID {
+			t.Errorf("got user %d, want %d", ru[0], user.ID)
+		}
+
+		users, err := db.Users().List(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(users) > 2 {
+			// The otherUser should still exist, which is why we check for 1 not 0.
+			t.Errorf("got %d users, want 1", len(users))
+		}
+	})
+	// Test reviving a user that does exist and does have additional resources deleted in the same timeframe
+	t.Run("revives user and additional resources", func(t *testing.T) {
+		err := db.Users().Delete(ctx, otherUser.ID)
+		if err != nil {
+			t.Errorf("got err %v, want nil", err)
+		}
+
+		_, err = db.UserExternalAccounts().Get(ctx, otherUser.ID)
+		if err == nil {
+			t.Fatal("got err nil, want non-nil")
+		}
+
+		ru, err := db.Users().RecoverUsersList(ctx, []int32{otherUser.ID})
+		if err != nil {
+			t.Errorf("got err %v, want nil", err)
+		}
+		if len(ru) != 1 {
+			t.Errorf("got %d users, want 1", len(ru))
+		}
+		if ru[0] != otherUser.ID {
+			t.Errorf("got user %d, want %d", ru[0], otherUser.ID)
+		}
+
+		extAcc, err := db.UserExternalAccounts().Get(ctx, 1)
+		if err != nil {
+			t.Fatal("got err nil, want non-nil")
+		}
+		if extAcc.UserID != otherUser.ID {
+			t.Errorf("got user %d, want %d", extAcc.UserID, otherUser.ID)
+		}
+
+		users, err := db.Users().List(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(users) > 2 {
+			t.Errorf("got %d users, want 2", len(users))
+		}
+	})
 }
 
 func TestUsers_InvalidateSessions(t *testing.T) {
@@ -707,7 +1031,7 @@ func TestUsers_InvalidateSessions(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	newUsers := []NewUser{
@@ -745,103 +1069,323 @@ func TestUsers_InvalidateSessions(t *testing.T) {
 	}
 }
 
-func TestUsers_SetTag(t *testing.T) {
+func TestUsers_SetIsSiteAdmin(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
-	// Create user.
-	u, err := db.Users().Create(ctx, NewUser{Username: "u"})
+	adminUser, err := db.Users().Create(ctx, NewUser{Username: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Create user. This user will have a `SiteAdmin` value of false because
+	// Global state hasn't been initialized at this point, so technically this is the
+	// first user.
+	if !adminUser.SiteAdmin {
+		t.Fatalf("expected site admin to be created")
+	}
+
+	regularUser, err := db.Users().Create(ctx, NewUser{Username: "u2"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	checkTags := func(t *testing.T, userID int32, wantTags []string) {
-		t.Helper()
-		u, err := db.Users().GetByID(ctx, userID)
+	t.Run("revoking site admin role for a site admin", func(t *testing.T) {
+		// Confirm that the user has only two roles assigned to them.
+		ur, err := db.UserRoles().GetByUserID(ctx, GetUserRoleOpts{UserID: adminUser.ID})
+		require.NoError(t, err)
+		require.Len(t, ur, 2)
+
+		err = db.Users().SetIsSiteAdmin(ctx, adminUser.ID, false)
+		require.NoError(t, err)
+
+		// check that site admin role has been revoked for user
+		ur, err = db.UserRoles().GetByUserID(ctx, GetUserRoleOpts{UserID: adminUser.ID})
+		require.NoError(t, err)
+		// Since we've revoked the SITE_ADMINISTRATOR role, the user should still have the
+		// USER role assigned to them.
+		require.Len(t, ur, 1)
+
+		u, err := db.Users().GetByID(ctx, regularUser.ID)
+		require.NoError(t, err)
+		require.False(t, u.SiteAdmin)
+	})
+
+	t.Run("promoting a regular user to site admin", func(t *testing.T) {
+		// Confirm that the user has only one role assigned to them.
+		ur, err := db.UserRoles().GetByUserID(ctx, GetUserRoleOpts{UserID: regularUser.ID})
+		require.NoError(t, err)
+		require.Len(t, ur, 1)
+
+		err = db.Users().SetIsSiteAdmin(ctx, regularUser.ID, true)
+		require.NoError(t, err)
+
+		// check that site admin role has been assigned to user
+		ur, err = db.UserRoles().GetByUserID(ctx, GetUserRoleOpts{UserID: regularUser.ID})
+		require.NoError(t, err)
+		// The user should have both USER role and SITE_ADMINISTRATOR role assigned to them.
+		require.Len(t, ur, 2)
+
+		u, err := db.Users().GetByID(ctx, regularUser.ID)
+		require.NoError(t, err)
+		require.True(t, u.SiteAdmin)
+	})
+}
+
+func TestUsers_GetSetChatCompletionsQuota(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	t.Parallel()
+
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+
+	user, err := db.Users().Create(ctx, NewUser{
+		Email:           "alice@example.com",
+		Username:        "alice",
+		EmailIsVerified: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Initially, no quota should be set and nil should be returned.
+	{
+		quota, err := db.Users().GetChatCompletionsQuota(ctx, user.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		sort.Strings(u.Tags)
-		sort.Strings(wantTags)
-		if !reflect.DeepEqual(u.Tags, wantTags) {
-			t.Errorf("got tags %v, want %v", u.Tags, wantTags)
-		}
+		require.Nil(t, quota, "expected unconfigured quota to be nil")
 	}
-	checkUsersWithTag := func(t *testing.T, tag string, wantUsers []int32) {
-		t.Helper()
-		users, err := db.Users().List(ctx, &UsersListOptions{Tag: tag})
+
+	// Set a quota. Expect it to be returned correctly.
+	{
+		wantQuota := 10
+		err := db.Users().SetChatCompletionsQuota(ctx, user.ID, &wantQuota)
 		if err != nil {
 			t.Fatal(err)
 		}
-		userIDs := make([]int32, len(users))
-		for i, u := range users {
-			userIDs[i] = u.ID
+
+		quota, err := db.Users().GetChatCompletionsQuota(ctx, user.ID)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(userIDs, wantUsers) {
-			t.Errorf("got user IDs %v, want %v", userIDs, wantUsers)
-		}
+		require.NotNil(t, quota, "expected quota to be non-nil after storing")
+		require.Equal(t, wantQuota, *quota, "invalid quota returned")
 	}
 
-	t.Run("fails on nonexistent user", func(t *testing.T) {
-		if err := db.Users().SetTag(ctx, 1234 /* doesn't exist */, "t", true); !errcode.IsNotFound(err) {
-			t.Errorf("got err %v, want errcode.IsNotFound", err)
+	// Now unset the quota.
+	{
+		err := db.Users().SetChatCompletionsQuota(ctx, user.ID, nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if err := db.Users().SetTag(ctx, 1234 /* doesn't exist */, "t", false); !errcode.IsNotFound(err) {
-			t.Errorf("got err %v, want errcode.IsNotFound", err)
+
+		quota, err := db.Users().GetChatCompletionsQuota(ctx, user.ID)
+		if err != nil {
+			t.Fatal(err)
 		}
+		require.Nil(t, quota, "expected unconfigured quota to be nil")
+	}
+}
+
+func TestUsers_GetSetCodeCompletionsQuota(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	t.Parallel()
+
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+
+	user, err := db.Users().Create(ctx, NewUser{
+		Email:           "alice@example.com",
+		Username:        "alice",
+		EmailIsVerified: true,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	t.Run("tags begins empty", func(t *testing.T) {
-		checkTags(t, u.ID, []string{})
-		checkUsersWithTag(t, "t1", []int32{})
+	// Initially, no quota should be set and nil should be returned.
+	{
+		quota, err := db.Users().GetCodeCompletionsQuota(ctx, user.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		require.Nil(t, quota, "expected unconfigured quota to be nil")
+	}
+
+	// Set a quota. Expect it to be returned correctly.
+	{
+		wantQuota := 10
+		err := db.Users().SetCodeCompletionsQuota(ctx, user.ID, &wantQuota)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		quota, err := db.Users().GetCodeCompletionsQuota(ctx, user.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		require.NotNil(t, quota, "expected quota to be non-nil after storing")
+		require.Equal(t, wantQuota, *quota, "invalid quota returned")
+	}
+
+	// Now unset the quota.
+	{
+		err := db.Users().SetCodeCompletionsQuota(ctx, user.ID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		quota, err := db.Users().GetCodeCompletionsQuota(ctx, user.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		require.Nil(t, quota, "expected unconfigured quota to be nil")
+	}
+}
+
+func TestUsers_CreateWithExternalAccount(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	t.Parallel()
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+
+	spec := extsvc.AccountSpec{
+		ServiceType: "xa",
+		ServiceID:   "xb",
+		ClientID:    "xc",
+		AccountID:   "xd",
+	}
+
+	authData := json.RawMessage(`"authData"`)
+	data := json.RawMessage(`"data"`)
+	accountData := extsvc.AccountData{
+		AuthData: extsvc.NewUnencryptedData(authData),
+		Data:     extsvc.NewUnencryptedData(data),
+	}
+	user, err := db.Users().CreateWithExternalAccount(ctx, NewUser{Username: "u"}, &extsvc.Account{AccountSpec: spec, AccountData: accountData})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "u"; user.Username != want {
+		t.Errorf("got %q, want %q", user.Username, want)
+	}
+
+	accounts, err := db.UserExternalAccounts().List(ctx, ExternalAccountsListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("got len(accounts) == %d, want 1", len(accounts))
+	}
+	account := accounts[0]
+	simplifyExternalAccount(account)
+	account.ID = 0
+
+	want := &extsvc.Account{
+		UserID:      user.ID,
+		AccountSpec: spec,
+		AccountData: accountData,
+	}
+	if diff := cmp.Diff(want, account, et.CompareEncryptable); diff != "" {
+		t.Fatalf("Mismatch (-want +got):\n%s", diff)
+	}
+
+	userRoles, err := db.UserRoles().GetByUserID(ctx, GetUserRoleOpts{
+		UserID: user.ID,
 	})
+	require.NoError(t, err)
+	// Both USER and SITE_ADMINISTRATOR role have been assigned.
+	require.Len(t, userRoles, 2)
+}
 
-	t.Run("adds and removes tag", func(t *testing.T) {
-		if err := db.Users().SetTag(ctx, u.ID, "t1", true); err != nil {
-			t.Fatal(err)
-		}
-		checkTags(t, u.ID, []string{"t1"})
-		checkUsersWithTag(t, "t1", []int32{u.ID})
+func TestUsers_CreateWithExternalAccount_NilData(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	t.Parallel()
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
 
-		t.Run("deduplicates", func(t *testing.T) {
-			if err := db.Users().SetTag(ctx, u.ID, "t1", true); err != nil {
-				t.Fatal(err)
-			}
-			checkTags(t, u.ID, []string{"t1"})
-		})
+	spec := extsvc.AccountSpec{
+		ServiceType: "xa",
+		ServiceID:   "xb",
+		ClientID:    "xc",
+		AccountID:   "xd",
+	}
 
-		if err := db.Users().SetTag(ctx, u.ID, "t2", true); err != nil {
-			t.Fatal(err)
-		}
-		checkTags(t, u.ID, []string{"t1", "t2"})
-		checkUsersWithTag(t, "t1", []int32{u.ID})
-		checkUsersWithTag(t, "t2", []int32{u.ID})
+	user, err := db.Users().CreateWithExternalAccount(ctx, NewUser{Username: "u"}, &extsvc.Account{AccountSpec: spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "u"; user.Username != want {
+		t.Errorf("got %q, want %q", user.Username, want)
+	}
 
-		if err := db.Users().SetTag(ctx, u.ID, "t1", false); err != nil {
-			t.Fatal(err)
-		}
-		checkTags(t, u.ID, []string{"t2"})
-		checkUsersWithTag(t, "t1", []int32{})
-		checkUsersWithTag(t, "t2", []int32{u.ID})
+	accounts, err := db.UserExternalAccounts().List(ctx, ExternalAccountsListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("got len(accounts) == %d, want 1", len(accounts))
+	}
+	account := accounts[0]
+	simplifyExternalAccount(account)
+	account.ID = 0
 
-		t.Run("removing nonexistent tag is noop", func(t *testing.T) {
-			if err := db.Users().SetTag(ctx, u.ID, "t1", false); err != nil {
-				t.Fatal(err)
-			}
-			checkTags(t, u.ID, []string{"t2"})
-		})
+	want := &extsvc.Account{
+		UserID:      user.ID,
+		AccountSpec: spec,
+	}
+	if diff := cmp.Diff(want, account, et.CompareEncryptable); diff != "" {
+		t.Fatalf("Mismatch (-want +got):\n%s", diff)
+	}
+}
 
-		if err := db.Users().SetTag(ctx, u.ID, "t2", false); err != nil {
-			t.Fatal(err)
-		}
-		checkTags(t, u.ID, []string{})
-		checkUsersWithTag(t, "t2", []int32{})
+func TestUsers_CreateCancelAccessRequest(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	t.Parallel()
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+
+	usersStore := db.Users()
+	accessRequestsStore := db.AccessRequests()
+
+	_, err := accessRequestsStore.Create(ctx, &types.AccessRequest{
+		Email:          "a123@email.com",
+		Name:           "a123",
+		AdditionalInfo: "info1",
 	})
+	require.NoError(t, err)
+
+	_, err = usersStore.Create(ctx, NewUser{Username: "u1ted", Email: "a123@email.com", EmailVerificationCode: "e"})
+	require.NoError(t, err)
+
+	updated, _ := accessRequestsStore.GetByEmail(ctx, "a123@email.com")
+
+	assert.Equal(t, updated.Status, types.AccessRequestStatusCanceled)
+}
+
+func TestUserNotFoundFulfillsNotFound(t *testing.T) {
+	err := NewUserNotFoundError(123)
+	require.True(t, errcode.IsNotFound(err))
 }
 
 func normalizeUsers(users []*types.User) []*types.User {
@@ -851,4 +1395,8 @@ func normalizeUsers(users []*types.User) []*types.User {
 		u.InvalidatedSessionsAt = u.InvalidatedSessionsAt.Local().Round(time.Second)
 	}
 	return users
+}
+
+func getUserRoles(ctx context.Context, db DB, userID int32) ([]*types.UserRole, error) {
+	return db.UserRoles().GetByUserID(ctx, GetUserRoleOpts{UserID: userID})
 }

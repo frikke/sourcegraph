@@ -1,35 +1,31 @@
 package tracer
 
 import (
-	"context"
-	"fmt"
-	"io"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"text/template"
 
-	"github.com/opentracing/opentracing-go"
+	"github.com/go-logr/logr"
+	"github.com/go-logr/stdr"
 	"github.com/sourcegraph/log"
+	"github.com/sourcegraph/log/std"
 	"go.opentelemetry.io/otel"
-	oteltracesdk "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
-	oteltrace "go.opentelemetry.io/otel/trace"
 	"go.uber.org/automaxprocs/maxprocs"
 
-	"github.com/sourcegraph/sourcegraph/lib/errors"
-
-	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/conf/conftypes"
 	"github.com/sourcegraph/sourcegraph/internal/env"
 	"github.com/sourcegraph/sourcegraph/internal/hostname"
+	"github.com/sourcegraph/sourcegraph/internal/trace"
+	"github.com/sourcegraph/sourcegraph/internal/tracer/oteldefaults"
 	"github.com/sourcegraph/sourcegraph/internal/version"
-
-	"github.com/sourcegraph/sourcegraph/internal/tracer/internal/exporters"
+	"github.com/sourcegraph/sourcegraph/schema"
 )
 
 // options control the behavior of a TracerType
 type options struct {
 	TracerType
 	externalURL string
-	debug       bool
 	// these values are not configurable by site config
 	resource log.Resource
 }
@@ -60,8 +56,24 @@ func (t TracerType) isSetByUser() bool {
 	return false
 }
 
+type Configuration struct {
+	ExternalURL string
+	*schema.ObservabilityTracing
+}
+
+type ConfigurationSource interface {
+	Config() Configuration
+}
+
+type WatchableConfigurationSource interface {
+	ConfigurationSource
+
+	// Watchable allows the caller to be notified when the configuration changes.
+	conftypes.Watchable
+}
+
 // Init should be called from the main function of service
-func Init(logger log.Logger, c conftypes.WatchableSiteConfig) {
+func Init(logger log.Logger, c WatchableConfigurationSource) {
 	// Tune GOMAXPROCS for kubernetes. All our binaries import this package,
 	// so we tune for all of them.
 	//
@@ -84,60 +96,84 @@ func Init(logger log.Logger, c conftypes.WatchableSiteConfig) {
 		resource.Namespace = "dev"
 	}
 
-	initTracer(logger, &options{resource: resource}, c)
-}
+	// Set up initial configurations
+	debugMode := &atomic.Bool{}
+	provider := newOtelTracerProvider(resource)
 
-// initTracer is a helper that should be called exactly once (from Init).
-func initTracer(logger log.Logger, opts *options, c conftypes.WatchableSiteConfig) {
-	// Initialize global, hot-swappable implementations of OpenTelemetry and OpenTracing
-	// tracing.
-	globalOTelTracerProvider := newSwitchableOtelTracerProvider(logger.Scoped("otel.global", "the global OpenTelemetry tracer"))
-	otel.SetTracerProvider(globalOTelTracerProvider)
-	globalOTTracer := newSwitchableOTTracer(logger.Scoped("ot.global", "the global OpenTracing tracer"))
-	opentracing.SetGlobalTracer(globalOTTracer)
-
-	// Initially everything is disabled since we haven't read conf yet. This variable is
-	// also updated to compare against new version of configuration.
-	go c.Watch(newConfWatcher(logger, c, globalOTelTracerProvider, globalOTTracer, options{
-		resource:    opts.resource,
-		TracerType:  None,
-		debug:       false,
-		externalURL: "",
+	// Set up logging
+	otelLogger := logger.AddCallerSkip(2).Scoped("otel")
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		if debugMode.Load() {
+			otelLogger.Warn("error encountered", log.Error(err))
+		} else {
+			otelLogger.Debug("error encountered", log.Error(err))
+		}
+	}))
+	otel.SetLogger(logr.New(toggledLogrSink{
+		debugMode: debugMode,
+		// toggledLogrSink only enables logging when debugMode is enabled, and
+		// logr library levels are annoying to deal with, so we just use
+		// a single level (info), as it's all diagnostics output to us anyway.
+		LogSink: stdr.New(std.NewLogger(otelLogger, log.LevelInfo)).GetSink(),
 	}))
 
-	// Contribute validation for tracing package
-	conf.ContributeWarning(func(c conftypes.SiteConfigQuerier) conf.Problems {
-		tracing := c.SiteConfig().ObservabilityTracing
+	// Create and set up global tracers from provider. We will be making updates to these
+	// tracers through the debugMode ref and underlying provider.
+	otelTracerProvider := newLoggedOtelTracerProvider(logger, provider, debugMode)
+	otel.SetTextMapPropagator(oteldefaults.Propagator())
+	otel.SetTracerProvider(otelTracerProvider)
+
+	// Configure the trace package to render trace URLs nicely with the settings
+	// from site config.
+	setupTraceURL(c)
+
+	// Initially everything is disabled since we haven't read conf yet - start a goroutine
+	// that watches for updates to configure the undelrying provider and debugMode.
+	go c.Watch(newConfWatcher(logger, c, provider, newOtelSpanProcessor, debugMode))
+}
+
+func setupTraceURL(c ConfigurationSource) {
+	var (
+		cachedURLTemplateStr string
+		cachedURLTemplate    *template.Template
+		cachedURLTemplateErr error
+		cachedURLTemplateMu  sync.Mutex
+	)
+
+	trace.RegisterURLRenderer(func(traceID string) string {
+		tracing := c.Config().ObservabilityTracing
 		if tracing == nil || tracing.UrlTemplate == "" {
-			return nil
+			return ""
 		}
-		if _, err := template.New("").Parse(tracing.UrlTemplate); err != nil {
-			return conf.NewSiteProblems(fmt.Sprintf("observability.tracing.traceURL is not a valid template: %s", err.Error()))
+
+		cachedURLTemplateMu.Lock()
+		defer cachedURLTemplateMu.Unlock()
+
+		if cachedURLTemplateStr != tracing.UrlTemplate {
+			cachedURLTemplateStr = tracing.UrlTemplate
+			cachedURLTemplate, cachedURLTemplateErr = template.New("traceURL").Parse(tracing.UrlTemplate)
 		}
-		return nil
+
+		if cachedURLTemplateErr != nil {
+			// We contribute a validator on tracer package init, so safe to no-op here
+			return ""
+		}
+
+		var sb strings.Builder
+		_ = cachedURLTemplate.Execute(&sb, map[string]string{
+			"TraceID":     traceID,
+			"ExternalURL": c.Config().ExternalURL,
+		})
+		return sb.String()
 	})
 }
 
-// newTracer creates OpenTelemetry and OpenTracing tracers based on opts. It always returns
-// valid tracers.
-func newTracer(logger log.Logger, opts *options) (opentracing.Tracer, oteltrace.TracerProvider, io.Closer, error) {
-	logger.Debug("configuring tracer")
-
-	var exporter oteltracesdk.SpanExporter
-	var err error
-	switch opts.TracerType {
-	case OpenTelemetry:
-		exporter, err = exporters.NewOTLPExporter(context.Background(), logger)
-
-	case Jaeger:
-		exporter, err = exporters.NewJaegerExporter()
-
-	default:
-		err = errors.Newf("unknown tracer type %q", opts.TracerType)
-	}
-
-	if err != nil || exporter == nil {
-		return opentracing.NoopTracer{}, trace.NewNoopTracerProvider(), nil, err
-	}
-	return newOTelBridgeTracer(logger, exporter, opts.resource, opts.debug)
+type toggledLogrSink struct {
+	logr.LogSink
+	// debugMode is returned when Enabled() is called on this sink, instead of
+	// the underlying LogSink's implementation. In other words, if debug mode
+	// is enabled, all logs using this sink are enabled.
+	debugMode *atomic.Bool
 }
+
+func (s toggledLogrSink) Enabled(_ int) bool { return s.debugMode.Load() }

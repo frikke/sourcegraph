@@ -1,7 +1,6 @@
 package libs
 
 import (
-	"github.com/grafana/regexp"
 	lua "github.com/yuin/gopher-lua"
 	luar "layeh.com/gopher-luar"
 
@@ -14,14 +13,6 @@ var Patterns = patternAPI{}
 type patternAPI struct{}
 
 func (api patternAPI) LuaAPI() map[string]lua.LGFunction {
-	newPathPatternConstructor := func(prefix, suffix string) func(*lua.LState) error {
-		return func(state *lua.LState) error {
-			pattern := regexp.QuoteMeta(state.CheckString(1))
-			state.Push(luar.New(state, luatypes.NewPattern(prefix+pattern+suffix)))
-			return nil
-		}
-	}
-
 	newPathPatternCombineConstructor := func(combine func([]*luatypes.PathPattern) *luatypes.PathPattern) func(*lua.LState) error {
 		return func(state *lua.LState) error {
 			var patterns []*luatypes.PathPattern
@@ -40,15 +31,27 @@ func (api patternAPI) LuaAPI() map[string]lua.LGFunction {
 	}
 
 	return map[string]lua.LGFunction{
+		// type: (string, array[string]) -> pattern
 		"backdoor": util.WrapLuaFunction(func(state *lua.LState) error {
-			state.Push(luar.New(state, luatypes.NewPattern(state.CheckString(1))))
+			glob := state.CheckString(1)
+			pathspecTable := state.CheckTable(2)
+
+			pathspecs, err := util.MapSlice(pathspecTable, func(value lua.LValue) (string, error) {
+				if s, ok := value.(lua.LString); ok {
+					return string(s), nil
+				}
+				return "", util.NewTypeError("lua.LString", value)
+			})
+			if err != nil {
+				return err
+			}
+
+			state.Push(luar.New(state, luatypes.NewPattern(glob, pathspecs)))
 			return nil
 		}),
-		"path_literal":   util.WrapLuaFunction(newPathPatternConstructor("^", "$")),
-		"path_segment":   util.WrapLuaFunction(newPathPatternConstructor("(^|/)", "(/|$)")),
-		"path_basename":  util.WrapLuaFunction(newPathPatternConstructor("(^|/)", "$")),
-		"path_extension": util.WrapLuaFunction(newPathPatternConstructor("(^|/)[^/]+.", "$")),
-		"path_combine":   util.WrapLuaFunction(newPathPatternCombineConstructor(luatypes.NewCombinedPattern)),
-		"path_exclude":   util.WrapLuaFunction(newPathPatternCombineConstructor(luatypes.NewExcludePattern)),
+		// type: ((pattern | array[pattern])...) -> pattern
+		"path_combine": util.WrapLuaFunction(newPathPatternCombineConstructor(luatypes.NewCombinedPattern)),
+		// type: ((pattern | array[pattern])...) -> pattern
+		"path_exclude": util.WrapLuaFunction(newPathPatternCombineConstructor(luatypes.NewExcludePattern)),
 	}
 }

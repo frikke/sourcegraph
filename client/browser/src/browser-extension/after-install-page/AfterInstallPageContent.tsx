@@ -1,22 +1,22 @@
-import React, { VideoHTMLAttributes } from 'react'
+import React, { type VideoHTMLAttributes } from 'react'
 
 import { mdiOpenInNew, mdiGithub, mdiCheck, mdiGitlab, mdiBitbucket, mdiLock, mdiBookOpenPageVariant } from '@mdi/js'
 import classNames from 'classnames'
 
 import { SourcegraphLogo } from '@sourcegraph/branded/src/components/SourcegraphLogo'
 import { PhabricatorIcon } from '@sourcegraph/shared/src/components/icons'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
 import { Link, Icon, Code, H1, H2, H3, Text } from '@sourcegraph/wildcard'
 
 import { getPlatformName } from '../../shared/util/context'
 
 import styles from './AfterInstallPageContent.module.scss'
 
-const Video: React.FunctionComponent<
-    React.PropsWithChildren<
-        { name: string } & Pick<VideoHTMLAttributes<HTMLVideoElement>, 'width' | 'height'> & ThemeProps
-    >
-> = ({ name, isLightTheme, width, height }) => {
+interface VideoProps extends Pick<VideoHTMLAttributes<HTMLVideoElement>, 'width' | 'height'> {
+    name: string
+    isLightTheme: boolean
+}
+
+const Video: React.FC<VideoProps> = ({ name, isLightTheme, width, height }) => {
     const suffix = isLightTheme ? 'Light' : 'Dark'
     return (
         <video
@@ -43,7 +43,11 @@ const Video: React.FunctionComponent<
     )
 }
 
-export const AfterInstallPageContent: React.FunctionComponent<React.PropsWithChildren<ThemeProps>> = props => {
+interface AfterInstallPageContentProps {
+    isLightTheme: boolean
+}
+
+export const AfterInstallPageContent: React.FC<AfterInstallPageContentProps> = props => {
     // Safari does not support the search shortcut. So don't show the feature.
     const isSafari = getPlatformName() === 'safari-extension'
     const showSearchShortcut = !isSafari
@@ -54,7 +58,7 @@ export const AfterInstallPageContent: React.FunctionComponent<React.PropsWithChi
                 <Link to="https://sourcegraph.com/search" target="_blank" rel="noopener">
                     <SourcegraphLogo className={styles.sourcegraphLogo} />
                 </Link>
-                <Link to="https://docs.sourcegraph.com/integration/browser_extension" target="_blank" rel="noopener">
+                <Link to="https://sourcegraph.com/docs/integration/browser_extension" target="_blank" rel="noopener">
                     Browser extension docs <Icon aria-hidden={true} svgPath={mdiOpenInNew} />
                 </Link>
             </div>
@@ -179,7 +183,7 @@ export const AfterInstallPageContent: React.FunctionComponent<React.PropsWithChi
                                     <li>
                                         <strong>Install Sourcegraph</strong> (
                                         <Link
-                                            to="https://docs.sourcegraph.com/admin/install"
+                                            to="https://sourcegraph.com/docs/admin/install"
                                             target="_blank"
                                             rel="noopener"
                                         >
@@ -219,7 +223,7 @@ export const AfterInstallPageContent: React.FunctionComponent<React.PropsWithChi
                         <Text className="m-0 ml-3">
                             Read the{' '}
                             <Link
-                                to="https://docs.sourcegraph.com/integration/browser_extension"
+                                to="https://sourcegraph.com/docs/integration/browser_extension"
                                 rel="noopener"
                                 target="_blank"
                             >

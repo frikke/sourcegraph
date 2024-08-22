@@ -2,28 +2,30 @@ import React, { useMemo, useEffect } from 'react'
 
 import classNames from 'classnames'
 import { startCase } from 'lodash'
-import { RouteComponentProps } from 'react-router'
 
 import { useQuery } from '@sourcegraph/http-client'
-import { Card, H2, Text, LoadingSpinner, AnchorLink, H4, LineChart, Series } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Card, H2, Text, LoadingSpinner, AnchorLink, H4, LineChart, type Series } from '@sourcegraph/wildcard'
 
-import { ExtensionsStatisticsResult, ExtensionsStatisticsVariables } from '../../../graphql-operations'
-import { eventLogger } from '../../../tracking/eventLogger'
+import type { ExtensionsStatisticsResult, ExtensionsStatisticsVariables } from '../../../graphql-operations'
 import { AnalyticsPageTitle } from '../components/AnalyticsPageTitle'
 import { ChartContainer } from '../components/ChartContainer'
 import { HorizontalSelect } from '../components/HorizontalSelect'
-import { TimeSavedCalculatorGroup } from '../components/TimeSavedCalculatorGroup'
+import { TimeSavedCalculatorGroup, TimeSavedCalculatorGroupProps } from '../components/TimeSavedCalculatorGroup'
 import { ToggleSelect } from '../components/ToggleSelect'
-import { ValueLegendList, ValueLegendListProps } from '../components/ValueLegendList'
+import { ValueLegendList, type ValueLegendListProps } from '../components/ValueLegendList'
 import { useChartFilters } from '../useChartFilters'
-import { StandardDatum } from '../utils'
+import type { StandardDatum } from '../utils'
 
 import { EXTENSIONS_STATISTICS } from './queries'
 
 import styles from './index.module.scss'
 
-export const AnalyticsExtensionsPage: React.FunctionComponent<RouteComponentProps<{}>> = () => {
-    const { dateRange, aggregation, grouping } = useChartFilters({ name: 'Extensions' })
+interface Props extends TelemetryV2Props {}
+
+export const AnalyticsExtensionsPage: React.FunctionComponent<Props> = ({ telemetryRecorder }) => {
+    const { dateRange, aggregation, grouping } = useChartFilters({ name: 'Extensions', telemetryRecorder })
     const { data, error, loading } = useQuery<ExtensionsStatisticsResult, ExtensionsStatisticsVariables>(
         EXTENSIONS_STATISTICS,
         {
@@ -34,8 +36,9 @@ export const AnalyticsExtensionsPage: React.FunctionComponent<RouteComponentProp
         }
     )
     useEffect(() => {
-        eventLogger.logPageView('AdminAnalyticsExtensions')
-    }, [])
+        EVENT_LOGGER.logPageView('AdminAnalyticsExtensions')
+        telemetryRecorder.recordEvent('admin.analytics.extensions', 'view')
+    }, [telemetryRecorder])
     const [stats, legends, calculatorProps, installationStats] = useMemo(() => {
         if (!data) {
             return []
@@ -90,7 +93,7 @@ export const AnalyticsExtensionsPage: React.FunctionComponent<RouteComponentProp
         ]
         const legends: ValueLegendListProps['items'] = [
             {
-                value: jetbrains.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: jetbrains.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description:
                     aggregation.selected === 'count' ? 'JetBrains\nIDE plugin' : 'Users using\nJetBrains IDE plugin',
                 color: 'var(--cyan)',
@@ -100,7 +103,7 @@ export const AnalyticsExtensionsPage: React.FunctionComponent<RouteComponentProp
                         : 'The number of users searched in JetBrains IDE plugin.',
             },
             {
-                value: vscode.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: vscode.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description:
                     aggregation.selected === 'count' ? 'VS Code\nIDE extension' : 'Users using\nVS Code IDE extension',
                 color: 'var(--purple)',
@@ -110,7 +113,7 @@ export const AnalyticsExtensionsPage: React.FunctionComponent<RouteComponentProp
                         : 'The number of users searched in IDE extension.',
             },
             {
-                value: browser.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: browser.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description: aggregation.selected === 'count' ? 'Browser\nextension' : 'Users using\nbrowser extension',
                 color: 'var(--orange)',
                 tooltip:
@@ -120,13 +123,13 @@ export const AnalyticsExtensionsPage: React.FunctionComponent<RouteComponentProp
             },
         ]
 
-        const calculatorProps = {
+        const calculatorProps: TimeSavedCalculatorGroupProps = {
             page: 'Extensions',
             label: 'Total events',
             dateRange: dateRange.value,
             color: 'var(--purple)',
             description:
-                'Our extensions allow users to complete their goals without switching tools and context. We’ve calculated the time saved by reducing context switching between tools.',
+                'Our search extensions allow users to complete their goals without switching tools and context. We’ve calculated the time saved by reducing context switching between tools.',
             value: totalEvents,
             items: [
                 {
@@ -151,19 +154,20 @@ export const AnalyticsExtensionsPage: React.FunctionComponent<RouteComponentProp
                         "Searches from VS Code across all of your company's code without locally cloning repositories or complex scripting.",
                 },
             ],
+            telemetryRecorder,
         }
         const totalUsersCount = data?.site.users.totalCount
         const installationStats =
             totalUsersCount > 0
                 ? {
-                      vscode: Math.floor((vscode.summary.totalRegisteredUsers * 100) / totalUsersCount),
-                      jetbrains: Math.floor((jetbrains.summary.totalRegisteredUsers * 100) / totalUsersCount),
-                      browser: Math.floor((browser.summary.totalRegisteredUsers * 100) / totalUsersCount),
+                      vscode: Math.floor((vscode.summary.totalUniqueUsers * 100) / totalUsersCount),
+                      jetbrains: Math.floor((jetbrains.summary.totalUniqueUsers * 100) / totalUsersCount),
+                      browser: Math.floor((browser.summary.totalUniqueUsers * 100) / totalUsersCount),
                   }
                 : undefined
 
         return [stats, legends, calculatorProps, installationStats]
-    }, [data, dateRange.value, aggregation.selected])
+    }, [data, dateRange.value, aggregation.selected, telemetryRecorder])
 
     if (error) {
         throw error
@@ -177,7 +181,7 @@ export const AnalyticsExtensionsPage: React.FunctionComponent<RouteComponentProp
 
     return (
         <>
-            <AnalyticsPageTitle>Extensions</AnalyticsPageTitle>
+            <AnalyticsPageTitle>Search extensions</AnalyticsPageTitle>
 
             <Card className="p-3 position-relative">
                 <div className="d-flex justify-content-end align-items-stretch mb-2 text-nowrap">
@@ -213,21 +217,21 @@ export const AnalyticsExtensionsPage: React.FunctionComponent<RouteComponentProp
                             <Text as="li">
                                 {installationStats.vscode}% of users have installed the{' '}
                                 <AnchorLink to="/help/integration/editor" target="_blank">
-                                    VS Code IDE extension
+                                    VS Code extension
                                 </AnchorLink>
                                 . Promote installation to increase the value.
                             </Text>
                             <Text as="li">
                                 {installationStats.jetbrains}% of users have installed the{' '}
                                 <AnchorLink to="/help/integration/editor" target="_blank">
-                                    JetBrains IDE plugin
+                                    JetBrains plugin
                                 </AnchorLink>
                                 . Promote installation to increase the value.
                             </Text>
                             <Text as="li">
                                 {installationStats.browser}% of users have installed the{' '}
                                 <AnchorLink to="/help/integration/browser_extension" target="_blank">
-                                    Browser extension
+                                    browser extension
                                 </AnchorLink>
                                 . Promote installation to increase the value.
                             </Text>

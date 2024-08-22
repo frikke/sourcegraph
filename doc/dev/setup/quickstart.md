@@ -2,16 +2,14 @@
 
 This is the quickstart guide for [developing Sourcegraph](../index.md).
 
-> NOTE: If you run into any troubles, you can alternatively consult the [deprecated quickstart instructions without `sg`](deprecated_quickstart.md) or reach out on Slack:
+> NOTE: If you run into any troubles, reach out on Slack:
 >
-> - [As an open source contributor](https://sourcegraph-community.slack.com/archives/C02BG0M0ZJ7)
-> - [As a Sourcegraph employee](https://sourcegraph.slack.com/archives/C01N83PS4TU)
->
-> You can also get help on our [developer experience discussion forum](https://github.com/sourcegraph/sourcegraph/discussions/categories/developer-experience).
+> - [As an open source contributor](https://discord.com/servers/sourcegraph-969688426372825169)
+> - [As a Sourcegraph employee](https://sourcegraph.slack.com/archives/C04MYFW01NV)
 
 <span class="virtual-br"></span>
 
-> NOTE: Looking for how to deploy or use Sourcegraph? See our [getting started](../../index.md#getting-started) options.
+> NOTE: Looking for how to deploy or use Sourcegraph? See our [getting started](https://sourcegraph.com/docs#quickstart) options.
 
 <span class="virtual-br"></span>
 
@@ -25,11 +23,15 @@ To install `sg`, run the following in your terminal:
 curl --proto '=https' --tlsv1.2 -sSLf https://install.sg.dev | sh
 ```
 
-See the [`sg` documentation](../background-information/sg/index.md) for more information or ask in the `#dev-experience` Slack channel.
+See the [`sg` documentation](../background-information/sg/index.md) for more information or ask in the `#discuss-dev-infra` Slack channel.
+
+## Ensure you have SSH setup for GitHub
+
+Follow the instructions on [Adding a new SSH key to your GitHub account](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account) for checking if you have an existing SSH for your current machine and setting one up if not.
 
 ## Run `sg setup`
 
-Open a terminal and run the following command:
+In the directory where you want the `sourcegraph` repository to be checked out, open a terminal and run the following command:
 
 ```sh
 sg setup
@@ -57,12 +59,6 @@ Keep this process running and follow the rest of the instructions in another ter
 sg start
 ```
 
-**If you are not a Sourcegraph employee and don't have access to [the `dev-private` repository](https://github.com/sourcegraph/dev-private)**, you want to start Sourcegraph OSS instead:
-
-```sh
-sg start oss
-```
-
 This will continuously compile your code and live reload your locally running instance of Sourcegraph.
 
 Navigate your browser to https://sourcegraph.test:3443 to see if everything worked.
@@ -71,7 +67,7 @@ Congratulations on making it to the end of the quickstart guide!
 
 ### Running Sourcegraph in different configurations
 
-If you want to run Sourcegraph in different configurations (with the monitoring stack, with code insights enabled, Sourcegraph OSS, ...), run the following:
+If you want to run Sourcegraph in different configurations (with the monitoring stack, with code insights enabled...), run the following:
 
 ```sh
 sg start -help
@@ -95,7 +91,6 @@ sg start monitoring
 
 Here are some additional resources to help you go further:
 
-- [Full `sg` reference](../background-information/sg/reference.md)
 - [Troubleshooting local development](troubleshooting.md)
 - [Continuous integration](../background-information/ci/index.md)
-- [Background information](../background-information/index.md) for more context on various topics.
+- [Background information](../index.md#background-information) for more context on various topics.

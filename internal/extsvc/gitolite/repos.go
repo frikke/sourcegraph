@@ -6,7 +6,9 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/inconshreveable/log15"
+	"github.com/inconshreveable/log15" //nolint:logging // TODO move all logging to sourcegraph/log
+
+	proto "github.com/sourcegraph/sourcegraph/internal/gitserver/v1"
 )
 
 // Repo is the repository metadata returned by the Gitolite API.
@@ -16,6 +18,20 @@ type Repo struct {
 
 	// URL is the clone URL of the repository.
 	URL string
+}
+
+func (r *Repo) ToProto() *proto.GitoliteRepo {
+	return &proto.GitoliteRepo{
+		Name: r.Name,
+		Url:  r.URL,
+	}
+}
+
+func (r *Repo) FromProto(p *proto.GitoliteRepo) {
+	*r = Repo{
+		Name: p.GetName(),
+		URL:  p.GetUrl(),
+	}
 }
 
 // Client is a client for the Gitolite API.

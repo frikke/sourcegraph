@@ -1,13 +1,14 @@
 import expect from 'expect'
 import { isEqual } from 'lodash'
+import { describe, it } from 'mocha'
 
 import { ExternalServiceKind } from '@sourcegraph/shared/src/graphql-operations'
 import { getConfig } from '@sourcegraph/shared/src/testing/config'
-import { createDriverForTest, Driver } from '@sourcegraph/shared/src/testing/driver'
+import { createDriverForTest, type Driver } from '@sourcegraph/shared/src/testing/driver'
 import { afterEachSaveScreenshotIfFailed } from '@sourcegraph/shared/src/testing/screenshotReporter'
 import { retry } from '@sourcegraph/shared/src/testing/utils'
 
-import { PhabricatorMapping } from '../browser-extension/web-extension-api/types'
+import type { PhabricatorMapping } from '../browser-extension/web-extension-api/types'
 
 // By default, these tests run against a local Phabricator instance and a local Sourcegraph instance.
 // To run them against phabricator.sgdev.org and umami.sgdev.org, set the below env vars in addition to SOURCEGRAPH_BASE_URL.
@@ -78,7 +79,7 @@ async function addPhabricatorRepo(driver: Driver): Promise<void> {
     // Activate the repo and wait for it to clone
     await driver.page.goto(PHABRICATOR_BASE_URL + '/source/jrpc/manage/')
     const activateButton = await driver.page.waitForSelector('a[href="/source/jrpc/edit/activate/"]')
-    const buttonLabel = (await (await activateButton!.getProperty('textContent')).jsonValue()).trim()
+    const buttonLabel = (await (await activateButton!.getProperty('textContent')).jsonValue<string>()).trim()
     // Don't click if it says "Deactivate Repository"
     if (buttonLabel === 'Activate Repository') {
         await activateButton!.click()
@@ -96,7 +97,7 @@ async function configureSourcegraphIntegration(driver: Driver): Promise<void> {
         await driver.page.waitForSelector('a[href="/config/group/sourcegraph/"]', { timeout: 2000 })
     } catch {
         throw new Error(
-            `The Sourcegraph native integration is not installed on ${PHABRICATOR_BASE_URL}. Please see https://docs.sourcegraph.com/dev/phabricator_gitolite#install-the-sourcegraph-phabricator-extension`
+            `The Sourcegraph native integration is not installed on ${PHABRICATOR_BASE_URL}. Please see https://docs-legacy.sourcegraph.com/dev/how-to/configure_phabricator_gitolite#install-the-sourcegraph-phabricator-extension`
         )
     }
 
@@ -137,7 +138,7 @@ async function configureSourcegraphIntegration(driver: Driver): Promise<void> {
  */
 async function init(driver: Driver): Promise<void> {
     if (restConfig.testUserPassword) {
-        await driver.ensureLoggedIn({ username: 'test', password: restConfig.testUserPassword })
+        await driver.ensureSignedIn({ username: 'test', password: restConfig.testUserPassword })
     }
     // TODO test with a Gitolite external service
     await driver.ensureHasExternalService({

@@ -60,7 +60,7 @@ func newSrcCliVersionHandler(logger log.Logger) http.Handler {
 	return &srcCliVersionHandler{
 		clock:    glock.NewRealClock(),
 		doer:     httpcli.ExternalClient,
-		logger:   logger.Scoped("srcCliVersionHandler", "HTTP handler for src-cli versions and downloads"),
+		logger:   logger.Scoped("srcCliVersionHandler"),
 		maxStale: srcCliCacheLifetime,
 	}
 }
@@ -129,8 +129,8 @@ func (h *srcCliVersionHandler) updateCachedVersion() (string, error) {
 		return "", errors.New("parsing minimum version")
 	}
 
-	url := fmt.Sprintf("%s/%d.%d", srcCliVersionCache, minimumVersion.Major(), minimumVersion.Minor())
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	urlStr := fmt.Sprintf("%s/%d.%d", srcCliVersionCache, minimumVersion.Major(), minimumVersion.Minor())
+	req, err := http.NewRequest(http.MethodGet, urlStr, nil)
 	if err != nil {
 		return "", errors.Wrap(err, "building request")
 	}

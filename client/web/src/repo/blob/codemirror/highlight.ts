@@ -1,21 +1,29 @@
 import { Facet, RangeSetBuilder } from '@codemirror/state'
-import { Decoration, DecorationSet, EditorView, PluginValue, ViewPlugin, ViewUpdate } from '@codemirror/view'
+import {
+    Decoration,
+    type DecorationSet,
+    type EditorView,
+    type PluginValue,
+    ViewPlugin,
+    type ViewUpdate,
+} from '@codemirror/view'
 
 import { logger } from '@sourcegraph/common'
 import { Occurrence, SyntaxKind } from '@sourcegraph/shared/src/codeintel/scip'
 
-import { BlobInfo } from '../Blob'
-
+import { OccurrenceIndex } from './codeintel/occurrences'
 import { positionToOffset } from './utils'
 
-/**
- * This data structure combines the syntax highlighting data received from the
- * server with a lineIndex map (implemented as array), for fast lookup by line
- * number, with minimal additional impact on memory (e.g. garbage collection).
- */
 interface HighlightIndex {
-    occurrences: Occurrence[]
-    lineIndex: (number | undefined)[]
+    // allOccurrences is an index including all occurrences in the syntax highlighting data.
+    allOccurrences: OccurrenceIndex
+    // interactiveOccurrences is the interactive subset of allOccurrences in the syntax highlighting data.
+    interactiveOccurrences: OccurrenceIndex
+}
+
+interface HighlightData {
+    content: string
+    lsif?: string
 }
 
 /**
@@ -23,38 +31,47 @@ interface HighlightIndex {
  * NOTE: This assumes that the data is sorted and does not contain overlapping
  * ranges.
  */
-function createHighlightTable(info: BlobInfo): HighlightIndex {
-    const lineIndex: (number | undefined)[] = []
-
-    if (!info.lsif) {
-        return { occurrences: [], lineIndex }
-    }
-
-    try {
-        const occurrences = Occurrence.fromInfo(info)
-        let previousEndline: number | undefined
-
-        for (let index = 0; index < occurrences.length; index++) {
-            const current = occurrences[index]
-
-            if (previousEndline !== current.range.start.line) {
-                // Only use the current index if there isn't already an occurence on
-                // the current line.
-                lineIndex[current.range.start.line] = index
-            }
-
-            if (!current.range.isSingleLine()) {
-                lineIndex[current.range.end.line] = index
-            }
-
-            previousEndline = current.range.end.line
+export function createHighlightTable(info: HighlightData): HighlightIndex {
+    let occurrences: Occurrence[] = []
+    if (info.lsif) {
+        try {
+            occurrences = Occurrence.fromInfo(info)
+        } catch (error) {
+            logger.error(`Unable to process SCIP highlight data: ${info.lsif}`, error)
         }
-
-        return { occurrences, lineIndex }
-    } catch (error) {
-        logger.error(`Unable to process SCIP highlight data: ${info.lsif}`, error)
-        return { occurrences: [], lineIndex }
     }
+    return {
+        allOccurrences: new OccurrenceIndex(occurrences),
+        interactiveOccurrences: new OccurrenceIndex(occurrences.filter(isInteractiveOccurrence)),
+    }
+}
+
+/**
+ * Occurrences that are possibly interactive (i.e. they can have code intelligence).
+ */
+const INTERACTIVE_OCCURRENCE_KINDS = new Set([
+    SyntaxKind.Identifier,
+    SyntaxKind.IdentifierBuiltin,
+    SyntaxKind.IdentifierConstant,
+    SyntaxKind.IdentifierMutableGlobal,
+    SyntaxKind.IdentifierParameter,
+    SyntaxKind.IdentifierLocal,
+    SyntaxKind.IdentifierShadowed,
+    SyntaxKind.IdentifierModule,
+    SyntaxKind.IdentifierFunction,
+    SyntaxKind.IdentifierFunctionDefinition,
+    SyntaxKind.IdentifierMacro,
+    SyntaxKind.IdentifierMacroDefinition,
+    SyntaxKind.IdentifierType,
+    SyntaxKind.IdentifierAttribute,
+])
+
+function isInteractiveOccurrence(occurrence: Occurrence): boolean {
+    if (!occurrence.kind) {
+        return false
+    }
+
+    return INTERACTIVE_OCCURRENCE_KINDS.has(occurrence.kind)
 }
 
 class SyntaxHighlightManager implements PluginValue {
@@ -80,15 +97,15 @@ class SyntaxHighlightManager implements PluginValue {
             const fromLine = view.state.doc.lineAt(from)
             const toLine = view.state.doc.lineAt(to)
 
-            const { occurrences, lineIndex } = view.state.facet(syntaxHighlight)
+            const occurrences = view.state.facet(syntaxHighlight).allOccurrences
 
             // Find index of first relevant token
             let startIndex: number | undefined
             {
                 let line = fromLine.number - 1
                 do {
-                    startIndex = lineIndex[line++]
-                } while (startIndex === undefined && line < lineIndex.length)
+                    startIndex = occurrences.lineIndex[line++]
+                } while (startIndex === undefined && line < occurrences.lineIndex.length)
             }
 
             // Cache current line object
@@ -101,9 +118,9 @@ class SyntaxHighlightManager implements PluginValue {
 
                 for (let index = startIndex; index < occurrences.length; index++) {
                     const occurrence = occurrences[index]
-                    const occurenceStartLine = occurrence.range.start.line + 1
+                    const occurrenceStartLine = occurrence.range.start.line + 1
 
-                    if (occurenceStartLine > toLine.number) {
+                    if (occurrenceStartLine > toLine.number) {
                         break
                     }
 
@@ -112,13 +129,13 @@ class SyntaxHighlightManager implements PluginValue {
                     }
 
                     // Fetch new line information if necessary
-                    if (line.number !== occurenceStartLine) {
+                    if (line.number !== occurrenceStartLine) {
                         // If the next occurrence doesn't map to a valid
                         // document position, stop
-                        if (occurenceStartLine > textDocument.lines) {
+                        if (occurrenceStartLine > textDocument.lines) {
                             break
                         }
-                        line = textDocument.line(occurenceStartLine)
+                        line = textDocument.line(occurrenceStartLine)
                     }
 
                     const from = Math.min(line.from + occurrence.range.start.character, line.to)
@@ -147,10 +164,9 @@ class SyntaxHighlightManager implements PluginValue {
  * Facet for providing syntax highlighting information from a {@link BlobInfo}
  * object.
  */
-export const syntaxHighlight = Facet.define<BlobInfo, HighlightIndex>({
+export const syntaxHighlight = Facet.define<HighlightData, HighlightIndex>({
     static: true,
-    compareInput: (blobInfoA, blobInfoB) => blobInfoA.lsif === blobInfoB.lsif,
-    combine: blobInfos =>
-        blobInfos[0]?.lsif ? createHighlightTable(blobInfos[0]) : { occurrences: [], lineIndex: [] },
+    compareInput: (inputA, inputB) => inputA.lsif === inputB.lsif,
+    combine: values => createHighlightTable(values[0] ?? {}),
     enables: ViewPlugin.fromClass(SyntaxHighlightManager, { decorations: plugin => plugin.decorations }),
 })

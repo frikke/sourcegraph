@@ -1,33 +1,35 @@
-import { DecoratorFn, Meta, Story } from '@storybook/react'
+import type { Decorator, Meta, StoryFn } from '@storybook/react'
 import { subDays } from 'date-fns'
-import { NEVER, Observable, of, throwError } from 'rxjs'
+import { NEVER, type Observable, of, throwError } from 'rxjs'
 
-import { IRepository, ISearchContext, ISearchContextRepositoryRevisions } from '@sourcegraph/shared/src/schema'
+import type {
+    SearchContextFields,
+    SearchContextRepositoryRevisionsFields,
+} from '@sourcegraph/shared/src/graphql-operations'
+import { mockAuthenticatedUser } from '@sourcegraph/shared/src/testing/searchContexts/testHelpers'
 import { NOOP_PLATFORM_CONTEXT } from '@sourcegraph/shared/src/testing/searchTestHelpers'
 
 import { WebStory } from '../../components/WebStory'
 
 import { SearchContextPage } from './SearchContextPage'
 
-const decorator: DecoratorFn = story => <div className="p-3 container">{story()}</div>
+const decorator: Decorator = story => <div className="p-3 container">{story()}</div>
 
 const config: Meta = {
     title: 'web/enterprise/searchContexts/SearchContextPage',
     decorators: [decorator],
-    parameters: {
-        chromatic: { viewports: [1200], disableSnapshot: false },
-    },
+    parameters: {},
 }
 
 export default config
 
-const repositories: ISearchContextRepositoryRevisions[] = [
+const repositories: SearchContextRepositoryRevisionsFields[] = [
     {
         __typename: 'SearchContextRepositoryRevisions',
         repository: {
             __typename: 'Repository',
             name: 'github.com/example/example',
-        } as IRepository,
+        },
         revisions: ['REVISION1', 'REVISION2'],
     },
     {
@@ -35,12 +37,12 @@ const repositories: ISearchContextRepositoryRevisions[] = [
         repository: {
             __typename: 'Repository',
             name: 'github.com/example/really-really-really-really-really-really-long-name',
-        } as IRepository,
+        },
         revisions: ['REVISION3', 'LONG-LONG-LONG-LONG-LONG-LONG-LONG-LONG-REVISION'],
     },
 ]
 
-const mockContext: ISearchContext = {
+const mockContext: SearchContextFields = {
     __typename: 'SearchContext',
     id: '1',
     spec: 'public-ctx',
@@ -53,32 +55,40 @@ const mockContext: ISearchContext = {
     repositories,
     updatedAt: subDays(new Date(), 1).toISOString(),
     viewerCanManage: true,
+    viewerHasAsDefault: false,
+    viewerHasStarred: true,
 }
 
-const fetchPublicContext = (): Observable<ISearchContext> => of(mockContext)
+const fetchPublicContext = (): Observable<SearchContextFields> => of(mockContext)
 
-const fetchPrivateContext = (): Observable<ISearchContext> =>
+const fetchPrivateContext = (): Observable<SearchContextFields> =>
     of({
         ...mockContext,
         spec: 'private-ctx',
         name: 'private-ctx',
         namespace: null,
         public: false,
+        viewerHasStarred: false,
     })
 
-const fetchAutoDefinedContext = (): Observable<ISearchContext> =>
+const fetchAutoDefinedContext = (): Observable<SearchContextFields> =>
     of({
         ...mockContext,
         autoDefined: true,
+        viewerHasStarred: false,
+        viewerHasAsDefault: true,
+        spec: 'auto-ctx',
+        name: 'auto-ctx',
     })
 
-export const PublicContext: Story = () => (
+export const PublicContext: StoryFn = () => (
     <WebStory>
         {webProps => (
             <SearchContextPage
                 {...webProps}
                 fetchSearchContextBySpec={fetchPublicContext}
                 platformContext={NOOP_PLATFORM_CONTEXT}
+                authenticatedUser={mockAuthenticatedUser}
             />
         )}
     </WebStory>
@@ -86,13 +96,29 @@ export const PublicContext: Story = () => (
 
 PublicContext.storyName = 'public context'
 
-export const AutodefinedContext: Story = () => (
+export const PublicContextUnauthenticated: StoryFn = () => (
+    <WebStory>
+        {webProps => (
+            <SearchContextPage
+                {...webProps}
+                fetchSearchContextBySpec={fetchPublicContext}
+                platformContext={NOOP_PLATFORM_CONTEXT}
+                authenticatedUser={null}
+            />
+        )}
+    </WebStory>
+)
+
+PublicContextUnauthenticated.storyName = 'public context, unauthenticated user'
+
+export const AutodefinedContext: StoryFn = () => (
     <WebStory>
         {webProps => (
             <SearchContextPage
                 {...webProps}
                 fetchSearchContextBySpec={fetchAutoDefinedContext}
                 platformContext={NOOP_PLATFORM_CONTEXT}
+                authenticatedUser={mockAuthenticatedUser}
             />
         )}
     </WebStory>
@@ -100,13 +126,14 @@ export const AutodefinedContext: Story = () => (
 
 AutodefinedContext.storyName = 'autodefined context'
 
-export const PrivateContext: Story = () => (
+export const PrivateContext: StoryFn = () => (
     <WebStory>
         {webProps => (
             <SearchContextPage
                 {...webProps}
                 fetchSearchContextBySpec={fetchPrivateContext}
                 platformContext={NOOP_PLATFORM_CONTEXT}
+                authenticatedUser={mockAuthenticatedUser}
             />
         )}
     </WebStory>
@@ -114,13 +141,14 @@ export const PrivateContext: Story = () => (
 
 PrivateContext.storyName = 'private context'
 
-export const Loading: Story = () => (
+export const Loading: StoryFn = () => (
     <WebStory>
         {webProps => (
             <SearchContextPage
                 {...webProps}
                 fetchSearchContextBySpec={() => NEVER}
                 platformContext={NOOP_PLATFORM_CONTEXT}
+                authenticatedUser={mockAuthenticatedUser}
             />
         )}
     </WebStory>
@@ -128,13 +156,14 @@ export const Loading: Story = () => (
 
 Loading.storyName = 'loading'
 
-export const ErrorStory: Story = () => (
+export const ErrorStory: StoryFn = () => (
     <WebStory>
         {webProps => (
             <SearchContextPage
                 {...webProps}
-                fetchSearchContextBySpec={() => throwError(new Error('Failed to fetch search context'))}
+                fetchSearchContextBySpec={() => throwError(() => new Error('Failed to fetch search context'))}
                 platformContext={NOOP_PLATFORM_CONTEXT}
+                authenticatedUser={mockAuthenticatedUser}
             />
         )}
     </WebStory>

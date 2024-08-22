@@ -1,53 +1,53 @@
-import React, { useCallback, useMemo } from 'react'
+import React, { useCallback, useEffect, useMemo } from 'react'
 
-import { mdiAlertCircle, mdiAlert, mdiArrowLeftBold, mdiArrowRightBold } from '@mdi/js'
+import { mdiAlert, mdiAlertCircle, mdiArrowLeftBold, mdiArrowRightBold } from '@mdi/js'
 import classNames from 'classnames'
-import { RouteComponentProps } from 'react-router'
-import { Observable, of, timer } from 'rxjs'
-import { catchError, concatMap, delay, map, repeatWhen, takeWhile } from 'rxjs/operators'
-import { parse as _parseVersion, SemVer } from 'semver'
+import { of, timer, type Observable } from 'rxjs'
+import { catchError, concatMap, map, repeat, takeWhile } from 'rxjs/operators'
+import { parse as _parseVersion, type SemVer } from 'semver'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { asError, ErrorLike, isErrorLike } from '@sourcegraph/common'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { Timestamp } from '@sourcegraph/branded/src/components/Timestamp'
+import { asError, isErrorLike, type ErrorLike } from '@sourcegraph/common'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import {
-    LoadingSpinner,
-    useObservable,
     Alert,
-    Container,
-    Icon,
     Code,
+    Container,
+    ErrorAlert,
     H3,
+    Icon,
+    LoadingSpinner,
+    PageHeader,
     Text,
     Tooltip,
-    PageHeader,
+    useObservable,
 } from '@sourcegraph/wildcard'
 
 import { Collapsible } from '../components/Collapsible'
-import { FilteredConnection, FilteredConnectionFilter, Connection } from '../components/FilteredConnection'
+import { FilteredConnection, type Connection, type Filter } from '../components/FilteredConnection'
 import { PageTitle } from '../components/PageTitle'
-import { Timestamp } from '../components/time/Timestamp'
-import { OutOfBandMigrationFields } from '../graphql-operations'
+import type { OutOfBandMigrationFields } from '../graphql-operations'
 
 import {
-    fetchAllOutOfBandMigrations as defaultFetchAllMigrations,
+    fetchOutOfBandMigrations as defaultFetchMigrations,
     fetchSiteUpdateCheck as defaultFetchSiteUpdateCheck,
 } from './backend'
 
 import styles from './SiteAdminMigrationsPage.module.scss'
 
-export interface SiteAdminMigrationsPageProps extends RouteComponentProps<{}>, TelemetryProps {
-    fetchAllMigrations?: typeof defaultFetchAllMigrations
+export interface SiteAdminMigrationsPageProps extends TelemetryProps, TelemetryV2Props {
+    fetchMigrations?: typeof defaultFetchMigrations
     fetchSiteUpdateCheck?: () => Observable<{ productVersion: string }>
     now?: () => Date
 }
 
-const filters: FilteredConnectionFilter[] = [
+const filters: Filter[] = [
     {
         id: 'filters',
         label: 'Migration state',
         type: 'select',
-        values: [
+        options: [
             {
                 label: 'All',
                 value: 'all',
@@ -82,25 +82,29 @@ const DOWNGRADE_RANGE = 1
 export const SiteAdminMigrationsPage: React.FunctionComponent<
     React.PropsWithChildren<SiteAdminMigrationsPageProps>
 > = ({
-    fetchAllMigrations = defaultFetchAllMigrations,
+    fetchMigrations = defaultFetchMigrations,
     fetchSiteUpdateCheck = defaultFetchSiteUpdateCheck,
     now,
-    telemetryService,
-    ...props
+    telemetryRecorder,
 }) => {
+    useEffect(() => {
+        telemetryRecorder.recordEvent('admin.migrations', 'view')
+    }, [telemetryRecorder])
+
     const migrationsOrError = useObservable(
         useMemo(
             () =>
                 timer(0, REFRESH_INTERVAL_MS, undefined).pipe(
                     concatMap(() =>
-                        fetchAllMigrations().pipe(
+                        // Exclude ExcludeDeprecatedBeforeFirstVersion: true
+                        fetchMigrations(true).pipe(
                             catchError((error): [ErrorLike] => [asError(error)]),
-                            repeatWhen(observable => observable.pipe(delay(REFRESH_INTERVAL_MS)))
+                            repeat({ delay: REFRESH_INTERVAL_MS })
                         )
                     ),
                     takeWhile(() => true, true)
                 ),
-            [fetchAllMigrations]
+            [fetchMigrations]
         )
     )
 
@@ -163,9 +167,8 @@ export const SiteAdminMigrationsPage: React.FunctionComponent<
                             queryConnection={queryMigrations}
                             nodeComponent={MigrationNode}
                             nodeComponentProps={{ now }}
-                            history={props.history}
-                            location={props.location}
                             filters={filters}
+                            autoFocus={false}
                         />
                     </Container>
                 </>
@@ -184,9 +187,10 @@ const MigrationBanners: React.FunctionComponent<React.PropsWithChildren<Migratio
     fetchSiteUpdateCheck = defaultFetchSiteUpdateCheck,
 }) => {
     const productVersion = useObservable(
-        useMemo(() => fetchSiteUpdateCheck().pipe(map(site => parseVersion(site.productVersion))), [
-            fetchSiteUpdateCheck,
-        ])
+        useMemo(
+            () => fetchSiteUpdateCheck().pipe(map(site => parseVersion(site.productVersion))),
+            [fetchSiteUpdateCheck]
+        )
     )
     if (!productVersion) {
         return <></>
@@ -423,6 +427,10 @@ export const isInvalidForVersion = (migration: OutOfBandMigrationFields, version
         // Migrations only store major/minor version components
         const deprecated = parseVersion(`${migration.deprecated}.0`)
         if (deprecated && version.major === deprecated.major && version.minor >= deprecated.minor) {
+            return migration.progress !== 1
+        }
+
+        if (deprecated && version.major > deprecated.major) {
             return migration.progress !== 1
         }
     }

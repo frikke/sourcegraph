@@ -1,13 +1,11 @@
 import { useState } from 'react'
 
-import { Meta, Story } from '@storybook/react'
+import type { Meta, StoryFn } from '@storybook/react'
 import classNames from 'classnames'
 import SearchIcon from 'mdi-react/SearchIcon'
 
-import { BrandedStory } from '@sourcegraph/branded/src/components/BrandedStory'
-import webStyles from '@sourcegraph/web/src/SourcegraphWebApp.scss'
-
 import { H1, H2, Text, Tooltip, ButtonLink, Code } from '../..'
+import { BrandedStory } from '../../../stories/BrandedStory'
 import { Button } from '../Button'
 import { ButtonGroup } from '../ButtonGroup'
 import { BUTTON_VARIANTS, BUTTON_SIZES } from '../constants'
@@ -18,11 +16,7 @@ const config: Meta = {
     title: 'wildcard/Button',
     component: Button,
 
-    decorators: [
-        story => (
-            <BrandedStory styles={webStyles}>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>
-        ),
-    ],
+    decorators: [story => <BrandedStory>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>],
 
     parameters: {
         component: Button,
@@ -43,7 +37,7 @@ const config: Meta = {
 
 export default config
 
-export const Simple: Story = (args = {}) => (
+export const Simple: StoryFn = (args = {}) => (
     <Button variant={args.variant} size={args.size} disabled={args.disabled} outline={args.outline}>
         Click me!
     </Button>
@@ -52,26 +46,28 @@ Simple.argTypes = {
     variant: {
         name: 'Variant',
         control: { type: 'select', options: BUTTON_VARIANTS },
-        defaultValue: 'primary',
     },
     size: {
         name: 'Name',
         control: { type: 'select', options: BUTTON_SIZES },
-        defaultValue: 'sm',
     },
     disabled: {
         name: 'Disabled',
         control: { type: 'boolean' },
-        defaultValue: false,
     },
     outline: {
         name: 'Outline',
         control: { type: 'boolean' },
-        defaultValue: false,
     },
 }
+Simple.args = {
+    variant: 'primary',
+    size: 'sm',
+    disabled: false,
+    outline: false,
+}
 
-export const AllButtons: Story = () => (
+export const AllButtons: StoryFn = () => (
     <div className="pb-3">
         <H1>Buttons</H1>
         <H2>Variants</H2>
@@ -121,16 +117,9 @@ export const AllButtons: Story = () => (
     </div>
 )
 
-AllButtons.parameters = {
-    chromatic: {
-        enableDarkMode: true,
-        disableSnapshot: false,
-    },
-}
-
 type ButtonSizesType = typeof BUTTON_SIZES[number] | undefined
 
-export const Group: Story = () => {
+export const Group: StoryFn = () => {
     const [active, setActive] = useState<'Left' | 'Middle' | 'Right'>('Left')
     const buttonSizes: ButtonSizesType[] = ['lg', undefined, 'sm']
 
@@ -242,6 +231,54 @@ export const Group: Story = () => {
                 </ButtonGroup>{' '}
                 Example with primary outline buttons
             </div>
+            <div className="mb-2">
+                <ButtonGroup aria-label="Basic example">
+                    {(['Left', 'Middle', 'Right'] as const).map(option => (
+                        <Button
+                            key={option}
+                            className={classNames(option === active && 'active')}
+                            onClick={() => setActive(option)}
+                            aria-pressed={option === active}
+                            variant="secondary"
+                        >
+                            {option}
+                        </Button>
+                    ))}
+                </ButtonGroup>{' '}
+                Example with secondary buttons
+            </div>
+            <div className="mb-2">
+                <ButtonGroup aria-label="Basic example">
+                    {(['Left', 'Middle', 'Right'] as const).map(option => (
+                        <Button
+                            key={option}
+                            className={classNames(option === active && 'active')}
+                            onClick={() => setActive(option)}
+                            aria-pressed={option === active}
+                            variant="primary"
+                        >
+                            {option}
+                        </Button>
+                    ))}
+                </ButtonGroup>{' '}
+                Example with primary buttons
+            </div>
+            <div className="mb-2">
+                <ButtonGroup aria-label="Basic example">
+                    {(['Left', 'Middle', 'Right'] as const).map(option => (
+                        <Button
+                            key={option}
+                            className={classNames(option === active && 'active')}
+                            onClick={() => setActive(option)}
+                            aria-pressed={option === active}
+                            variant="link"
+                        >
+                            {option}
+                        </Button>
+                    ))}
+                </ButtonGroup>{' '}
+                Example with link buttons
+            </div>
 
             <H2 className="mt-3">With Tooltips</H2>
             <div className="mb-2">
@@ -284,9 +321,3 @@ export const Group: Story = () => {
 }
 
 Group.storyName = 'Button Group'
-Group.parameters = {
-    chromatic: {
-        enableDarkMode: true,
-        disableSnapshot: false,
-    },
-}

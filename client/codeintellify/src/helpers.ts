@@ -1,11 +1,10 @@
 import { isObject } from 'lodash'
-import { Observable, from } from 'rxjs'
+import { type Observable, from } from 'rxjs'
 import { map } from 'rxjs/operators'
-import { Subscribable } from 'sourcegraph'
 
 import { isDefined } from '@sourcegraph/common'
 
-import { MaybeLoadingResult } from './loading'
+import type { MaybeLoadingResult } from './loading'
 
 /**
  * Checks if the given value is thenable.
@@ -18,18 +17,19 @@ const isPromiseLike = (value: unknown): value is PromiseLike<unknown> =>
  * single result, to the same type.
  */
 export const toMaybeLoadingProviderResult = <T>(
-    value: Subscribable<MaybeLoadingResult<T>> | PromiseLike<T>
+    value: Observable<MaybeLoadingResult<T>> | PromiseLike<T>
 ): Observable<MaybeLoadingResult<T>> =>
-    isPromiseLike(value) ? from(value).pipe(map(result => ({ isLoading: false, result }))) : from(value)
+    isPromiseLike(value) ? from(value).pipe(map(result => ({ isLoading: false, result }))) : value
 
 /**
  * Returns a function that returns `true` if the given `key` of the object is not `null` or `undefined`.
  *
  * I ❤️ TypeScript.
  */
-export const propertyIsDefined = <T extends object, K extends keyof T>(key: K) => (
-    value: T
-): value is T & { [k in K]-?: NonNullable<T[k]> } => isDefined(value[key])
+export const propertyIsDefined =
+    <T extends object, K extends keyof T>(key: K) =>
+    (value: T): value is T & { [k in K]-?: NonNullable<T[k]> } =>
+        isDefined(value[key])
 
 /**
  * Scrolls a DOMRect based position to the center if it is out of view.
@@ -58,13 +58,15 @@ export const scrollRectangleIntoCenterIfNeeded = (
 /**
  * Returns a curried function that returns `true` if `e1` and `e2` overlap.
  */
-export const elementOverlaps = (element1: HTMLElement) => (element2: HTMLElement): boolean => {
-    const rectangle1 = element1.getBoundingClientRect()
-    const rectangle2 = element2.getBoundingClientRect()
-    return !(
-        rectangle1.right < rectangle2.left ||
-        rectangle1.left > rectangle2.right ||
-        rectangle1.bottom < rectangle2.top ||
-        rectangle1.top > rectangle2.bottom
-    )
-}
+export const elementOverlaps =
+    (element1: HTMLElement) =>
+    (element2: HTMLElement): boolean => {
+        const rectangle1 = element1.getBoundingClientRect()
+        const rectangle2 = element2.getBoundingClientRect()
+        return !(
+            rectangle1.right < rectangle2.left ||
+            rectangle1.left > rectangle2.right ||
+            rectangle1.bottom < rectangle2.top ||
+            rectangle1.top > rectangle2.bottom
+        )
+    }

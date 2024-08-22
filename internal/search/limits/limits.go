@@ -10,10 +10,14 @@ import (
 
 const (
 	DefaultMaxSearchResults          = 30
-	DefaultMaxSearchResultsStreaming = 500
+	DefaultMaxSearchResultsStreaming = 10000
 
 	// The default timeout to use for queries.
 	DefaultTimeout = 20 * time.Second
+
+	// We still set limits for exhaustive to prevent runaway jobs.
+	DefaultMaxSearchResultsExhaustive = 1_000_000
+	DefaultTimeoutExhaustive          = time.Hour
 )
 
 func SearchLimits(c *conf.Unified) schema.SearchLimits {

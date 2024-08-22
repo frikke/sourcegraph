@@ -1,4 +1,4 @@
-import { Observable, isObservable, of, throwError } from 'rxjs'
+import { type Observable, isObservable, of, throwError } from 'rxjs'
 
 /**
  * Calls a function and returns the result as an Observable.
@@ -11,6 +11,6 @@ export function asObservable<T>(function_: () => Observable<T> | T): Observable<
         }
         return of(value)
     } catch (error) {
-        return throwError(error)
+        return throwError(() => error)
     }
 }

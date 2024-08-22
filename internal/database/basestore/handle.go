@@ -37,6 +37,18 @@ type TransactableHandle interface {
 	Done(error) error
 }
 
+// Transactable marks an interface that returns a type that returns a transactable
+// store that is polymorphic on a generic type. The type `TransactableHandle` is a
+// related type, but is stricter in that returns a hard-coded interface type, not
+// the type of the implementor.
+//
+// Many stores return their *self* as the return for Transaction.
+// See the `InTransaction` function for a concrete use-case.
+type Transactable[T any] interface {
+	Transact(context.Context) (T, error)
+	Done(error) error
+}
+
 var (
 	_ TransactableHandle = (*dbHandle)(nil)
 	_ TransactableHandle = (*txHandle)(nil)
@@ -44,10 +56,10 @@ var (
 )
 
 // NewHandleWithDB returns a new transactable database handle using the given database connection.
-func NewHandleWithDB(db *sql.DB, txOptions sql.TxOptions) TransactableHandle {
+func NewHandleWithDB(logger log.Logger, db *sql.DB, txOptions sql.TxOptions) TransactableHandle {
 	return &dbHandle{
 		DB:        db,
-		logger:    log.Scoped("internal", "database"),
+		logger:    logger.Scoped("db-handle"),
 		txOptions: txOptions,
 	}
 }
@@ -57,7 +69,7 @@ func NewHandleWithTx(tx *sql.Tx, txOptions sql.TxOptions) TransactableHandle {
 	return &txHandle{
 		lockingTx: &lockingTx{
 			tx:     tx,
-			logger: log.Scoped("internal", "database"),
+			logger: log.Scoped("db-handle"),
 		},
 		txOptions: txOptions,
 	}
@@ -113,7 +125,7 @@ func (h *txHandle) Transact(ctx context.Context) (TransactableHandle, error) {
 		return nil, err
 	}
 
-	return &savepointHandle{lockingTx: h.lockingTx, savepointID: savepointID}, nil
+	return &savepointHandle{lockingTx: h.lockingTx, savepointID: savepointID, ctx: context.WithoutCancel(ctx)}, nil
 }
 
 func (h *txHandle) Done(err error) error {
@@ -126,6 +138,7 @@ func (h *txHandle) Done(err error) error {
 type savepointHandle struct {
 	*lockingTx
 	savepointID string
+	ctx         context.Context
 }
 
 func (h *savepointHandle) InTransaction() bool {
@@ -138,16 +151,16 @@ func (h *savepointHandle) Transact(ctx context.Context) (TransactableHandle, err
 		return nil, err
 	}
 
-	return &savepointHandle{lockingTx: h.lockingTx, savepointID: savepointID}, nil
+	return &savepointHandle{lockingTx: h.lockingTx, savepointID: savepointID, ctx: context.WithoutCancel(ctx)}, nil
 }
 
 func (h *savepointHandle) Done(err error) error {
 	if err == nil {
-		_, execErr := h.ExecContext(context.Background(), fmt.Sprintf(commitSavepointQuery, h.savepointID))
+		_, execErr := h.ExecContext(h.ctx, fmt.Sprintf(commitSavepointQuery, h.savepointID))
 		return execErr
 	}
 
-	_, execErr := h.ExecContext(context.Background(), fmt.Sprintf(rollbackSavepointQuery, h.savepointID))
+	_, execErr := h.ExecContext(h.ctx, fmt.Sprintf(rollbackSavepointQuery, h.savepointID))
 	return errors.Append(err, execErr)
 }
 

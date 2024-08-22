@@ -17,7 +17,7 @@ import (
 
 func TestUploadIndex(t *testing.T) {
 	var expectedPayload []byte
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		expectedPayload = append(expectedPayload, byte(i))
 	}
 
@@ -73,6 +73,7 @@ func TestUploadIndex(t *testing.T) {
 			AccessToken:         "hunter2",
 			GitHubToken:         "ght",
 			MaxPayloadSizeBytes: 1000,
+			AdditionalHeaders:   map[string]string{"Content-Type": "application/x-ndjson+lsif"},
 		},
 	})
 	if err != nil {
@@ -86,7 +87,7 @@ func TestUploadIndex(t *testing.T) {
 
 func TestUploadIndexMultipart(t *testing.T) {
 	var expectedPayload []byte
-	for i := 0; i < 20000; i++ {
+	for i := range 20000 {
 		expectedPayload = append(expectedPayload, byte(i))
 	}
 
@@ -151,7 +152,7 @@ func TestUploadIndexMultipart(t *testing.T) {
 	}
 
 	var allPayloads []byte
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		allPayloads = append(allPayloads, payloads[i]...)
 	}
 

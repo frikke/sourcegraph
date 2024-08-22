@@ -1,10 +1,17 @@
-import { ProxyMarked, transferHandlers, releaseProxy, TransferHandler, Remote, proxyMarker } from 'comlink'
-import { Observable, Observer, PartialObserver, Subscription } from 'rxjs'
-import { Subscribable, Unsubscribable } from 'sourcegraph'
+import {
+    type ProxyMarked,
+    transferHandlers,
+    releaseProxy,
+    type TransferHandler,
+    type Remote,
+    proxyMarker,
+} from 'comlink'
+import { type Unsubscribable, Observable, type Observer, type PartialObserver, Subscription } from 'rxjs'
+import { Subscribable } from 'sourcegraph'
 
 import { hasProperty, AbortError } from '@sourcegraph/common'
 
-import { ProxySubscribable } from './extension/api/common'
+import type { ProxySubscribable } from './extension/api/common'
 
 /**
  * Tests whether a value is a WHATWG URL object.
@@ -41,7 +48,7 @@ export const syncRemoteSubscription = (
     subscriptionPromise: Promise<Remote<Unsubscribable & ProxyMarked>>
 ): Subscription =>
     // We cannot pass the proxy subscription directly to Rx because it is a Proxy that looks like a function
-    // eslint-disable-next-line @typescript-eslint/no-misused-promises
+
     new Subscription(async () => {
         const subscriptionProxy = await subscriptionPromise
         await subscriptionProxy.unsubscribe()
@@ -71,7 +78,7 @@ export const isPromiseLike = (value: unknown): value is PromiseLike<unknown> =>
     typeof value === 'object' && value !== null && hasProperty('then')(value) && typeof value.then === 'function'
 
 /**
- * Reports whether value is a {@link sourcegraph.Subscribable}.
+ * Reports whether value is a {@link Subscribable}.
  */
 export const isSubscribable = (value: unknown): value is Subscribable<unknown> =>
     typeof value === 'object' &&
@@ -131,7 +138,7 @@ export const observableFromAsyncIterable = <T>(iterable: AsyncIterable<T>): Obse
  * NOTE2: for testing purposes only!!
  */
 export const pretendRemote = <T>(object: Partial<T>): Remote<T> =>
-    (new Proxy(object, {
+    new Proxy(object, {
         get: (a, property) => {
             if (property === 'then') {
                 // Promise.resolve(pretendRemote(..)) checks if this is a Promise
@@ -147,7 +154,7 @@ export const pretendRemote = <T>(object: Partial<T>): Remote<T> =>
             }
             throw new Error(`unspecified property in the stub: "${property.toString()}"`)
         },
-    }) as unknown) as Remote<T>
+    }) as unknown as Remote<T>
 
 /**
  * For proxySubscribables to be passed as stubs to pretendRemote.
@@ -159,7 +166,7 @@ export const pretendRemote = <T>(object: Partial<T>): Remote<T> =>
 export const pretendProxySubscribable = <T>(subscribable: Subscribable<T>): ProxySubscribable<T> => ({
     [proxyMarker]: true,
     subscribe(observer): Unsubscribable & ProxyMarked {
-        const subscription = subscribable.subscribe((observer as unknown) as PartialObserver<T>)
+        const subscription = subscribable.subscribe(observer as unknown as PartialObserver<T>)
 
         return {
             [proxyMarker]: true,

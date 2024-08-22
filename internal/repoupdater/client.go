@@ -1,45 +1,62 @@
 package repoupdater
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"net/url"
+	"os"
+	"sync"
 
-	"github.com/opentracing-contrib/go-stdlib/nethttp"
-	"github.com/opentracing/opentracing-go/ext"
+	"github.com/sourcegraph/log"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	"github.com/sourcegraph/sourcegraph/internal/env"
-	"github.com/sourcegraph/sourcegraph/internal/httpcli"
+	"github.com/sourcegraph/sourcegraph/internal/grpc/defaults"
 	"github.com/sourcegraph/sourcegraph/internal/repoupdater/protocol"
-	"github.com/sourcegraph/sourcegraph/internal/trace/ot"
-	"github.com/sourcegraph/sourcegraph/lib/errors"
+	proto "github.com/sourcegraph/sourcegraph/internal/repoupdater/v1"
 )
 
-// DefaultClient is the default Client. Unless overwritten, it is
-// connected to the server specified by the REPO_UPDATER_URL
-// environment variable.
-var DefaultClient = NewClient(env.Get("REPO_UPDATER_URL", "http://repo-updater:3182", "repo-updater server URL"))
+var (
+	// DefaultClient is the default Client. Unless overwritten, it is
+	// connected to the server specified by the REPO_UPDATER_URL
+	// environment variable.
+	DefaultClient = NewClient(repoUpdaterURLDefault())
+)
 
-var defaultDoer, _ = httpcli.NewInternalClientFactory("repoupdater").Doer()
+func repoUpdaterURLDefault() string {
+	if u := os.Getenv("REPO_UPDATER_URL"); u != "" {
+		return u
+	}
+
+	return "http://repo-updater:3182"
+}
 
 // Client is a repoupdater client.
 type Client struct {
-	// URL to repoupdater server.
-	URL string
-
-	// HTTP client to use
-	HTTPClient httpcli.Doer
+	// grpcClient is a function that lazily creates a grpc client.
+	// Any implementation should not recreate the client more than once.
+	grpcClient func() (proto.RepoUpdaterServiceClient, error)
 }
 
 // NewClient will initiate a new repoupdater Client with the given serverURL.
 func NewClient(serverURL string) *Client {
 	return &Client{
-		URL:        serverURL,
-		HTTPClient: defaultDoer,
+		grpcClient: sync.OnceValues(func() (proto.RepoUpdaterServiceClient, error) {
+			u, err := url.Parse(serverURL)
+			if err != nil {
+				return nil, err
+			}
+
+			l := log.Scoped("repoUpdateGRPCClient")
+			conn, err := defaults.Dial(u.Host, l)
+			if err != nil {
+				return nil, err
+			}
+
+			client := &automaticRetryClient{base: proto.NewRepoUpdaterServiceClient(conn)}
+			return client, nil
+		}),
 	}
 }
 
@@ -48,85 +65,28 @@ func (c *Client) RepoUpdateSchedulerInfo(
 	ctx context.Context,
 	args protocol.RepoUpdateSchedulerInfoArgs,
 ) (result *protocol.RepoUpdateSchedulerInfoResult, err error) {
-	resp, err := c.httpPost(ctx, "repo-update-scheduler-info", args)
+	client, err := c.grpcClient()
 	if err != nil {
 		return nil, err
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		stack := fmt.Sprintf("RepoScheduleInfo: %+v", args)
-		return nil, errors.Wrap(errors.Errorf("http status %d", resp.StatusCode), stack)
+	req := &proto.RepoUpdateSchedulerInfoRequest{Id: int32(args.ID)}
+	resp, err := client.RepoUpdateSchedulerInfo(ctx, req)
+	if err != nil {
+		return nil, err
 	}
-	defer resp.Body.Close()
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	return result, err
+	return protocol.RepoUpdateSchedulerInfoResultFromProto(resp), nil
 }
 
-// MockRepoLookup mocks (*Client).RepoLookup for tests.
-var MockRepoLookup func(protocol.RepoLookupArgs) (*protocol.RepoLookupResult, error)
-
-// RepoLookup retrieves information about the repository on repoupdater.
-func (c *Client) RepoLookup(
-	ctx context.Context,
-	args protocol.RepoLookupArgs,
-) (result *protocol.RepoLookupResult, err error) {
-	if MockRepoLookup != nil {
-		return MockRepoLookup(args)
-	}
-
-	span, ctx := ot.StartSpanFromContext(ctx, "Client.RepoLookup")
-	defer func() {
-		if result != nil {
-			span.SetTag("found", result.Repo != nil)
-		}
-		if err != nil {
-			ext.Error.Set(span, true)
-			span.SetTag("err", err.Error())
-		}
-		span.Finish()
-	}()
-	if args.Repo != "" {
-		span.SetTag("Repo", string(args.Repo))
-	}
-
-	resp, err := c.httpPost(ctx, "repo-lookup", args)
+func (c *Client) RecloneRepository(ctx context.Context, repoName api.RepoName) error {
+	client, err := c.grpcClient()
 	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// best-effort inclusion of body in error message
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
-		return nil, errors.Errorf(
-			"RepoLookup for %+v failed with http status %d: %s",
-			args,
-			resp.StatusCode,
-			string(body),
-		)
+		return err
 	}
 
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err == nil && result != nil {
-		switch {
-		case result.ErrorNotFound:
-			err = &ErrNotFound{
-				Repo:       args.Repo,
-				IsNotFound: true,
-			}
-		case result.ErrorUnauthorized:
-			err = &ErrUnauthorized{
-				Repo:    args.Repo,
-				NoAuthz: true,
-			}
-		case result.ErrorTemporarilyUnavailable:
-			err = &ErrTemporary{
-				Repo:        args.Repo,
-				IsTemporary: true,
-			}
-		}
-	}
-	return result, err
+	_, err = client.RecloneRepository(ctx, &proto.RecloneRepositoryRequest{
+		RepoName: string(repoName),
+	})
+	return err
 }
 
 // MockEnqueueRepoUpdate mocks (*Client).EnqueueRepoUpdate for tests.
@@ -139,31 +99,22 @@ func (c *Client) EnqueueRepoUpdate(ctx context.Context, repo api.RepoName) (*pro
 		return MockEnqueueRepoUpdate(ctx, repo)
 	}
 
-	req := &protocol.RepoUpdateRequest{
-		Repo: repo,
-	}
-
-	resp, err := c.httpPost(ctx, "enqueue-repo-update", req)
+	client, err := c.grpcClient()
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	bs, err := io.ReadAll(resp.Body)
+	req := proto.EnqueueRepoUpdateRequest{Repo: string(repo)}
+	resp, err := client.EnqueueRepoUpdate(ctx, &req)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to read response body")
-	}
+		if s, ok := status.FromError(err); ok && s.Code() == codes.NotFound {
+			return nil, &repoNotFoundError{repo: string(repo), responseBody: s.Message()}
+		}
 
-	var res protocol.RepoUpdateResponse
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, &repoNotFoundError{string(repo), string(bs)}
-	} else if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return nil, errors.New(string(bs))
-	} else if err = json.Unmarshal(bs, &res); err != nil {
 		return nil, err
 	}
 
-	return &res, nil
+	return protocol.RepoUpdateResponseFromProto(resp), nil
 }
 
 type repoNotFoundError struct {
@@ -184,121 +135,12 @@ func (c *Client) EnqueueChangesetSync(ctx context.Context, ids []int64) error {
 		return MockEnqueueChangesetSync(ctx, ids)
 	}
 
-	req := protocol.ChangesetSyncRequest{IDs: ids}
-	resp, err := c.httpPost(ctx, "enqueue-changeset-sync", req)
+	client, err := c.grpcClient()
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
 
-	bs, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return errors.Wrap(err, "failed to read response body")
-	}
-
-	var res protocol.ChangesetSyncResponse
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return errors.New(string(bs))
-	} else if err = json.Unmarshal(bs, &res); err != nil {
-		return err
-	}
-
-	if res.Error == "" {
-		return nil
-	}
-	return errors.New(res.Error)
-}
-
-func (c *Client) SchedulePermsSync(ctx context.Context, args protocol.PermsSyncRequest) error {
-	resp, err := c.httpPost(ctx, "schedule-perms-sync", args)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	bs, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return errors.Wrap(err, "read response body")
-	}
-
-	var res protocol.PermsSyncResponse
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return errors.New(string(bs))
-	} else if err = json.Unmarshal(bs, &res); err != nil {
-		return err
-	}
-
-	if res.Error == "" {
-		return nil
-	}
-	return errors.New(res.Error)
-}
-
-// SyncExternalService requests the given external service to be synced.
-func (c *Client) SyncExternalService(ctx context.Context, externalServiceID int64) (*protocol.ExternalServiceSyncResult, error) {
-	req := &protocol.ExternalServiceSyncRequest{ExternalServiceID: externalServiceID}
-	resp, err := c.httpPost(ctx, "sync-external-service", req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	bs, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to read response body")
-	}
-
-	var result protocol.ExternalServiceSyncResult
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		// TODO(tsenart): Use response type for unmarshalling errors too.
-		// This needs to be done after rolling out the response type in prod.
-		return nil, errors.New(string(bs))
-	} else if len(bs) == 0 {
-		return &result, nil
-	} else if err = json.Unmarshal(bs, &result); err != nil {
-		return nil, err
-	}
-
-	if result.Error != "" {
-		return nil, errors.New(result.Error)
-	}
-	return &result, nil
-}
-
-func (c *Client) httpPost(ctx context.Context, method string, payload any) (resp *http.Response, err error) {
-	reqBody, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", c.URL+"/"+method, bytes.NewReader(reqBody))
-	if err != nil {
-		return nil, err
-	}
-
-	return c.do(ctx, req)
-}
-
-func (c *Client) do(ctx context.Context, req *http.Request) (_ *http.Response, err error) {
-	span, ctx := ot.StartSpanFromContext(ctx, "Client.do")
-	defer func() {
-		if err != nil {
-			ext.Error.Set(span, true)
-			span.SetTag("err", err.Error())
-		}
-		span.Finish()
-	}()
-
-	req.Header.Set("Content-Type", "application/json")
-
-	req = req.WithContext(ctx)
-	req, ht := nethttp.TraceRequest(span.Tracer(), req,
-		nethttp.OperationName("RepoUpdater Client"),
-		nethttp.ClientTrace(false))
-	defer ht.Finish()
-
-	if c.HTTPClient != nil {
-		return c.HTTPClient.Do(req)
-	}
-	return http.DefaultClient.Do(req)
+	// empty response can be ignored
+	_, err = client.EnqueueChangesetSync(ctx, &proto.EnqueueChangesetSyncRequest{Ids: ids})
+	return err
 }

@@ -1,17 +1,22 @@
-import { FC, ReactNode } from 'react'
+import type { FC, ReactNode } from 'react'
 
 import classNames from 'classnames'
 import { noop } from 'rxjs'
 
-import { Button, Card, Input, Code } from '@sourcegraph/wildcard'
+import { SearchPatternType } from '@sourcegraph/shared/src/graphql-operations'
+import { FilterType } from '@sourcegraph/shared/src/search/query/filters'
+import { findFilter, FilterKind } from '@sourcegraph/shared/src/search/query/query'
+import { useSettingsCascade } from '@sourcegraph/shared/src/settings/settings'
+import { Button, Card, Input, Code, useForm, useField, getDefaultInputProps } from '@sourcegraph/wildcard'
 
+import { defaultPatternTypeFromSettings } from '../../../../../../../util/settings'
 import { DEFAULT_DATA_SERIES_COLOR } from '../../../../../constants'
-import { getDefaultInputProps, useField, InsightQueryInput, useForm } from '../../../../form'
-import { EditableDataSeries } from '../../types'
+import { InsightQueryInput } from '../../../../form'
+import type { EditableDataSeries } from '../../types'
 import { FormColorInput } from '../form-color-input/FormColorInput'
 
 import { getQueryPatternTypeFilter } from './get-pattern-type-filter'
-import { requiredNameField, validQuery } from './validators'
+import { SERIES_NAME_VALIDATORS, SERIES_QUERY_VALIDATORS } from './validators'
 
 interface FormSeriesInputProps {
     series: EditableDataSeries
@@ -26,7 +31,13 @@ interface FormSeriesInputProps {
      * Code Insight repositories field string value - repo1, repo2, ...
      * This prop is used in order to generate a proper link for the query preview button.
      */
-    repositories: string
+    repositories: string[]
+
+    /**
+     * Code Insight repoQuery field string value - repo:github.com/sourcegraph/*
+     * This prop is used in order to generate a proper link for the query preview button.
+     */
+    repoQuery: string | null
 
     /**
      * This field is only needed for specifying a special compute-specific
@@ -63,6 +74,7 @@ export const FormSeriesInput: FC<FormSeriesInputProps> = props => {
         className,
         cancel = false,
         autofocus = true,
+        repoQuery,
         repositories,
         queryFieldDescription,
         onCancel = noop,
@@ -71,6 +83,13 @@ export const FormSeriesInput: FC<FormSeriesInputProps> = props => {
     } = props
 
     const { name, query, stroke: color } = series
+
+    const hasPatternType = (query: string): boolean => {
+        const patternType = findFilter(query, FilterType.patterntype, FilterKind.Global)
+        return patternType?.value !== undefined
+    }
+
+    const defaultPatternType: SearchPatternType = defaultPatternTypeFromSettings(useSettingsCascade())
 
     const { formAPI, handleSubmit, ref } = useForm({
         touched: showValidationErrorsOnMount,
@@ -83,7 +102,9 @@ export const FormSeriesInput: FC<FormSeriesInputProps> = props => {
             onSubmit({
                 ...series,
                 name: values.seriesName,
-                query: values.seriesQuery,
+                query: hasPatternType(values.seriesQuery)
+                    ? values.seriesQuery
+                    : `patterntype:${defaultPatternType} ${values.seriesQuery}`,
                 stroke: values.seriesColor,
             }),
         onChange: event => {
@@ -104,13 +125,13 @@ export const FormSeriesInput: FC<FormSeriesInputProps> = props => {
     const nameField = useField({
         name: 'seriesName',
         formApi: formAPI,
-        validators: { sync: requiredNameField },
+        validators: { sync: SERIES_NAME_VALIDATORS },
     })
 
     const queryField = useField({
         name: 'seriesQuery',
         formApi: formAPI,
-        validators: { sync: validQuery },
+        validators: { sync: SERIES_QUERY_VALIDATORS },
     })
 
     const colorField = useField({
@@ -133,14 +154,15 @@ export const FormSeriesInput: FC<FormSeriesInputProps> = props => {
                 label="Search query"
                 required={true}
                 as={InsightQueryInput}
+                repoQuery={repoQuery}
                 repositories={repositories}
-                patternType={getQueryPatternTypeFilter(queryField.input.value)}
+                patternType={getQueryPatternTypeFilter(queryField.input.value, defaultPatternType)}
                 placeholder="Example: patternType:regexp const\s\w+:\s(React\.)?FunctionComponent"
                 message={
                     queryFieldDescription ?? (
                         <span>
-                            Do not include the <Code>context:</Code> or <Code>repo:</Code> filter; if needed,{' '}
-                            <Code>repo:</Code> will be added automatically.
+                            Do not include <Code>context:</Code> <Code>repo:</Code> or <Code>rev:</Code> filters; if
+                            needed, <Code>repo:</Code> will be added automatically.
                         </span>
                     )
                 }

@@ -1,9 +1,8 @@
 const path = require('path')
 
-const { buildCodeIntelExtensions } = require('../../shared/src/extensions/buildCodeIntelExtensions')
+const { fetchAndBuildCodeIntelExtensions } = require('../../shared/dev/buildCodeIntelExtensions')
 
 const pathToExtensionBundles = path.join(process.cwd(), 'build', 'extensions')
-const pathToRevisionFile = path.join(process.cwd(), 'sourcegraph-extension-bundles-revision.txt')
-const pathToDistributionRevisionFile = path.join(pathToExtensionBundles, 'revision.txt')
 
-buildCodeIntelExtensions({ pathToExtensionBundles, pathToRevisionFile, pathToDistributionRevisionFile })
+// keep revision up-to-date with "sourcegraph_extensions_bundle" in WORKSPACE
+fetchAndBuildCodeIntelExtensions({ pathToExtensionBundles, revision: 'v5.0.1' })

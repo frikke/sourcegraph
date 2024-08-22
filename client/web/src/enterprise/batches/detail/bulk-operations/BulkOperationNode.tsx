@@ -1,16 +1,23 @@
 import React from 'react'
 
-import { mdiCommentOutline, mdiLinkVariantRemove, mdiSync, mdiSourceBranch, mdiUpload, mdiOpenInNew } from '@mdi/js'
+import {
+    mdiCommentOutline,
+    mdiLinkVariantRemove,
+    mdiSync,
+    mdiSourceBranch,
+    mdiUpload,
+    mdiOpenInNew,
+    mdiDownload,
+} from '@mdi/js'
 import classNames from 'classnames'
 
-import { ErrorMessage } from '@sourcegraph/branded/src/components/alerts'
+import { Timestamp } from '@sourcegraph/branded/src/components/Timestamp'
 import { pluralize } from '@sourcegraph/common'
-import { BulkOperationState, BulkOperationType } from '@sourcegraph/shared/src/graphql-operations'
-import { Badge, AlertLink, Link, Alert, Icon, H4, Text } from '@sourcegraph/wildcard'
+import { BulkOperationState, type BulkOperationType } from '@sourcegraph/shared/src/graphql-operations'
+import { Badge, AlertLink, Link, Alert, Icon, H4, Text, ErrorMessage } from '@sourcegraph/wildcard'
 
 import { Collapsible } from '../../../../components/Collapsible'
-import { Timestamp } from '../../../../components/time/Timestamp'
-import { BulkOperationFields } from '../../../../graphql-operations'
+import type { BulkOperationFields } from '../../../../graphql-operations'
 
 import styles from './BulkOperationNode.module.scss'
 
@@ -43,6 +50,11 @@ const OPERATION_TITLES: Record<BulkOperationType, JSX.Element> = {
     PUBLISH: (
         <>
             <Icon aria-hidden={true} className="text-muted" svgPath={mdiUpload} /> Publish changesets
+        </>
+    ),
+    EXPORT: (
+        <>
+            <Icon aria-hidden={true} className="text-muted" svgPath={mdiDownload} /> Export changesets
         </>
     ),
 }

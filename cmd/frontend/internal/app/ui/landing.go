@@ -4,8 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"github.com/inconshreveable/log15"
-	"github.com/opentracing/opentracing-go/ext"
+	"github.com/inconshreveable/log15" //nolint:logging // TODO move all logging to sourcegraph/log
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
@@ -15,7 +14,7 @@ import (
 	"github.com/sourcegraph/sourcegraph/internal/database"
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
 	"github.com/sourcegraph/sourcegraph/internal/lazyregexp"
-	"github.com/sourcegraph/sourcegraph/internal/trace/ot"
+	"github.com/sourcegraph/sourcegraph/internal/trace"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
@@ -24,7 +23,7 @@ var goSymbolReg = lazyregexp.New("/info/GoPackage/(.+)$")
 // serveRepoLanding simply redirects the old (sourcegraph.com/<repo>/-/info) repo landing page
 // URLs directly to the repo itself (sourcegraph.com/<repo>).
 func serveRepoLanding(db database.DB) func(http.ResponseWriter, *http.Request) error {
-	logger := log.Scoped("serveRepoLanding", "redirects the old (sourcegraph.com/<repo>/-/info) repo landing page")
+	logger := log.Scoped("serveRepoLanding")
 	return func(w http.ResponseWriter, r *http.Request) error {
 		legacyRepoLandingCounter.Inc()
 
@@ -41,15 +40,9 @@ func serveRepoLanding(db database.DB) func(http.ResponseWriter, *http.Request) e
 }
 
 func serveDefLanding(w http.ResponseWriter, r *http.Request) (err error) {
-	span, ctx := ot.StartSpanFromContext(r.Context(), "serveDefLanding")
+	tr, ctx := trace.New(r.Context(), "serveDefLanding")
+	defer tr.EndWithErr(&err)
 	r = r.WithContext(ctx)
-	defer func() {
-		if err != nil {
-			ext.Error.Set(span, true)
-			span.SetTag("err", err.Error())
-		}
-		span.Finish()
-	}()
 
 	legacyDefLandingCounter.Inc()
 

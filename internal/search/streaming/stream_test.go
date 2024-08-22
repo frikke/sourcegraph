@@ -5,17 +5,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sourcegraph/conc/pool"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/atomic"
 
 	"github.com/sourcegraph/sourcegraph/internal/search/result"
-	"github.com/sourcegraph/sourcegraph/lib/group"
 )
 
 func BenchmarkBatchingStream(b *testing.B) {
 	s := NewBatchingStream(10*time.Millisecond, StreamFunc(func(SearchEvent) {}))
 	res := make(result.Matches, 1)
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		s.Send(SearchEvent{
 			Results: res,
 		})
@@ -33,7 +33,7 @@ func TestBatchingStream(t *testing.T) {
 			mu.Unlock()
 		}))
 
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			s.Send(SearchEvent{Results: make(result.Matches, 1)})
 		}
 
@@ -69,7 +69,7 @@ func TestBatchingStream(t *testing.T) {
 			mu.Unlock()
 		}))
 
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			s.Send(SearchEvent{Results: make(result.Matches, 1)})
 		}
 
@@ -115,13 +115,13 @@ func TestBatchingStream(t *testing.T) {
 			count.Add(int64(len(event.Results)))
 		}))
 
-		g := group.New()
-		for i := 0; i < 10; i++ {
-			g.Go(func() {
+		p := pool.New()
+		for range 10 {
+			p.Go(func() {
 				s.Send(SearchEvent{Results: make(result.Matches, 1)})
 			})
 		}
-		g.Wait()
+		p.Wait()
 
 		// One should be sent immediately
 		require.Equal(t, count.Load(), int64(1))
@@ -130,21 +130,4 @@ func TestBatchingStream(t *testing.T) {
 		s.Done()
 		require.Equal(t, count.Load(), int64(10))
 	})
-}
-
-func TestDedupingStream(t *testing.T) {
-	var sent []result.Match
-	s := NewDedupingStream(StreamFunc(func(e SearchEvent) {
-		sent = append(sent, e.Results...)
-	}))
-
-	for i := 0; i < 2; i++ {
-		s.Send(SearchEvent{
-			Results: []result.Match{&result.FileMatch{
-				File: result.File{Path: "lombardy"},
-			}},
-		})
-	}
-
-	require.Equal(t, 1, len(sent))
 }

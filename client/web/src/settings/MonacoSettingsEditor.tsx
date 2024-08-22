@@ -7,8 +7,8 @@ import { Subject, Subscription } from 'rxjs'
 import { distinctUntilChanged, distinctUntilKeyChanged, map, startWith } from 'rxjs/operators'
 
 import { MonacoEditor } from '@sourcegraph/shared/src/components/MonacoEditor'
-import { TelemetryService } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
+import type { TelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryService } from '@sourcegraph/shared/src/telemetry/telemetryService'
 
 import jsonSchemaMetaSchema from '../../../../schema/json-schema-draft-07.schema.json'
 import settingsSchema from '../../../../schema/settings.schema.json'
@@ -23,10 +23,11 @@ interface JSONSchema {
     $id: string
 }
 
-export interface Props extends ThemeProps {
+export interface Props {
     id?: string
     className?: string
     value: string | undefined
+    isLightTheme: boolean
     onChange?: (newValue: string) => void
     readOnly?: boolean | undefined
     height?: number
@@ -212,13 +213,15 @@ export class MonacoSettingsEditor extends React.PureComponent<Props, State> {
         label: string,
         id: string,
         run: ConfigInsertionFunction,
-        telemetryService: TelemetryService
+        telemetryService: TelemetryService,
+        telemetryRecorder: TelemetryRecorder
     ): void {
         inputEditor.addAction({
             label,
             id,
             run: editor => {
                 telemetryService.log('SiteConfigurationActionExecuted')
+                telemetryRecorder.recordEvent('settingsEditor.action', 'execute')
                 editor.focus()
                 editor.pushUndoStop()
                 const { edits, selectText, cursorOffset } = run(editor.getValue())
@@ -251,8 +254,8 @@ export class MonacoSettingsEditor extends React.PureComponent<Props, State> {
                             column: monacoEdits[0].range.startColumn,
                         },
                         {
-                            lineNumber: monacoEdits[monacoEdits.length - 1].range.endLineNumber,
-                            column: monacoEdits[monacoEdits.length - 1].range.endColumn,
+                            lineNumber: monacoEdits.at(-1)!.range.endLineNumber,
+                            column: monacoEdits.at(-1)!.range.endColumn,
                         }
                     )
                 }
@@ -265,14 +268,6 @@ export class MonacoSettingsEditor extends React.PureComponent<Props, State> {
 
 function setDiagnosticsOptions(editor: typeof monaco, jsonSchema: JSONSchema | undefined): void {
     const schema = { ...settingsSchema, properties: { ...settingsSchema.properties } }
-    if (!window.context.enableLegacyExtensions) {
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- we need to remove this key conditionally, but not from the schema
-        // @ts-ignore
-        delete schema.properties.extensions
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- we need to remove this key conditionally, but not from the schema
-        // @ts-ignore
-        delete schema.properties['extensions.activeLoggers']
-    }
     editor.languages.json.jsonDefaults.setDiagnosticsOptions({
         validate: true,
         allowComments: true,
@@ -322,8 +317,7 @@ function registerRedactedHover(editor: typeof monaco): monaco.IDisposable {
                 return {
                     contents: [
                         {
-                            value:
-                                "**This field is redacted.** To update, replace with a new value. Otherwise, don't modify this field.",
+                            value: "**This field is redacted.** To update, replace with a new value. Otherwise, don't modify this field.",
                         },
                     ],
                 }
@@ -337,9 +331,7 @@ function registerRedactedHover(editor: typeof monaco): monaco.IDisposable {
  * A helper function that modifies site configuration to configure specific
  * common things, such as syncing GitHub repositories.
  */
-export type ConfigInsertionFunction = (
-    configJSON: string
-) => {
+export type ConfigInsertionFunction = (configJSON: string) => {
     /** The edits to make to the input configuration to insert the new configuration. */
     edits: jsonc.Edit[]
 
@@ -364,4 +356,52 @@ function getPositionAt(text: string, offset: number): monaco.IPosition {
         position += line.length + 1
     }
     throw new Error(`offset ${offset} out of bounds in text of length ${text.length}`)
+}
+
+declare global {
+    interface Window {
+        MonacoEnvironment?: monaco.Environment | undefined
+    }
+}
+
+// Manually configure the MonacoEnvironment for the Monaco editor.
+if (!window.MonacoEnvironment) {
+    window.MonacoEnvironment = {
+        /* eslint-disable @typescript-eslint/ban-ts-comment */
+
+        // NOTE: We used to use `getWorkerUrl` to load the worker, but that stopped working when
+        // we switched to using bazel to build the Monaco editor. If we wanted to use `getWorkerUrl`
+        // we would have to add the two workers below as entry points to an esbuild build.
+        // We cannot use the same build that builds the webapp because the output file names
+        // currently contain the content hash of the file, which would make it impossible to know
+        // the file name of the worker. Specifying a different file name pattern for the workers only
+        // doesn't seem to be possible with esbuild.
+        // We could add a separate bazel build target for the workers only, but using `getWorker` with
+        // the workerPlugin allows us to have a single build target for the webapp, and ensures that
+        // bazel and non-bazel builds work the same way.
+
+        // Returning Promise<Worker> works, but it appears that the type definition does not
+        // reflect that. We have to dynamically import these modules because they are converted
+        // to "inline workers" via the workerPlugin for esbuild.
+        // Ignoring the error is necessary for the bazel build to work.
+        // @ts-ignore
+        async getWorker(_moduleId: string, label: string): Promise<Worker> {
+            if (label === 'json') {
+                // There are no type definitions for this file. The workerPlugin for esbuild converts
+                // this file to a module which exports a function that returns a worker.
+                // See build-config/src/esbuild/workerPlugin.ts.
+                // Ignoring the error is necessary for the bazel build to work.
+                // @ts-ignore
+                return (await import('monaco-editor/esm/vs/language/json/json.worker')).default()
+            }
+            // There are no type definitions for this file. The workerPlugin for esbuild converts
+            // this file to a module which exports a function that returns a worker.
+            // See build-config/src/esbuild/workerPlugin.ts.
+            // Ignoring the error is necessary for the bazel build to work.
+            // @ts-ignore
+            return (await import('monaco-editor/esm/vs/editor/editor.worker')).default()
+        },
+
+        /* eslint-enable @typescript-eslint/ban-ts-comment */
+    }
 }

@@ -1,12 +1,13 @@
-import { DecoratorFn, Story, Meta } from '@storybook/react'
+import type { Decorator, StoryFn, Meta } from '@storybook/react'
 import { noop } from 'lodash'
 import { of } from 'rxjs'
 
-import { AggregateStreamingSearchResults } from '@sourcegraph/shared/src/search/stream'
+import { SearchPatternType } from '@sourcegraph/shared/src/graphql-operations'
+import type { AggregateStreamingSearchResults } from '@sourcegraph/shared/src/search/stream'
 import { EMPTY_SETTINGS_CASCADE } from '@sourcegraph/shared/src/settings/settings'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 import { NOOP_TELEMETRY_SERVICE } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import {
-    extensionsController,
     HIGHLIGHTED_FILE_LINES_LONG,
     MULTIPLE_SEARCH_RESULT,
     NOOP_PLATFORM_CONTEXT,
@@ -16,7 +17,7 @@ import { WebStory } from '../../../components/WebStory'
 
 import { NotebookQueryBlock } from './NotebookQueryBlock'
 
-const decorator: DecoratorFn = story => <div className="p-3 container">{story()}</div>
+const decorator: Decorator = story => <div className="p-3 container">{story()}</div>
 
 const config: Meta = {
     title: 'web/search/notebooks/blocks/query/NotebookQueryBlock',
@@ -44,9 +45,10 @@ const noopBlockCallbacks = {
     onDeleteBlock: noop,
     onMoveBlock: noop,
     onDuplicateBlock: noop,
+    onNewBlock: noop,
 }
 
-export const Default: Story = () => (
+export const Default: StoryFn = () => (
     <WebStory>
         {props => (
             <NotebookQueryBlock
@@ -58,21 +60,22 @@ export const Default: Story = () => (
                 output={of(streamingSearchResult)}
                 isSelected={false}
                 isReadOnly={false}
-                isOtherBlockSelected={false}
+                showMenu={false}
                 isSourcegraphDotCom={true}
                 searchContextsEnabled={true}
-                globbing={false}
+                ownEnabled={true}
                 telemetryService={NOOP_TELEMETRY_SERVICE}
-                fetchHighlightedFileLineRanges={() => of(HIGHLIGHTED_FILE_LINES_LONG)}
+                telemetryRecorder={noOpTelemetryRecorder}
+                fetchHighlightedFileLineRanges={() => of([HIGHLIGHTED_FILE_LINES_LONG])}
                 settingsCascade={EMPTY_SETTINGS_CASCADE}
                 platformContext={NOOP_PLATFORM_CONTEXT}
-                extensionsController={extensionsController}
+                patternType={SearchPatternType.standard}
             />
         )}
     </WebStory>
 )
 
-export const Selected: Story = () => (
+export const Selected: StoryFn = () => (
     <WebStory>
         {props => (
             <NotebookQueryBlock
@@ -82,23 +85,24 @@ export const Selected: Story = () => (
                 input={{ query: 'query' }}
                 output={of(streamingSearchResult)}
                 isSelected={true}
-                isOtherBlockSelected={false}
+                showMenu={false}
                 isReadOnly={false}
                 isSourcegraphDotCom={true}
                 searchContextsEnabled={true}
-                globbing={false}
+                ownEnabled={true}
                 telemetryService={NOOP_TELEMETRY_SERVICE}
-                fetchHighlightedFileLineRanges={() => of(HIGHLIGHTED_FILE_LINES_LONG)}
+                telemetryRecorder={noOpTelemetryRecorder}
+                fetchHighlightedFileLineRanges={() => of([HIGHLIGHTED_FILE_LINES_LONG])}
                 settingsCascade={EMPTY_SETTINGS_CASCADE}
                 authenticatedUser={null}
                 platformContext={NOOP_PLATFORM_CONTEXT}
-                extensionsController={extensionsController}
+                patternType={SearchPatternType.standard}
             />
         )}
     </WebStory>
 )
 
-export const ReadOnlySelected: Story = () => (
+export const ReadOnlySelected: StoryFn = () => (
     <WebStory>
         {props => (
             <NotebookQueryBlock
@@ -109,16 +113,17 @@ export const ReadOnlySelected: Story = () => (
                 output={of(streamingSearchResult)}
                 isSelected={true}
                 isReadOnly={true}
-                isOtherBlockSelected={false}
+                showMenu={false}
                 isSourcegraphDotCom={true}
                 searchContextsEnabled={true}
-                globbing={false}
+                ownEnabled={true}
                 telemetryService={NOOP_TELEMETRY_SERVICE}
-                fetchHighlightedFileLineRanges={() => of(HIGHLIGHTED_FILE_LINES_LONG)}
+                telemetryRecorder={noOpTelemetryRecorder}
+                fetchHighlightedFileLineRanges={() => of([HIGHLIGHTED_FILE_LINES_LONG])}
                 settingsCascade={EMPTY_SETTINGS_CASCADE}
                 authenticatedUser={null}
                 platformContext={NOOP_PLATFORM_CONTEXT}
-                extensionsController={extensionsController}
+                patternType={SearchPatternType.standard}
             />
         )}
     </WebStory>

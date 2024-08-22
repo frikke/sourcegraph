@@ -10,13 +10,14 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/google/go-github/v41/github"
+	"github.com/google/go-github/v55/github"
 	"github.com/slack-go/slack"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/oauth2"
 
 	"github.com/sourcegraph/log"
 
+	"github.com/sourcegraph/sourcegraph/dev/sg/internal/category"
 	sgslack "github.com/sourcegraph/sourcegraph/dev/sg/internal/slack"
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/std"
 	"github.com/sourcegraph/sourcegraph/dev/team"
@@ -31,7 +32,7 @@ var auditCommand = &cli.Command{
 	Usage:     "Display audit trail for resources",
 	ArgsUsage: "[target]",
 	Hidden:    true,
-	Category:  CategoryCompany,
+	Category:  category.Company,
 	Subcommands: []*cli.Command{{
 		Name:  "pr",
 		Usage: "Display audit trail for pull requests",
@@ -55,7 +56,7 @@ var auditCommand = &cli.Command{
 				&oauth2.Token{AccessToken: auditPRGitHubToken},
 			)))
 
-			logger := log.Scoped("auditPR", "sg audit pr")
+			logger := log.Scoped("auditPR")
 			logger.Debug("fetching issues")
 			issues, err := fetchIssues(ctx.Context, logger, ghc)
 			if err != nil {
@@ -145,7 +146,7 @@ func presentIssues(ctx context.Context, ghc *github.Client, slack *slack.Client,
 		res = append(res, prAuditIssue{
 			Title:     title,
 			Url:       issue.GetHTMLURL(),
-			CreatedAt: fmt.Sprintf("%d days ago", time.Since(issue.GetCreatedAt())/(time.Hour*24)),
+			CreatedAt: fmt.Sprintf("%d days ago", time.Since(issue.GetCreatedAt().Time)/(time.Hour*24)),
 			Author:    author.SlackName, // Use author.SlackID in the next iteration, when automating the posting of this message
 		})
 
@@ -171,7 +172,7 @@ In order to be compliant with SOC2, you or someone from your team *must* documen
 2. Explain why no test plan was provided and why the PR wasn't reviewed before being merged.
 3. Close the issue.
 
-Read more about [test plans](https://docs.sourcegraph.com/dev/background-information/testing_principles#test-plans) and [reviews](https://docs.sourcegraph.com/dev/background-information/pull_request_reviews).
+Read more about [test plans](https://docs-legacy.sourcegraph.com/dev/background-information/testing_principles#test-plans) and [reviews](https://docs.sourcegraph.com/dev/background-information/pull_request_reviews).
 {{""}}
 {{- range . }}
 - _{{ .CreatedAt }}_ @{{ .Author }}

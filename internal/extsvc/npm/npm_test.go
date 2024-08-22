@@ -1,24 +1,24 @@
 package npm
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"sort"
 	"testing"
 
-	"github.com/inconshreveable/log15"
+	"github.com/inconshreveable/log15" //nolint:logging // TODO move all logging to sourcegraph/log
 	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
 
 	"github.com/sourcegraph/sourcegraph/internal/conf/reposource"
 	"github.com/sourcegraph/sourcegraph/internal/httpcli"
 	"github.com/sourcegraph/sourcegraph/internal/httptestutil"
+	"github.com/sourcegraph/sourcegraph/internal/ratelimit"
+	"github.com/sourcegraph/sourcegraph/internal/unpack"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
@@ -36,10 +36,8 @@ func newTestHTTPClient(t *testing.T) (client *HTTPClient, stop func()) {
 	t.Helper()
 	recorderFactory, stop := httptestutil.NewRecorderFactory(t, *updateRecordings, t.Name())
 
-	doer, err := recorderFactory.Doer()
-	require.Nil(t, err)
-
-	client = NewHTTPClient("urn", "https://registry.npmjs.org", "", doer)
+	client, _ = NewHTTPClient("urn", "https://registry.npmjs.org", "", recorderFactory)
+	client.limiter = ratelimit.NewInstrumentedLimiter("npm", rate.NewLimiter(100, 10))
 	return client, stop
 }
 
@@ -78,7 +76,8 @@ func TestCredentials(t *testing.T) {
 	defer server.Close()
 
 	ctx := context.Background()
-	client := NewHTTPClient("urn", server.URL, credentials, httpcli.ExternalDoer)
+	client, _ := NewHTTPClient("urn", server.URL, credentials, httpcli.TestExternalClientFactory)
+	client.limiter = ratelimit.NewInstrumentedLimiter("npm", rate.NewLimiter(100, 10))
 
 	presentDep, err := reposource.ParseNpmVersionedPackage("left-pad@1.3.0")
 	require.NoError(t, err)
@@ -152,19 +151,8 @@ func TestFetchSources(t *testing.T) {
 	readSeekCloser, err := client.FetchTarball(ctx, dep)
 	require.Nil(t, err)
 	defer readSeekCloser.Close()
-	gzipReader, err := gzip.NewReader(readSeekCloser)
+	tarFiles, err := unpack.ListTgzUnsorted(readSeekCloser)
 	require.Nil(t, err)
-	defer gzipReader.Close()
-	tarReader := tar.NewReader(gzipReader)
-	tarFiles := []string{}
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		require.Nil(t, err)
-		tarFiles = append(tarFiles, header.Name)
-	}
 	sort.Strings(tarFiles)
 	require.Equal(t, tarFiles, []string{
 		"package/.travis.yml",

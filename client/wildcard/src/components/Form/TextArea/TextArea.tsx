@@ -1,4 +1,10 @@
-import { forwardRef, ForwardRefExoticComponent, ReactNode, RefAttributes, TextareaHTMLAttributes } from 'react'
+import {
+    forwardRef,
+    type ForwardRefExoticComponent,
+    type ReactNode,
+    type RefAttributes,
+    type TextareaHTMLAttributes,
+} from 'react'
 
 import classNames from 'classnames'
 
@@ -51,6 +57,26 @@ export const TextArea: ForwardRefExoticComponent<TextAreaProps & RefAttributes<H
             resizeable = true,
             ...otherProps
         } = props
+
+        if (!label && !message) {
+            return (
+                // eslint-disable-next-line react/forbid-elements
+                <textarea
+                    disabled={disabled}
+                    className={classNames(
+                        'form-control',
+                        styles.textarea,
+                        getValidStyle(isValid),
+                        size === 'small' && 'form-control-sm',
+                        resizeable === false && styles.resizeNone,
+                        inputClassName,
+                        className
+                    )}
+                    {...otherProps}
+                    ref={reference}
+                />
+            )
+        }
 
         return (
             <Label className={classNames(styles.label, className)}>

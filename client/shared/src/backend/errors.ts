@@ -43,6 +43,7 @@ export class RepoSeeOtherError extends Error {
         super(`Repository not found at this location, but might exist at ${redirectURL}`)
     }
 }
+
 // Will work even for errors that came from GraphQL, background pages, comlink webworkers, etc.
 // TODO remove error message assertion after https://github.com/sourcegraph/sourcegraph/issues/9697 and https://github.com/sourcegraph/sourcegraph/issues/9693 are fixed
 /** Returns the redirect URL if the passed value is like a RepoSeeOtherError, otherwise `false`. */

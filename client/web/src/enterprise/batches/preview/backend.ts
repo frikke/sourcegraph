@@ -1,11 +1,11 @@
-import { Observable } from 'rxjs'
+import { lastValueFrom, type Observable } from 'rxjs'
 import { map } from 'rxjs/operators'
 
 import { gql, dataOrThrowErrors } from '@sourcegraph/http-client'
 
 import { diffStatFields } from '../../../backend/diff'
 import { requestGraphQL } from '../../../backend/graphql'
-import {
+import type {
     CreateBatchChangeVariables,
     CreateBatchChangeResult,
     ApplyBatchChangeResult,
@@ -139,49 +139,49 @@ export const createBatchChange = ({
     batchSpec,
     publicationStates,
 }: CreateBatchChangeVariables): Promise<CreateBatchChangeResult['createBatchChange']> =>
-    requestGraphQL<CreateBatchChangeResult, CreateBatchChangeVariables>(
-        gql`
-            mutation CreateBatchChange($batchSpec: ID!, $publicationStates: [ChangesetSpecPublicationStateInput!]) {
-                createBatchChange(batchSpec: $batchSpec, publicationStates: $publicationStates) {
-                    id
-                    url
+    lastValueFrom(
+        requestGraphQL<CreateBatchChangeResult, CreateBatchChangeVariables>(
+            gql`
+                mutation CreateBatchChange($batchSpec: ID!, $publicationStates: [ChangesetSpecPublicationStateInput!]) {
+                    createBatchChange(batchSpec: $batchSpec, publicationStates: $publicationStates) {
+                        id
+                        url
+                    }
                 }
-            }
-        `,
-        { batchSpec, publicationStates }
-    )
-        .pipe(
+            `,
+            { batchSpec, publicationStates }
+        ).pipe(
             map(dataOrThrowErrors),
             map(data => data.createBatchChange)
         )
-        .toPromise()
+    )
 
 export const applyBatchChange = ({
     batchSpec,
     batchChange,
     publicationStates,
 }: ApplyBatchChangeVariables): Promise<ApplyBatchChangeResult['applyBatchChange']> =>
-    requestGraphQL<ApplyBatchChangeResult, ApplyBatchChangeVariables>(
-        gql`
-            mutation ApplyBatchChange(
-                $batchSpec: ID!
-                $batchChange: ID!
-                $publicationStates: [ChangesetSpecPublicationStateInput!]
-            ) {
-                applyBatchChange(
-                    batchSpec: $batchSpec
-                    ensureBatchChange: $batchChange
-                    publicationStates: $publicationStates
+    lastValueFrom(
+        requestGraphQL<ApplyBatchChangeResult, ApplyBatchChangeVariables>(
+            gql`
+                mutation ApplyBatchChange(
+                    $batchSpec: ID!
+                    $batchChange: ID!
+                    $publicationStates: [ChangesetSpecPublicationStateInput!]
                 ) {
-                    id
-                    url
+                    applyBatchChange(
+                        batchSpec: $batchSpec
+                        ensureBatchChange: $batchChange
+                        publicationStates: $publicationStates
+                    ) {
+                        id
+                        url
+                    }
                 }
-            }
-        `,
-        { batchSpec, batchChange, publicationStates }
-    )
-        .pipe(
+            `,
+            { batchSpec, batchChange, publicationStates }
+        ).pipe(
             map(dataOrThrowErrors),
             map(data => data.applyBatchChange)
         )
-        .toPromise()
+    )

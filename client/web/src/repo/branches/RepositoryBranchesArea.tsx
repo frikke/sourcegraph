@@ -1,74 +1,55 @@
-import React, { useMemo } from 'react'
+import type { FC } from 'react'
 
-import MapSearchIcon from 'mdi-react/MapSearchIcon'
-import { Route, RouteComponentProps, Switch } from 'react-router'
+import { Routes, Route } from 'react-router-dom'
 
-import { BreadcrumbSetters } from '../../components/Breadcrumbs'
-import { HeroPage } from '../../components/HeroPage'
-import { RepositoryFields } from '../../graphql-operations'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+
+import type { BreadcrumbSetters } from '../../components/Breadcrumbs'
+import { NotFoundPage } from '../../components/HeroPage'
+import type { RepositoryFields } from '../../graphql-operations'
 
 import { RepositoryBranchesAllPage } from './RepositoryBranchesAllPage'
 import { RepositoryBranchesNavbar } from './RepositoryBranchesNavbar'
 import { RepositoryBranchesOverviewPage } from './RepositoryBranchesOverviewPage'
 
-const NotFoundPage: React.FunctionComponent<React.PropsWithChildren<unknown>> = () => (
-    <HeroPage
-        icon={MapSearchIcon}
-        title="404: Not Found"
-        subtitle="Sorry, the requested repository branches page was not found."
-    />
-)
-
-interface Props extends RouteComponentProps<{}>, BreadcrumbSetters {
+interface Props extends BreadcrumbSetters, TelemetryV2Props {
     repo: RepositoryFields
 }
 
 /**
  * Properties passed to all page components in the repository branches area.
  */
-export interface RepositoryBranchesAreaPageProps {
+export interface RepositoryBranchesAreaPageProps extends TelemetryV2Props {
     /**
      * The active repository.
      */
     repo: RepositoryFields
 }
 
+const BREADCRUMB = { key: 'branches', element: 'Branches' }
+
 /**
  * Renders pages related to repository branches.
  */
-export const RepositoryBranchesArea: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
-    useBreadcrumb,
-    repo,
-    match,
-}) => {
-    const transferProps: { repo: RepositoryFields } = {
-        repo,
-    }
+export const RepositoryBranchesArea: FC<Props> = props => {
+    const { useBreadcrumb, repo, telemetryRecorder } = props
 
-    useBreadcrumb(useMemo(() => ({ key: 'branches', element: 'Branches' }), []))
+    useBreadcrumb(BREADCRUMB)
 
     return (
-        <div className="repository-branches-area container">
+        <div className="repository-branches-area container px-3">
             <RepositoryBranchesNavbar className="my-3" repo={repo.name} />
-            <Switch>
+            <Routes>
                 <Route
-                    path={`${match.url}`}
-                    key="hardcoded-key" // see https://github.com/ReactTraining/react-router/issues/4578#issuecomment-334489490
-                    exact={true}
-                    render={routeComponentProps => (
-                        <RepositoryBranchesOverviewPage {...routeComponentProps} {...transferProps} />
-                    )}
+                    path="all"
+                    element={<RepositoryBranchesAllPage repo={repo} telemetryRecorder={telemetryRecorder} />}
                 />
                 <Route
-                    path={`${match.url}/all`}
-                    key="hardcoded-key" // see https://github.com/ReactTraining/react-router/issues/4578#issuecomment-334489490
-                    exact={true}
-                    render={routeComponentProps => (
-                        <RepositoryBranchesAllPage {...routeComponentProps} {...transferProps} />
-                    )}
+                    path=""
+                    element={<RepositoryBranchesOverviewPage repo={repo} telemetryRecorder={telemetryRecorder} />}
                 />
-                <Route key="hardcoded-key" component={NotFoundPage} />
-            </Switch>
+                <Route path="*" element={<NotFoundPage pageType="repository branches" />} />
+            </Routes>
         </div>
     )
 }

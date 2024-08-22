@@ -33,7 +33,7 @@ type AWSCodeCommitSource struct {
 	awsRegion    string
 	client       *awscodecommit.Client
 
-	exclude excludeFunc
+	excluder repoExcluder
 }
 
 // NewAWSCodeCommitSource returns a new AWSCodeCommitSource from the given external service.
@@ -85,21 +85,22 @@ func newAWSCodeCommitSource(svc *types.ExternalService, c *schema.AWSCodeCommitC
 		return nil, err
 	}
 
-	var eb excludeBuilder
+	var ex repoExcluder
 	for _, r := range c.Exclude {
-		eb.Exact(r.Name)
-		eb.Exact(r.Id)
+		// Either Name OR ID must match.
+		ex.AddRule(NewRule().
+			Exact(r.Name).
+			Exact(r.Id))
 	}
-	exclude, err := eb.Build()
-	if err != nil {
+	if err := ex.RuleErrors(); err != nil {
 		return nil, err
 	}
 
 	s := &AWSCodeCommitSource{
-		svc:     svc,
-		config:  c,
-		exclude: exclude,
-		client:  awscodecommit.NewClient(awsConfig),
+		svc:      svc,
+		config:   c,
+		excluder: ex,
+		client:   awscodecommit.NewClient(awsConfig),
 	}
 
 	endpoint, err := codecommit.NewDefaultEndpointResolver().ResolveEndpoint(c.Region, codecommit.EndpointResolverOptions{})
@@ -110,6 +111,13 @@ func newAWSCodeCommitSource(svc *types.ExternalService, c *schema.AWSCodeCommitC
 	s.awsRegion = endpoint.SigningRegion
 
 	return s, nil
+}
+
+// CheckConnection at this point assumes availability and relies on errors returned
+// from the subsequent calls. This is going to be expanded as part of issue #44683
+// to actually only return true if the source can serve requests.
+func (s *AWSCodeCommitSource) CheckConnection(ctx context.Context) error {
+	return nil
 }
 
 // ListRepos returns all AWS Code Commit repositories accessible to all
@@ -140,6 +148,7 @@ func (s *AWSCodeCommitSource) makeRepo(r *awscodecommit.Repository) *types.Repo 
 			},
 		},
 		Metadata: r,
+		Private:  !s.svc.Unrestricted,
 	}
 }
 
@@ -168,7 +177,7 @@ func (s *AWSCodeCommitSource) listAllRepositories(ctx context.Context, results c
 }
 
 func (s *AWSCodeCommitSource) excludes(r *awscodecommit.Repository) bool {
-	return s.exclude(r.Name) || s.exclude(r.ID)
+	return s.excluder.ShouldExclude(r.Name) || s.excluder.ShouldExclude(r.ID)
 }
 
 // The code below is copied from

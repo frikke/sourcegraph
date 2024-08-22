@@ -29,6 +29,7 @@ import (
 //    pointers, which is ugly and inefficient.
 
 type BatchSpec struct {
+	Version           int                      `json:"version,omitempty" yaml:"version"`
 	Name              string                   `json:"name,omitempty" yaml:"name"`
 	Description       string                   `json:"description,omitempty" yaml:"description"`
 	On                []OnQueryOrRepository    `json:"on,omitempty" yaml:"on"`
@@ -43,6 +44,7 @@ type ChangesetTemplate struct {
 	Title     string                       `json:"title,omitempty" yaml:"title"`
 	Body      string                       `json:"body,omitempty" yaml:"body"`
 	Branch    string                       `json:"branch,omitempty" yaml:"branch"`
+	Fork      *bool                        `json:"fork,omitempty" yaml:"fork"`
 	Commit    ExpandedGitCommitDescription `json:"commit,omitempty" yaml:"commit"`
 	Published *overridable.BoolOrString    `json:"published" yaml:"published"`
 }
@@ -205,12 +207,12 @@ func (e BatchSpecValidationError) Error() string {
 }
 
 func IsValidationError(err error) bool {
-	return errors.HasType(err, &BatchSpecValidationError{})
+	return errors.HasType[*BatchSpecValidationError](err)
 }
 
 // SkippedStepsForRepo calculates the steps required to run on the given repo.
-func SkippedStepsForRepo(spec *BatchSpec, repoName string, fileMatches []string) (skipped map[int32]struct{}, err error) {
-	skipped = map[int32]struct{}{}
+func SkippedStepsForRepo(spec *BatchSpec, repoName string, fileMatches []string) (skipped map[int]struct{}, err error) {
+	skipped = map[int]struct{}{}
 
 	for idx, step := range spec.Steps {
 		// If no if condition is set the step is always run.
@@ -238,9 +240,25 @@ func SkippedStepsForRepo(spec *BatchSpec, repoName string, fileMatches []string)
 		}
 
 		if static && !boolVal {
-			skipped[int32(idx)] = struct{}{}
+			skipped[idx] = struct{}{}
 		}
 	}
 
 	return skipped, nil
+}
+
+// RequiredEnvVars inspects all steps for outer environment variables used and
+// compiles a deduplicated list from those.
+func (s *BatchSpec) RequiredEnvVars() []string {
+	requiredMap := map[string]struct{}{}
+	required := []string{}
+	for _, step := range s.Steps {
+		for _, v := range step.Env.OuterVars() {
+			if _, ok := requiredMap[v]; !ok {
+				requiredMap[v] = struct{}{}
+				required = append(required, v)
+			}
+		}
+	}
+	return required
 }

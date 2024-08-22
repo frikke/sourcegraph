@@ -3,10 +3,15 @@ package query
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/grafana/regexp"
+	"github.com/grafana/regexp/syntax"
 
+	"github.com/sourcegraph/sourcegraph/internal/gitserver/gitdomain"
+	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
+	"github.com/sourcegraph/sourcegraph/lib/pointers"
 )
 
 type Predicate interface {
@@ -34,13 +39,23 @@ var DefaultPredicateRegistry = PredicateRegistry{
 		"contains.commit.after": func() Predicate { return &RepoContainsCommitAfterPredicate{} },
 		"has.commit.after":      func() Predicate { return &RepoContainsCommitAfterPredicate{} },
 		"has.description":       func() Predicate { return &RepoHasDescriptionPredicate{} },
-		"has.tag":               func() Predicate { return &RepoHasTagPredicate{} },
-		"has":                   func() Predicate { return &RepoHasKVPPredicate{} },
+		"has.meta":              func() Predicate { return &RepoHasMetaPredicate{} },
+		"has.topic":             func() Predicate { return &RepoHasTopicPredicate{} },
+
+		// Deprecated predicates
+		"has.tag":  func() Predicate { return &RepoHasTagPredicate{} },
+		"has":      func() Predicate { return &RepoHasKVPPredicate{} },
+		"has.key":  func() Predicate { return &RepoHasKeyPredicate{} },
+		"contains": func() Predicate { return &RepoContainsPredicate{} },
 	},
 	FieldFile: {
 		"contains.content": func() Predicate { return &FileContainsContentPredicate{} },
 		"has.content":      func() Predicate { return &FileContainsContentPredicate{} },
 		"has.owner":        func() Predicate { return &FileHasOwnerPredicate{} },
+		"has.contributor":  func() Predicate { return &FileHasContributorPredicate{} },
+	},
+	FieldRev: {
+		"at.time": func() Predicate { return &RevAtTimePredicate{} },
 	},
 }
 
@@ -104,8 +119,9 @@ func (EmptyPredicate) Unmarshal(_ string, negated bool) error {
 	return nil
 }
 
-// RepoContainsFilePredicate represents the `repo:contains.file()` predicate,
-// which filters to repos that contain a path and/or content
+// RepoContainsFilePredicate represents the `repo:contains.file()` predicate, which filters to
+// repos that contain a path and/or content. NOTE: this predicate still supports the deprecated
+// syntax `repo:contains.file(name.go)` on a best-effort basis.
 type RepoContainsFilePredicate struct {
 	Path    string
 	Content string
@@ -118,16 +134,38 @@ func (f *RepoContainsFilePredicate) Unmarshal(params string, negated bool) error
 		return err
 	}
 
-	for _, node := range nodes {
-		if err := f.parseNode(node); err != nil {
+	if err := f.parseNodes(nodes); err != nil {
+		// If there's a parsing error, try falling back to the deprecated syntax `repo:contains.file(name.go)`.
+		// Only attempt to fall back if there is a single pattern node, to avoid being too lenient.
+		if len(nodes) != 1 {
 			return err
 		}
+
+		pattern, ok := nodes[0].(Pattern)
+		if !ok {
+			return err
+		}
+
+		if _, err := syntax.Parse(pattern.Value, syntax.Perl); err != nil {
+			return err
+		}
+		f.Path = pattern.Value
 	}
 
 	if f.Path == "" && f.Content == "" {
 		return errors.New("one of path or content must be set")
 	}
+
 	f.Negated = negated
+	return nil
+}
+
+func (f *RepoContainsFilePredicate) parseNodes(nodes []Node) error {
+	for _, node := range nodes {
+		if err := f.parseNode(node); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -142,7 +180,7 @@ func (f *RepoContainsFilePredicate) parseNode(n Node) error {
 			if f.Path != "" {
 				return errors.New("cannot specify path multiple times")
 			}
-			if _, err := regexp.Compile(v.Value); err != nil {
+			if _, err := syntax.Parse(v.Value, syntax.Perl); err != nil {
 				return errors.Errorf("`contains.file` predicate has invalid `path` argument: %w", err)
 			}
 			f.Path = v.Value
@@ -150,7 +188,7 @@ func (f *RepoContainsFilePredicate) parseNode(n Node) error {
 			if f.Content != "" {
 				return errors.New("cannot specify content multiple times")
 			}
-			if _, err := regexp.Compile(v.Value); err != nil {
+			if _, err := syntax.Parse(v.Value, syntax.Perl); err != nil {
 				return errors.Errorf("`contains.file` predicate has invalid `content` argument: %w", err)
 			}
 			f.Content = v.Value
@@ -158,7 +196,7 @@ func (f *RepoContainsFilePredicate) parseNode(n Node) error {
 			return errors.Errorf("unsupported option %q", v.Field)
 		}
 	case Pattern:
-		return errors.Errorf(`prepend 'path:' or 'content:' to "%s" to search repositories containing path or content respectively.`, v.Value)
+		return errors.Errorf(`prepend 'file:' or 'content:' to "%s" to search repositories containing files or content respectively.`, v.Value)
 	case Operator:
 		if v.Kind == Or {
 			return errors.New("predicates do not currently support 'or' queries")
@@ -185,7 +223,7 @@ type RepoContainsContentPredicate struct {
 }
 
 func (f *RepoContainsContentPredicate) Unmarshal(params string, negated bool) error {
-	if _, err := regexp.Compile(params); err != nil {
+	if _, err := syntax.Parse(params, syntax.Perl); err != nil {
 		return errors.Errorf("contains.content argument: %w", err)
 	}
 	if params == "" {
@@ -207,7 +245,7 @@ type RepoContainsPathPredicate struct {
 }
 
 func (f *RepoContainsPathPredicate) Unmarshal(params string, negated bool) error {
-	if _, err := regexp.Compile(params); err != nil {
+	if _, err := syntax.Parse(params, syntax.Perl); err != nil {
 		return errors.Errorf("contains.path argument: %w", err)
 	}
 	if params == "" {
@@ -225,14 +263,12 @@ func (f *RepoContainsPathPredicate) Name() string  { return "contains.path" }
 
 type RepoContainsCommitAfterPredicate struct {
 	TimeRef string
+	Negated bool
 }
 
 func (f *RepoContainsCommitAfterPredicate) Unmarshal(params string, negated bool) error {
-	if negated {
-		return &NegatedPredicateError{f.Field() + ":" + f.Name()}
-	}
-
 	f.TimeRef = params
+	f.Negated = negated
 	return nil
 }
 
@@ -252,7 +288,7 @@ func (f *RepoHasDescriptionPredicate) Unmarshal(params string, negated bool) (er
 		return &NegatedPredicateError{f.Field() + ":" + f.Name()}
 	}
 
-	if _, err := regexp.Compile(params); err != nil {
+	if _, err := syntax.Parse(params, syntax.Perl); err != nil {
 		return errors.Errorf("invalid repo:has.description() argument: %w", err)
 	}
 	if len(params) == 0 {
@@ -265,6 +301,7 @@ func (f *RepoHasDescriptionPredicate) Unmarshal(params string, negated bool) (er
 func (f *RepoHasDescriptionPredicate) Field() string { return FieldRepo }
 func (f *RepoHasDescriptionPredicate) Name() string  { return "has.description" }
 
+// DEPRECATED: Use "repo:has.meta({tag}:)" instead
 type RepoHasTagPredicate struct {
 	Key     string
 	Negated bool
@@ -282,6 +319,98 @@ func (f *RepoHasTagPredicate) Unmarshal(params string, negated bool) (err error)
 func (f *RepoHasTagPredicate) Field() string { return FieldRepo }
 func (f *RepoHasTagPredicate) Name() string  { return "has.tag" }
 
+type RepoHasMetaPredicate struct {
+	// A regex pattern matching the value
+	Key types.RegexpPattern
+	// A regex pattern matching the value
+	Value   *types.RegexpPattern
+	Negated bool
+	KeyOnly bool
+}
+
+func exactRegexpPattern(input string) types.RegexpPattern {
+	return types.RegexpPattern("^" + regexp.QuoteMeta(input) + "$")
+}
+
+func (p *RepoHasMetaPredicate) Unmarshal(params string, negated bool) (err error) {
+	scanLiteral := func(data string) (_ string, regexp bool, advance int, _ error) {
+		if strings.HasPrefix(data, `"`) {
+			s, advance, err := ScanDelimited([]byte(data), true, '"')
+			return s, false, advance, err
+		}
+		if strings.HasPrefix(data, `'`) {
+			s, advance, err := ScanDelimited([]byte(data), true, '\'')
+			return s, false, advance, err
+		}
+		if strings.HasPrefix(data, `/`) {
+			s, advance, err := ScanDelimited([]byte(data), false, '/')
+			return s, true, advance, err
+		}
+		if loc := strings.Index(data, ":"); loc >= 0 {
+			return data[:loc], false, loc, nil
+		}
+		return data, false, len(data), nil
+	}
+
+	// Trim leading and trailing spaces in params
+	params = strings.Trim(params, " \t")
+
+	// Scan the possibly-quoted key
+	stringKey, isRegexp, advance, err := scanLiteral(params)
+	if err != nil {
+		return err
+	}
+	if len(stringKey) == 0 {
+		return errors.New("key cannot be empty")
+	}
+	var key types.RegexpPattern
+	if isRegexp {
+		key = types.RegexpPattern(stringKey)
+	} else {
+		key = exactRegexpPattern(stringKey)
+	}
+
+	params = params[advance:]
+
+	keyOnly := false
+	var value *types.RegexpPattern = nil
+	if strings.HasPrefix(params, ":") {
+		// Chomp the leading ":"
+		params = params[len(":"):]
+
+		// Scan the possibly-quoted value
+		val, isRegexp, advance, err := scanLiteral(params)
+		if err != nil {
+			return err
+		}
+		params = params[advance:]
+
+		// If we have more text after scanning both the key and the value,
+		// that means someone tried to use a quoted string with data outside
+		// the quotes.
+		if len(params) != 0 {
+			return errors.New("unexpected extra content")
+		}
+		if len(val) > 0 && isRegexp {
+			value = pointers.Ptr(types.RegexpPattern(val))
+		} else if len(val) > 0 {
+			value = pointers.Ptr(exactRegexpPattern(val))
+		}
+	} else {
+		keyOnly = true
+	}
+
+	p.Key = key
+	p.KeyOnly = keyOnly
+	p.Value = value
+	p.Negated = negated
+	return nil
+}
+
+func (p *RepoHasMetaPredicate) Field() string { return FieldRepo }
+func (p *RepoHasMetaPredicate) Name() string  { return "has.meta" }
+
+// DEPRECATED: Use "repo:has.meta({key:value})" instead
 type RepoHasKVPPredicate struct {
 	Key     string
 	Value   string
@@ -289,18 +418,167 @@ type RepoHasKVPPredicate struct {
 }
 
 func (p *RepoHasKVPPredicate) Unmarshal(params string, negated bool) (err error) {
-	split := strings.Split(params, ":")
-	if len(split) != 2 || len(split[0]) == 0 || len(split[1]) == 0 {
-		return errors.New("expected params in the form of key:value")
+	scanLiteral := func(data string) (string, int, error) {
+		if strings.HasPrefix(data, `"`) {
+			return ScanDelimited([]byte(data), true, '"')
+		}
+		if strings.HasPrefix(data, `'`) {
+			return ScanDelimited([]byte(data), true, '\'')
+		}
+		loc := strings.Index(data, ":")
+		if loc >= 0 {
+			return data[:loc], loc, nil
+		}
+		return data, len(data), nil
 	}
-	p.Key = split[0]
-	p.Value = split[1]
+	// Trim leading and trailing spaces in params
+	params = strings.Trim(params, " \t")
+	// Scan the possibly-quoted key
+	key, advance, err := scanLiteral(params)
+	if err != nil {
+		return err
+	}
+	params = params[advance:]
+
+	// Chomp the leading ":"
+	if !strings.HasPrefix(params, ":") {
+		return errors.New("expected params of the form key:value")
+	}
+	params = params[len(":"):]
+
+	// Scan the possibly-quoted value
+	value, advance, err := scanLiteral(params)
+	if err != nil {
+		return err
+	}
+	params = params[advance:]
+
+	// If we have more text after scanning both the key and the value,
+	// that means someone tried to use a quoted string with data outside
+	// the quotes.
+	if len(params) != 0 {
+		return errors.New("unexpected extra content")
+	}
+
+	if len(key) == 0 {
+		return errors.New("key cannot be empty")
+	}
+
+	p.Key = key
+	p.Value = value
 	p.Negated = negated
 	return nil
 }
 
 func (p *RepoHasKVPPredicate) Field() string { return FieldRepo }
 func (p *RepoHasKVPPredicate) Name() string  { return "has" }
+
+// DEPRECATED: Use "repo:has.meta({key})" instead
+type RepoHasKeyPredicate struct {
+	Key     string
+	Negated bool
+}
+
+func (p *RepoHasKeyPredicate) Unmarshal(params string, negated bool) (err error) {
+	if len(params) == 0 {
+		return errors.New("key must be non-empty")
+	}
+	p.Key = params
+	p.Negated = negated
+	return nil
+}
+
+func (p *RepoHasKeyPredicate) Field() string { return FieldRepo }
+func (p *RepoHasKeyPredicate) Name() string  { return "has.key" }
+
+type RepoHasTopicPredicate struct {
+	Topic   string
+	Negated bool
+}
+
+func (p *RepoHasTopicPredicate) Unmarshal(params string, negated bool) (err error) {
+	if len(params) == 0 {
+		return errors.New("topic must be non-empty")
+	}
+	p.Topic = params
+	p.Negated = negated
+	return nil
+}
+
+func (p *RepoHasTopicPredicate) Field() string { return FieldRepo }
+func (p *RepoHasTopicPredicate) Name() string  { return "has.topic" }
+
+// RepoContainsPredicate represents the `repo:contains(file:a content:b)` predicate.
+// DEPRECATED: this syntax is deprecated in favor of `repo:contains.file`.
+type RepoContainsPredicate struct {
+	File    string
+	Content string
+	Negated bool
+}
+
+func (f *RepoContainsPredicate) Unmarshal(params string, negated bool) error {
+	nodes, err := Parse(params, SearchTypeRegex)
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		if err := f.parseNode(node); err != nil {
+			return err
+		}
+	}
+
+	if f.File == "" && f.Content == "" {
+		return errors.New("one of file or content must be set")
+	}
+	f.Negated = negated
+	return nil
+}
+
+func (f *RepoContainsPredicate) parseNode(n Node) error {
+	switch v := n.(type) {
+	case Parameter:
+		if v.Negated {
+			return errors.New("the repo:contains() predicate does not currently support negated values")
+		}
+		switch strings.ToLower(v.Field) {
+		case "file":
+			if f.File != "" {
+				return errors.New("cannot specify file multiple times")
+			}
+			if _, err := regexp.Compile(v.Value); err != nil {
+				return errors.Errorf("the repo:contains() predicate has invalid `file` argument: %w", err)
+			}
+			f.File = v.Value
+		case "content":
+			if f.Content != "" {
+				return errors.New("cannot specify content multiple times")
+			}
+			if _, err := regexp.Compile(v.Value); err != nil {
+				return errors.Errorf("the repo:contains() predicate has invalid `content` argument: %w", err)
+			}
+			f.Content = v.Value
+		default:
+			return errors.Errorf("unsupported option %q", v.Field)
+		}
+	case Pattern:
+		return errors.Errorf(`prepend 'file:' or 'content:' to "%s" to search repositories containing files or content respectively.`, v.Value)
+	case Operator:
+		if v.Kind == Or {
+			return errors.New("predicates do not currently support 'or' queries")
+		}
+		for _, operand := range v.Operands {
+			if err := f.parseNode(operand); err != nil {
+				return err
+			}
+		}
+	default:
+		return errors.Errorf("unsupported node type %T", n)
+	}
+	return nil
+}
+
+func (f *RepoContainsPredicate) Field() string { return FieldRepo }
+func (f *RepoContainsPredicate) Name() string  { return "contains" }
 
 /* file:contains.content(pattern) */
 
@@ -313,7 +591,7 @@ func (f *FileContainsContentPredicate) Unmarshal(params string, negated bool) er
 		return &NegatedPredicateError{f.Field() + ":" + f.Name()}
 	}
 
-	if _, err := regexp.Compile(params); err != nil {
+	if _, err := syntax.Parse(params, syntax.Perl); err != nil {
 		return errors.Errorf("file:contains.content argument: %w", err)
 	}
 	if params == "" {
@@ -334,12 +612,6 @@ type FileHasOwnerPredicate struct {
 }
 
 func (f *FileHasOwnerPredicate) Unmarshal(params string, negated bool) error {
-	if negated {
-		return &NegatedPredicateError{f.Field() + ":" + f.Name()}
-	}
-	if params == "" {
-		return errors.Errorf("file:has.owner argument should not be empty")
-	}
 	f.Owner = params
 	f.Negated = negated
 	return nil
@@ -347,3 +619,54 @@ func (f *FileHasOwnerPredicate) Unmarshal(params string, negated bool) error {
 
 func (f FileHasOwnerPredicate) Field() string { return FieldFile }
 func (f FileHasOwnerPredicate) Name() string  { return "has.owner" }
+
+/* file:has.contributor(pattern) */
+
+type FileHasContributorPredicate struct {
+	Contributor string
+	Negated     bool
+}
+
+func (f *FileHasContributorPredicate) Unmarshal(params string, negated bool) error {
+	if _, err := syntax.Parse(params, syntax.Perl); err != nil {
+		return errors.Errorf("the file:has.contributor() predicate has invalid argument: %w", err)
+	}
+
+	f.Contributor = params
+	f.Negated = negated
+	return nil
+}
+
+func (f FileHasContributorPredicate) Field() string { return FieldFile }
+func (f FileHasContributorPredicate) Name() string  { return "has.contributor" }
+
+type RevAtTimePredicate struct {
+	RevAtTime
+}
+
+func (f *RevAtTimePredicate) Unmarshal(params string, negated bool) error {
+	elems := strings.Split(params, ",")
+	if len(elems) == 1 {
+		t, err := gitdomain.ParseGitDate(strings.TrimSpace(elems[0]), time.Now)
+		if err != nil {
+			return err
+		}
+		f.Timestamp = t
+		f.RevSpec = "HEAD"
+		return nil
+	} else if len(elems) == 2 {
+		t, err := gitdomain.ParseGitDate(strings.TrimSpace(elems[0]), time.Now)
+		if err != nil {
+			return err
+		}
+		f.Timestamp = t
+		f.RevSpec = strings.TrimSpace(elems[1])
+		return nil
+	} else {
+		return errors.New("unexpected number of arguments to rev:at.time()")
+	}
+}
+
+func (f RevAtTimePredicate) Field() string { return FieldRev }
+
+func (f RevAtTimePredicate) Name() string { return "at.time" }

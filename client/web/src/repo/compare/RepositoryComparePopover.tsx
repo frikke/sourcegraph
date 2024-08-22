@@ -1,14 +1,14 @@
 import React, { useState } from 'react'
 
 import { escapeRevspecForURL } from '@sourcegraph/common'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
 import { Button, Popover, PopoverContent, PopoverTrigger, Position } from '@sourcegraph/wildcard'
 
-import { useFeatureFlag } from '../../featureFlags/useFeatureFlag'
-import { eventLogger } from '../../tracking/eventLogger'
 import { RepoRevisionChevronDownIcon } from '../components/RepoRevision'
 import { RevisionsPopover } from '../RevisionsPopover'
 
-import { RepositoryCompareAreaPageProps } from './RepositoryCompareArea'
+import type { RepositoryCompareAreaPageProps } from './RepositoryCompareArea'
 
 interface RepositoryCompareHeaderProps extends RepositoryCompareAreaPageProps {
     className: string
@@ -19,7 +19,7 @@ interface RevisionComparison {
     head: RepositoryCompareHeaderProps['head']
 }
 
-interface RepositoryComparePopoverProps {
+interface RepositoryComparePopoverProps extends TelemetryV2Props {
     /**
      * Uniquely identify this specific popover. Used to link the trigger button with the popover to display
      */
@@ -37,14 +37,13 @@ interface RepositoryComparePopoverProps {
 
 export const RepositoryComparePopover: React.FunctionComponent<
     React.PropsWithChildren<RepositoryComparePopoverProps>
-> = ({ id, comparison, repo, type }) => {
+> = ({ id, comparison, repo, type, telemetryRecorder }) => {
     const [popoverOpen, setPopoverOpen] = useState(false)
     const togglePopover = (): void => setPopoverOpen(previous => !previous)
 
-    const [isNewRepoPageEnabled] = useFeatureFlag('new-repo-page')
-
     const handleSelect = (): void => {
-        eventLogger.log('RepositoryComparisonSubmitted')
+        EVENT_LOGGER.log('RepositoryComparisonSubmitted')
+        telemetryRecorder.recordEvent('repo.compare', 'submit')
         togglePopover()
     }
 
@@ -58,9 +57,7 @@ export const RepositoryComparePopover: React.FunctionComponent<
                 ? `${escapedRevision}...${escapeRevspecForURL(comparison.head.revision || '')}`
                 : `${escapeRevspecForURL(comparison.base.revision || '')}...${escapedRevision}`
 
-        const revisionPath = isNewRepoPageEnabled
-            ? `/${repo.name}/-/compare/tab/${comparePath}`
-            : `/${repo.name}/-/compare/${comparePath}`
+        const revisionPath = `/${repo.name}/-/compare/${comparePath}`
 
         return revisionPath
     }
@@ -86,6 +83,7 @@ export const RepositoryComparePopover: React.FunctionComponent<
                 <RevisionsPopover
                     repoId={repo.id}
                     repoName={repo.name}
+                    repoServiceType={repo?.externalRepository?.serviceType}
                     defaultBranch={defaultBranch}
                     currentRev={currentRevision}
                     currentCommitID={currentRevision}
@@ -93,6 +91,7 @@ export const RepositoryComparePopover: React.FunctionComponent<
                     getPathFromRevision={getPathFromRevision}
                     showSpeculativeResults={true}
                     onSelect={handleSelect}
+                    telemetryRecorder={telemetryRecorder}
                 />
             </PopoverContent>
         </Popover>

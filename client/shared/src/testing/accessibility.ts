@@ -1,6 +1,6 @@
 import { AxePuppeteer } from '@axe-core/puppeteer'
 import type { Result, NodeResult, RunOptions } from 'axe-core'
-import { Page } from 'puppeteer'
+import type { Page } from 'puppeteer'
 
 import { logger } from '@sourcegraph/common'
 
@@ -25,7 +25,7 @@ const formatRuleViolations = (violations: Result[]): string[] =>
         ({ id, help, helpUrl, nodes }) => `
 Rule: "${id}" (${help})
 Further information: ${helpUrl}
-How to manually audit: https://docs.sourcegraph.com/dev/background-information/web/accessibility/how-to-audit#auditing-a-user-journey
+How to manually audit: https://docs-legacy.sourcegraph.com/dev/background-information/web/accessibility/how-to-audit#auditing-a-user-journey
 Required changes: ${formatViolationProblems(nodes)}
 `
     )
@@ -45,7 +45,7 @@ export const ACCESSIBILITY_AUDIT_IGNORE_CLASS = '.a11y-ignore'
  *
  * Will error with a list of violations if any are found.
  *
- * See further documentation: https://docs.sourcegraph.com/dev/how-to/testing#accessibility-tests
+ * See further documentation: https://docs-legacy.sourcegraph.com/dev/how-to/testing#accessibility-tests
  */
 export async function accessibilityAudit(page: Page, config: AccessibilityAuditConfiguration = {}): Promise<void> {
     const { options, mode = 'fail' } = config
@@ -57,8 +57,10 @@ export async function accessibilityAudit(page: Page, config: AccessibilityAuditC
          * TODO: Design review on some CodeMirror query input features to choose
          * a color that fulfill contrast requirements:
          * https://github.com/sourcegraph/sourcegraph/issues/36534
+         * Additionally role="combobox" cannot be used together with aria-multiline, which
+         * CodeMirror sets by default.
          */
-        .exclude('.cm-content .cm-line')
+        .exclude('.cm-content')
 
     if (options) {
         axe.options(options)

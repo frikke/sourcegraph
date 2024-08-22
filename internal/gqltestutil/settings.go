@@ -1,6 +1,7 @@
 package gqltestutil
 
 import (
+	"encoding/json"
 	jsoniter "github.com/json-iterator/go"
 
 	"github.com/sourcegraph/sourcegraph/internal/jsonc"
@@ -152,11 +153,12 @@ query ViewerSettings {
 // SiteConfiguration returns current effective site configuration.
 //
 // This method requires the authenticated user to be a site admin.
-func (c *Client) SiteConfiguration() (*schema.SiteConfiguration, error) {
+func (c *Client) SiteConfiguration() (*schema.SiteConfiguration, int32, error) {
 	const query = `
 query Site {
 	site {
 		configuration {
+            id
 			effectiveContents
 		}
 	}
@@ -167,6 +169,7 @@ query Site {
 		Data struct {
 			Site struct {
 				Configuration struct {
+					ID                int32  `json:"id"`
 					EffectiveContents string `json:"effectiveContents"`
 				} `json:"configuration"`
 			} `json:"site"`
@@ -174,37 +177,78 @@ query Site {
 	}
 	err := c.GraphQL("", query, nil, &resp)
 	if err != nil {
-		return nil, errors.Wrap(err, "request GraphQL")
+		return nil, 0, errors.Wrap(err, "request GraphQL")
 	}
 
 	config := new(schema.SiteConfiguration)
 	err = jsonc.Unmarshal(resp.Data.Site.Configuration.EffectiveContents, config)
 	if err != nil {
-		return nil, errors.Wrap(err, "unmarshal configuration")
+		return nil, 0, errors.Wrap(err, "unmarshal configuration")
 	}
-	return config, nil
+
+	return config, resp.Data.Site.Configuration.ID, nil
 }
 
 // UpdateSiteConfiguration updates site configuration.
 //
 // This method requires the authenticated user to be a site admin.
-func (c *Client) UpdateSiteConfiguration(config *schema.SiteConfiguration) error {
+func (c *Client) UpdateSiteConfiguration(config *schema.SiteConfiguration, lastID int32) error {
 	input, err := jsoniter.Marshal(config)
 	if err != nil {
 		return errors.Wrap(err, "marshal configuration")
 	}
 
 	const query = `
-mutation UpdateSiteConfiguration($input: String!) {
-	updateSiteConfiguration(lastID: 0, input: $input)
+mutation UpdateSiteConfiguration($lastID: Int!, $input: String!) {
+	updateSiteConfiguration(lastID: $lastID, input: $input)
 }
 `
 	variables := map[string]any{
-		"input": string(input),
+		"lastID": lastID,
+		"input":  string(input),
 	}
 	err = c.GraphQL("", query, variables, nil)
 	if err != nil {
 		return errors.Wrap(err, "request GraphQL")
 	}
 	return nil
+}
+
+// ModifySiteConfiguration allows temporarily modifying the site configuration.
+// The returned closure can be used to reset the site configuration to its original state.
+//
+// The returned function may be nil if there was an error.
+func (c *Client) ModifySiteConfiguration(modify func(*schema.SiteConfiguration)) (reset func() error, _ error) {
+	oldConfig, lastID, err := c.SiteConfiguration()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get current site config")
+	}
+	newConfig, err := deepCopyViaJSON(*oldConfig)
+	if err != nil {
+		return nil, errors.Wrap(err, "deepcopy failed")
+	}
+	modify(&newConfig)
+	if err = c.UpdateSiteConfiguration(&newConfig, lastID); err != nil {
+		return nil, errors.Wrap(err, "update site config failed")
+	}
+	return func() error {
+		_, currentID, err := c.SiteConfiguration()
+		if err != nil {
+			return err
+		}
+		return c.UpdateSiteConfiguration(oldConfig, currentID)
+	}, nil
+}
+
+func deepCopyViaJSON[T any](t T) (T, error) {
+	bytes, err := json.Marshal(t)
+	var zero T
+	if err != nil {
+		return zero, errors.Wrap(err, "marshal old value")
+	}
+	var tcopy T
+	if err = json.Unmarshal(bytes, &tcopy); err != nil {
+		return zero, errors.Wrap(err, "unmarshal old value")
+	}
+	return tcopy, nil
 }

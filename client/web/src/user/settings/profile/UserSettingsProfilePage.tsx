@@ -1,15 +1,14 @@
 import React, { useEffect } from 'react'
 
+import { Timestamp } from '@sourcegraph/branded/src/components/Timestamp'
 import { gql } from '@sourcegraph/http-client'
-import { percentageDone } from '@sourcegraph/shared/src/components/activation/Activation'
-import { ActivationChecklist } from '@sourcegraph/shared/src/components/activation/ActivationChecklist'
-import { Container, PageHeader, Link, H3, Text } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Link, PageHeader, Text } from '@sourcegraph/wildcard'
 
 import { PageTitle } from '../../../components/PageTitle'
-import { Timestamp } from '../../../components/time/Timestamp'
-import { EditUserProfilePage as EditUserProfilePageFragment } from '../../../graphql-operations'
-import { eventLogger } from '../../../tracking/eventLogger'
-import { UserSettingsAreaRouteContext } from '../UserSettingsArea'
+import type { EditUserProfilePage as EditUserProfilePageFragment } from '../../../graphql-operations'
+import { ScimAlert } from '../ScimAlert'
 
 import { EditUserProfileForm } from './EditUserProfileForm'
 
@@ -23,18 +22,22 @@ export const EditUserProfilePageGQLFragment = gql`
         avatarURL
         viewerCanChangeUsername
         createdAt
+        scimControlled
     }
 `
 
-interface Props extends Pick<UserSettingsAreaRouteContext, 'activation'> {
+interface Props extends TelemetryV2Props {
     user: EditUserProfilePageFragment
 }
 
 export const UserSettingsProfilePage: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
     user,
-    ...props
+    telemetryRecorder,
 }) => {
-    useEffect(() => eventLogger.logViewEvent('UserProfile'), [])
+    useEffect(() => {
+        telemetryRecorder.recordEvent('settings.profile', 'view')
+        EVENT_LOGGER.logViewEvent('UserProfile')
+    }, [telemetryRecorder])
 
     return (
         <div>
@@ -56,22 +59,19 @@ export const UserSettingsProfilePage: React.FunctionComponent<React.PropsWithChi
                 }
                 className={styles.heading}
             />
-            {props.activation?.completed && percentageDone(props.activation.completed) < 100 && (
-                <Container className="mb-3">
-                    <H3>Almost there!</H3>
-                    <Text>Complete the steps below to finish onboarding to Sourcegraph.</Text>
-                    <ActivationChecklist steps={props.activation.steps} completed={props.activation.completed} />
-                </Container>
-            )}
+            {user.scimControlled && <ScimAlert />}
             {user && (
                 <EditUserProfileForm
                     user={user}
                     initialValue={user}
+                    telemetryRecorder={telemetryRecorder}
                     after={
                         window.context.sourcegraphDotComMode && (
                             <Text className="mt-4">
-                                <Link to="https://about.sourcegraph.com/contact">Contact support</Link> to delete your
-                                account.
+                                <Link to="mailto:support@sourcegraph.com" target="_blank" rel="noopener noreferrer">
+                                    Contact support
+                                </Link>{' '}
+                                to delete your account.
                             </Text>
                         )
                     }

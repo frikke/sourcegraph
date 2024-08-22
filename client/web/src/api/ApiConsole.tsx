@@ -1,16 +1,20 @@
 import * as React from 'react'
 
-import * as _graphiqlModule from 'graphiql' // type only
-import * as H from 'history'
+// type only
+import type * as _graphiqlModule from 'graphiql'
+import type * as H from 'history'
+import { useNavigate, useLocation, type NavigateFunction } from 'react-router-dom'
 import { from as fromPromise, Subject, Subscription } from 'rxjs'
 import { catchError, debounceTime } from 'rxjs/operators'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { asError, ErrorLike, isErrorLike, logger } from '@sourcegraph/common'
-import { LoadingSpinner, Button, Alert, Link } from '@sourcegraph/wildcard'
+import { asError, type ErrorLike, isErrorLike, logger } from '@sourcegraph/common'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { LoadingSpinner, ErrorAlert } from '@sourcegraph/wildcard'
 
 import { PageTitle } from '../components/PageTitle'
-import { eventLogger } from '../tracking/eventLogger'
+
+import { ApiConsoleToolbar } from './ApiConsoleToolbar'
 
 import styles from './ApiConsole.module.scss'
 
@@ -30,16 +34,18 @@ query {
 }
 `
 
-interface Props {
+interface Props extends TelemetryV2Props {}
+
+interface InnerProps extends TelemetryV2Props {
     location: H.Location
-    history: H.History
+    navigate: NavigateFunction
 }
 
 interface State {
     /** The dynamically imported graphiql module, undefined while loading. */
     graphiqlOrError?: typeof _graphiqlModule | ErrorLike
 
-    /** The URL parameters decoded from the location hash. */
+    /** The current URL parameters. Only used to update the shareable URL link */
     parameters: Parameters
 }
 
@@ -55,17 +61,26 @@ interface Parameters {
     operationName?: string
 }
 
+export const ApiConsole: React.FC<Props> = ({ telemetryRecorder }) => {
+    const navigate = useNavigate()
+    const location = useLocation()
+
+    return <ApiConsoleInner location={location} navigate={navigate} telemetryRecorder={telemetryRecorder} />
+}
+
 /**
  * Component to show the GraphQL API console.
  */
-export class ApiConsole extends React.PureComponent<Props, State> {
+class ApiConsoleInner extends React.PureComponent<InnerProps, State> {
     public state: State = { parameters: {} }
 
     private updates = new Subject<Parameters>()
     private subscriptions = new Subscription()
-    private graphiQLRef: _graphiqlModule.default | null = null
+    /** The initial URL parameters decoded from the location hash. */
+    /** This is used to programmatically set the initial editor state. */
+    private initialParameters: Parameters
 
-    constructor(props: Props) {
+    constructor(props: InnerProps) {
         super(props)
 
         // Parse the location.hash JSON to get URL parameters.
@@ -84,20 +99,20 @@ export class ApiConsole extends React.PureComponent<Props, State> {
                 // invalid JSON errors in the GraphiQL editor.
             }
         }
+        this.initialParameters = parameters
         this.state = { parameters }
     }
 
     public componentDidMount(): void {
-        eventLogger.logViewEvent('ApiConsole')
+        EVENT_LOGGER.logViewEvent('ApiConsole')
+        this.props.telemetryRecorder.recordEvent('api-console', 'view')
 
         // Update the browser URL bar when query/variables/operation name are
         // changed so that the page can be easily shared.
         this.subscriptions.add(
             this.updates
                 .pipe(debounceTime(500))
-                .subscribe(data =>
-                    this.props.history.replace({ ...location, hash: encodeURIComponent(JSON.stringify(data)) })
-                )
+                .subscribe(data => this.props.navigate({ ...location, hash: encodeURIComponent(JSON.stringify(data)) }))
         )
 
         this.subscriptions.add(
@@ -154,46 +169,18 @@ export class ApiConsole extends React.PureComponent<Props, State> {
         return (
             <>
                 <GraphiQL
-                    query={this.state.parameters.query}
-                    variables={this.state.parameters.variables}
-                    operationName={this.state.parameters.operationName}
+                    query={this.initialParameters.query}
+                    variables={this.initialParameters.variables}
+                    operationName={this.initialParameters.operationName}
                     onEditQuery={this.onEditQuery}
                     onEditVariables={this.onEditVariables}
                     onEditOperationName={this.onEditOperationName}
                     fetcher={this.fetcher}
                     defaultQuery={defaultQuery}
                     editorTheme="sourcegraph"
-                    ref={this.setGraphiQLRef}
                 >
                     <GraphiQL.Logo>GraphQL API console</GraphiQL.Logo>
-                    <GraphiQL.Toolbar>
-                        <div className="d-flex align-items-center">
-                            <Button
-                                variant="secondary"
-                                title="Prettify Query (Shift-Ctrl-P)"
-                                onClick={this.handlePrettifyQuery}
-                                className={styles.toolbarButton}
-                            >
-                                Prettify
-                            </Button>
-                            <Button
-                                variant="secondary"
-                                title="Show History"
-                                onClick={this.handleToggleHistory}
-                                className={styles.toolbarButton}
-                            >
-                                History
-                            </Button>
-                            <Button to="/help/api/graphql" variant="link" as={Link}>
-                                Docs
-                            </Button>
-                            <Alert variant="warning" className="py-1 mb-0 ml-2 text-nowrap">
-                                <small>
-                                    The API console uses <strong>real production data.</strong>
-                                </small>
-                            </Alert>
-                        </div>
-                    </GraphiQL.Toolbar>
+                    <ApiConsoleToolbar />
                 </GraphiQL>
             </>
         )
@@ -202,7 +189,7 @@ export class ApiConsole extends React.PureComponent<Props, State> {
     // Update state.parameters when query/variables/operation name are changed
     // so that we can update the browser URL.
 
-    private onEditQuery = (newQuery: string): void =>
+    private onEditQuery = (newQuery?: string): void =>
         this.updateStateParameters(parameters => ({ ...parameters, query: newQuery }))
 
     private onEditVariables = (newVariables: string): void =>
@@ -218,34 +205,16 @@ export class ApiConsole extends React.PureComponent<Props, State> {
         )
     }
 
-    // Forward GraphiQL prettify/history buttons directly to their original
-    // implementation. We have to do this because it is impossible to inject
-    // children into the GraphiQL toolbar unless you completely specify your
-    // own.
-
-    private setGraphiQLRef = (reference: _graphiqlModule.default | null): void => {
-        this.graphiQLRef = reference
-    }
-    private handlePrettifyQuery = (): void => {
-        if (!this.graphiQLRef) {
-            return
-        }
-        this.graphiQLRef.handlePrettifyQuery()
-    }
-    private handleToggleHistory = (): void => {
-        if (!this.graphiQLRef) {
-            return
-        }
-        this.graphiQLRef.handleToggleHistory()
-    }
-
-    private fetcher = async (graphQLParameters: _graphiqlModule.GraphQLParams): Promise<string> => {
+    private fetcher: _graphiqlModule.Fetcher = async graphQLParameters => {
         const headers = new Headers({
             'x-requested-with': 'Sourcegraph GraphQL Explorer',
         })
         const searchParameters = new URLSearchParams(this.props.location.search)
         if (searchParameters.get('trace') === '1') {
             headers.set('x-sourcegraph-should-trace', 'true')
+        }
+        for (const feature of searchParameters.getAll('feat')) {
+            headers.append('x-sourcegraph-override-feature', feature)
         }
         const response = await fetch('/.api/graphql', {
             method: 'POST',

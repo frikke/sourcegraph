@@ -53,8 +53,7 @@ func NewRecorderOpt(rec *recorder.Recorder) httpcli.Opt {
 	}
 }
 
-// NewGitHubRecorderFactory returns a *http.Factory that rewrites HTTP requests
-// to github-proxy to github.com and records all HTTP requests in
+// NewGitHubRecorderFactory returns a *http.Factory that records all HTTP requests in
 // "testdata/vcr/{name}" with {name} being the name that's passed in.
 //
 // If update is true, the HTTP requests are recorded, otherwise they're replayed
@@ -70,9 +69,7 @@ func NewGitHubRecorderFactory(t testing.TB, update bool, name string) (*httpcli.
 		t.Fatal(err)
 	}
 
-	mw := httpcli.NewMiddleware(httpcli.GitHubProxyRedirectMiddleware)
-
-	hc := httpcli.NewFactory(mw, httpcli.CachedTransportOpt, NewRecorderOpt(rec))
+	hc := httpcli.NewFactory(httpcli.NewMiddleware(), httpcli.CachedTransportOpt, NewRecorderOpt(rec))
 
 	return hc, func() {
 		if err := rec.Stop(); err != nil {
@@ -110,38 +107,10 @@ func NewRecorderFactory(t testing.TB, update bool, name string) (*httpcli.Factor
 // riskyHeaderFilter deletes anything that looks risky in request and response
 // headers.
 func riskyHeaderFilter(i *cassette.Interaction) error {
-	riskyHeaderKeys := []string{
-		"auth", "cookie", "token",
-	}
-	riskyHeaderValues := []string{
-		"bearer", "ghp_", "glpat-",
-	}
-
-	isRiskyKey := func(key string) bool {
-		lowerKey := strings.ToLower(key)
-		for _, riskyKey := range riskyHeaderKeys {
-			if strings.Contains(lowerKey, riskyKey) {
-				return true
-			}
-		}
-		return false
-	}
-	hasRiskyValue := func(values []string) bool {
-		for _, value := range values {
-			lowerValue := strings.ToLower(value)
-			for _, riskyValue := range riskyHeaderValues {
-				if strings.Contains(lowerValue, riskyValue) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-
 	for _, headers := range []http.Header{i.Request.Headers, i.Response.Headers} {
-		for k, values := range headers {
-			if isRiskyKey(k) || hasRiskyValue(values) {
-				delete(headers, k)
+		for name, values := range headers {
+			if httpcli.IsRiskyHeader(name, values) {
+				delete(headers, name)
 			}
 		}
 	}

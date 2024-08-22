@@ -1,18 +1,20 @@
 package graphqlbackend
 
 import (
+	"context"
 	"testing"
 
-	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/actor"
+	"github.com/sourcegraph/sourcegraph/internal/database/dbmocks"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/internal/usagestats"
 )
 
 func TestUser_UsageStatistics(t *testing.T) {
-	users := database.NewMockUserStore()
+	users := dbmocks.NewMockUserStore()
 	users.GetByIDFunc.SetDefaultReturn(&types.User{ID: 1, Username: "alice"}, nil)
 
-	db := database.NewMockDB()
+	db := dbmocks.NewMockDB()
 	db.UsersFunc.SetDefaultReturn(users)
 
 	usagestats.MockGetByUserID = func(userID int32) (*types.UserUsageStatistics, error) {
@@ -47,6 +49,7 @@ func TestUser_UsageStatistics(t *testing.T) {
 					}
 				}
 			`,
+			Context: actor.WithActor(context.Background(), &actor.Actor{UID: 1}),
 		},
 	})
 }

@@ -1,13 +1,13 @@
-import { MutationTuple } from '@apollo/client'
-import { Observable } from 'rxjs'
+import type { MutationTuple } from '@apollo/client'
+import type { Observable } from 'rxjs'
 import { map } from 'rxjs/operators'
 
-import { asError, ErrorLike } from '@sourcegraph/common'
+import { asError, type ErrorLike } from '@sourcegraph/common'
 import { dataOrThrowErrors, gql, useMutation, useQuery } from '@sourcegraph/http-client'
 
 import { fileDiffFields } from '../../../../backend/diff'
 import { requestGraphQL } from '../../../../backend/graphql'
-import {
+import type {
     BatchSpecWorkspaceByIDResult,
     BatchSpecWorkspaceByIDVariables,
     BatchSpecWorkspacesConnectionFields,
@@ -24,6 +24,18 @@ import {
     RetryWorkspaceExecutionResult,
     RetryWorkspaceExecutionVariables,
 } from '../../../../graphql-operations'
+
+export const batchSpecWorkspaceStepOutputLinesFieldsFragment = gql`
+    fragment BatchSpecWorkspaceStepOutputLines on BatchSpecWorkspaceStepOutputLineConnection {
+        __typename
+        nodes
+        totalCount
+        pageInfo {
+            hasNextPage
+            endCursor
+        }
+    }
+`
 
 const batchSpecWorkspaceFieldsFragment = gql`
     fragment BatchSpecWorkspaceFields on BatchSpecWorkspace {
@@ -79,6 +91,7 @@ const batchSpecWorkspaceFieldsFragment = gql`
             __typename
             id
             queueName
+            queueNames
             hostname
             active
             os
@@ -109,7 +122,6 @@ const batchSpecWorkspaceFieldsFragment = gql`
         ifCondition
         cachedResultFound
         skipped
-        outputLines
         startedAt
         finishedAt
         exitCode
@@ -234,6 +246,23 @@ export const BATCH_SPEC_WORKSPACE_BY_ID = gql`
         }
     }
     ${batchSpecWorkspaceFieldsFragment}
+`
+
+export const BATCH_SPEC_WORKSPACE_STEP = gql`
+    query BatchSpecWorkspaceStep($workspaceID: ID!, $stepIndex: Int!, $first: Int!, $after: String) {
+        node(id: $workspaceID) {
+            __typename
+            ... on VisibleBatchSpecWorkspace {
+                step(index: $stepIndex) {
+                    outputLines(first: $first, after: $after) {
+                        ...BatchSpecWorkspaceStepOutputLines
+                    }
+                }
+            }
+        }
+    }
+
+    ${batchSpecWorkspaceStepOutputLinesFieldsFragment}
 `
 
 interface BatchSpecWorkspaceHookResult {

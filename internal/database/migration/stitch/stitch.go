@@ -18,13 +18,12 @@ import (
 // particular release.
 //
 // Stitch is an undoing of squashing. We construct the migration graph by layering the definitions of
-// the migrations as they're defined in each of the given git revisions. Migration definitions with the
+// the migrations as they're defined in each of the given revisions. Migration definitions with the
 // same identifier will be "merged" by some custom rules/edge-case logic.
 //
-// NOTE: This should only be used at development or build time - the root parameter should point to a
-// valid git clone root directory. Resulting errors are apparent.
-func StitchDefinitions(schemaName, root string, revs []string) (shared.StitchedMigration, error) {
-	definitionMap, boundsByRev, err := overlayDefinitions(schemaName, root, revs)
+// NOTE: This should only be used at development or build time.
+func StitchDefinitions(ma MigrationsReader, schemaName string, revs []string) (shared.StitchedMigration, error) {
+	definitionMap, boundsByRev, err := overlayDefinitions(ma, schemaName, revs)
 	if err != nil {
 		return shared.StitchedMigration{}, err
 	}
@@ -51,20 +50,20 @@ var schemaBounds = map[string]oobmigration.Version{
 	"codeinsights": oobmigration.NewVersion(3, 24),
 }
 
-// overlayDefinitions combines the definitions defined at all of the given git revisions for the given schema,
+// overlayDefinitions combines the definitions defined at all of the given migrations at given revision for the given schema,
 // then spot-rewrites portions of definitions to ensure they can be reordered to form a valid migration graph
 // (as it would be defined today). The root and leaf migration identifiers for each of the given revs are also
 // returned.
 //
-// An error is returned if the git revision's contents cannot be rewritten into a format readable by the
+// An error is returned if the revision's contents cannot be rewritten into a format readable by the
 // current migration definition utilities. An error is also returned if migrations with the same identifier
 // differ in a significant way (e.g., definitions, parents) and there is not an explicit exception to deal
 // with it in this code.
-func overlayDefinitions(schemaName, root string, revs []string) (map[int]definition.Definition, map[string]shared.MigrationBounds, error) {
+func overlayDefinitions(ma MigrationsReader, schemaName string, revs []string) (map[int]definition.Definition, map[string]shared.MigrationBounds, error) {
 	definitionMap := map[int]definition.Definition{}
 	boundsByRev := make(map[string]shared.MigrationBounds, len(revs))
 	for _, rev := range revs {
-		bounds, err := overlayDefinition(schemaName, root, rev, definitionMap)
+		bounds, err := overlayDefinition(ma, schemaName, rev, definitionMap)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -78,18 +77,18 @@ func overlayDefinitions(schemaName, root string, revs []string) (map[int]definit
 
 const squashedMigrationPrefix = "squashed migrations"
 
-// overlayDefinition reads migrations from a locally available git revision for the given schema, then
+// overlayDefinition reads migrations from a locally available migration archives for each revision for the given schema, then
 // extends the given map of definitions with migrations that have not yet been inserted.
 //
 // This function returns the identifiers of the migration root and leaves at this revision, which will be
 // necessary to distinguish where on the graph out-of-band migration interrupt points can "rest" to wait
 // for data migrations to complete.
 //
-// An error is returned if the git revision's contents cannot be rewritten into a format readable by the
+// An error is returned if the revision's contents cannot be rewritten into a format readable by the
 // current migration definition utilities. An error is also returned if migrations with the same identifier
 // differ in a significant way (e.g., definitions, parents) and there is not an explicit exception to deal
 // with it in this code.
-func overlayDefinition(schemaName, root, rev string, definitionMap map[int]definition.Definition) (shared.MigrationBounds, error) {
+func overlayDefinition(ma MigrationsReader, schemaName, rev string, definitionMap map[int]definition.Definition) (shared.MigrationBounds, error) {
 	revVersion, ok := oobmigration.NewVersionFromString(rev)
 	if !ok {
 		return shared.MigrationBounds{}, errors.Newf("illegal rev %q", rev)
@@ -102,7 +101,7 @@ func overlayDefinition(schemaName, root, rev string, definitionMap map[int]defin
 		return shared.MigrationBounds{PreCreation: true}, nil
 	}
 
-	fs, err := ReadMigrations(schemaName, root, rev)
+	fs, err := ReadMigrations(ma, schemaName, rev)
 	if err != nil {
 		return shared.MigrationBounds{}, err
 	}
@@ -152,7 +151,7 @@ func overlayDefinition(schemaName, root, rev string, definitionMap map[int]defin
 		}
 
 		return shared.MigrationBounds{}, errors.Newf(
-			"migration %d unexpectedly edited in release %s:\nup.sql:\n%s\n\ndown.sql:\n%s\n",
+			"a migration (%d) from a previous version was unexpectedly edited in this release - if this change was intentional add this migration to the allowedOverrideMap  %s:\nup.sql:\n%s\n\ndown.sql:\n%s\n",
 			newDefinition.ID,
 			rev,
 			cmp.Diff(
@@ -207,15 +206,32 @@ var allowedOverrideMap = map[int]struct{}{
 	1528395786: {}, // https://github.com/sourcegraph/sourcegraph/pull/18667 - drive-by edit of empty migration
 	1528395701: {}, // https://github.com/sourcegraph/sourcegraph/pull/16203 - rewritten to avoid * in select
 	1528395730: {}, // https://github.com/sourcegraph/sourcegraph/pull/15972 - drops/re-created view to avoid dependencies
+	1663871069: {}, // https://github.com/sourcegraph/sourcegraph/pull/43390 - fixes malformed published value
+	1648628900: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1652707934: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1655157509: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1667220626: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1670934184: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1674455760: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1675962678: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1677003167: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1676420496: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1677944752: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1678214530: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1678456448: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
 
 	// codeintel
 	1000000020: {}, // https://github.com/sourcegraph/sourcegraph/pull/28772 - rewritten to be idempotent
+	1665531314: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1670365552: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
 
 	// codeiensights
 	1000000002: {}, // https://github.com/sourcegraph/sourcegraph/pull/28713 - fixed SQL error
 	1000000001: {}, // https://github.com/sourcegraph/sourcegraph/pull/30781 - removed timescsaledb
 	1000000004: {}, // https://github.com/sourcegraph/sourcegraph/pull/30781 - removed timescsaledb
 	1000000010: {}, // https://github.com/sourcegraph/sourcegraph/pull/30781 - removed timescsaledb
+	1659572248: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
+	1672921606: {}, // https://github.com/sourcegraph/sourcegraph/pull/52098
 }
 
 func overrideAllowed(id int) bool {

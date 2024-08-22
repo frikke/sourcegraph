@@ -7,12 +7,14 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/inconshreveable/log15"
-	"github.com/neelance/parallel"
+	"github.com/inconshreveable/log15" //nolint:logging // TODO move all logging to sourcegraph/log
 
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
+
+type HandlerWithErrorReturnFunc func(http.ResponseWriter, *http.Request) error
+type HandlerWithErrorMiddleware func(HandlerWithErrorReturnFunc) http.Handler
 
 // HandlerWithErrorReturn wraps a http.HandlerFunc-like func that also
 // returns an error.  If the error is nil, this wrapper is a no-op. If
@@ -24,7 +26,7 @@ import (
 // (for example, call out into an external code), then it must use recover
 // to catch potential panics. If Error panics, the panic will propagate upstream.
 type HandlerWithErrorReturn struct {
-	Handler func(http.ResponseWriter, *http.Request) error       // the underlying handler
+	Handler HandlerWithErrorReturnFunc                           // the underlying handler
 	Error   func(http.ResponseWriter, *http.Request, int, error) // called to send an error response (e.g., an error page), it must not panic
 
 	PretendPanic bool
@@ -34,6 +36,14 @@ func (h HandlerWithErrorReturn) ServeHTTP(w http.ResponseWriter, r *http.Request
 	// Handle when h.Handler panics.
 	defer func() {
 		if e := recover(); e != nil {
+			// ErrAbortHandler is a sentinal error which is used to stop an
+			// http handler but not report the error. In practice we have only
+			// seen this used by httputil.ReverseProxy when the server goes
+			// down.
+			if e == http.ErrAbortHandler {
+				return
+			}
+
 			log15.Error("panic in HandlerWithErrorReturn.Handler", "error", e)
 			stack := make([]byte, 1024*1024)
 			n := runtime.Stack(stack, false)
@@ -43,15 +53,13 @@ func (h HandlerWithErrorReturn) ServeHTTP(w http.ResponseWriter, r *http.Request
 
 			err := errors.Errorf("panic: %v\n\nstack trace:\n%s", e, stack)
 			status := http.StatusInternalServerError
-			reportError(r, status, err, true)
 			h.Error(w, r, status, err) // No need to handle a possible panic in h.Error because it's required not to panic.
 		}
 	}()
 
-	err := collapseMultipleErrors(h.Handler(w, r))
+	err := h.Handler(w, r)
 	if err != nil {
 		status := httpErrCode(r, err)
-		reportError(r, status, err, false)
 		h.Error(w, r, status, err)
 	}
 }
@@ -68,17 +76,4 @@ func httpErrCode(r *http.Request, err error) int {
 		return 499
 	}
 	return errcode.HTTP(err)
-}
-
-// collapseMultipleErrors returns the first err if err is a
-// parallel.Errors list of length 1. Otherwise it returns err
-// unchanged. This lets us return the proper HTTP status code for
-// single errors.
-func collapseMultipleErrors(err error) error {
-	var e parallel.Errors
-	if errors.As(err, &e) && len(e) == 1 {
-		return e[0]
-	}
-
-	return err
 }

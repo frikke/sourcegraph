@@ -1,15 +1,16 @@
-import React, { useMemo } from 'react'
+import React, { useEffect } from 'react'
 
 import classNames from 'classnames'
 
 import { renderMarkdown } from '@sourcegraph/common'
-import { Markdown } from '@sourcegraph/shared/src/components/Markdown'
-import { Notice, Settings } from '@sourcegraph/shared/src/schema/settings.schema'
-import { isSettingsValid, SettingsCascadeProps } from '@sourcegraph/shared/src/settings/settings'
-import { Alert, AlertProps } from '@sourcegraph/wildcard'
+import type { Notice } from '@sourcegraph/shared/src/schema/settings.schema'
+import { useSettings } from '@sourcegraph/shared/src/settings/settings'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { Alert, Markdown, type AlertProps } from '@sourcegraph/wildcard'
 
+import type { AuthenticatedUser } from '../auth'
+import { currentUserRequiresEmailVerificationForCody } from '../cody/util'
 import { DismissibleAlert } from '../components/DismissibleAlert'
-import { useFeatureFlag } from '../featureFlags/useFeatureFlag'
 
 import styles from './Notices.module.scss'
 
@@ -29,10 +30,11 @@ const NoticeAlert: React.FunctionComponent<React.PropsWithChildren<NoticeAlertPr
 }) => {
     const content = <Markdown dangerousInnerHTML={renderMarkdown(notice.message)} />
 
-    const sharedProps = {
+    const sharedProps: AlertProps & { 'data-testid': typeof testId } = {
         'data-testid': testId,
-        variant: getAlertVariant(notice.location),
+        variant: notice.variant || getAlertVariant(notice.location),
         className: classNames(notice.location !== 'top' && 'bg transparent border p-2', className),
+        styleOverrides: notice.styleOverrides,
     }
 
     return notice.dismissible ? (
@@ -44,7 +46,7 @@ const NoticeAlert: React.FunctionComponent<React.PropsWithChildren<NoticeAlertPr
     )
 }
 
-interface Props extends SettingsCascadeProps {
+interface Props extends TelemetryV2Props {
     className?: string
 
     /** Apply this class name to each notice (alongside .alert). */
@@ -60,22 +62,22 @@ interface Props extends SettingsCascadeProps {
 export const Notices: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
     className = '',
     alertClassName,
-    settingsCascade,
     location,
+    telemetryRecorder,
 }) => {
-    if (
-        !isSettingsValid<Settings>(settingsCascade) ||
-        !settingsCascade.final.notices ||
-        !Array.isArray(settingsCascade.final.notices)
-    ) {
+    const settings = useSettings()
+
+    if (!settings?.notices || !Array.isArray(settings?.notices)) {
         return null
     }
 
-    const notices = settingsCascade.final.notices.filter(notice => notice.location === location)
+    const notices = settings.notices.filter(notice => notice.location === location)
+
     if (notices.length === 0) {
         return null
     }
 
+    telemetryRecorder.recordEvent('alert.notices', 'view')
     return (
         <div className={classNames(styles.notices, className)}>
             {notices.map((notice, index) => (
@@ -85,12 +87,10 @@ export const Notices: React.FunctionComponent<React.PropsWithChildren<Props>> = 
     )
 }
 
-interface VerifyEmailNoticesProps {
+interface VerifyEmailNoticesProps extends TelemetryV2Props {
     className?: string
-    /** Apply this class name to each notice (alongside .alert). */
     alertClassName?: string
-    emails: string[]
-    settingsURL: string
+    authenticatedUser: AuthenticatedUser | null
 }
 
 /**
@@ -99,35 +99,28 @@ interface VerifyEmailNoticesProps {
 export const VerifyEmailNotices: React.FunctionComponent<VerifyEmailNoticesProps> = ({
     className,
     alertClassName,
-    emails,
-    settingsURL,
+    authenticatedUser,
+    telemetryRecorder,
 }) => {
-    const [isEmailVerificationAlertEnabled, status] = useFeatureFlag('ab-email-verification-alert')
-
-    const notices: Notice[] = useMemo(() => {
-        if (status !== 'loaded' || !isEmailVerificationAlertEnabled) {
-            return []
+    useEffect(() => {
+        if (currentUserRequiresEmailVerificationForCody() && authenticatedUser) {
+            telemetryRecorder.recordEvent('alert.verifyEmail', 'view')
         }
-        return emails.map(
-            (email): Notice => ({
-                message: `Please, <a href="${settingsURL}/emails">verify your email</a> <strong>${email
-                    .split('@')
-                    .join('\\@')}</strong>`,
-                location: 'top',
-                dismissible: false,
-            })
+    }, [telemetryRecorder, authenticatedUser])
+    if (currentUserRequiresEmailVerificationForCody() && authenticatedUser) {
+        return (
+            <div className={classNames(styles.notices, className)}>
+                <NoticeAlert
+                    className={alertClassName}
+                    notice={{
+                        location: 'top',
+                        message: `**NEW**: Cody, our new AI Assistant is available to use for free, simply verify your email address. Didn't get an email? [Resend verification email](${authenticatedUser?.settingsURL}/emails)`,
+                        dismissible: true,
+                    }}
+                />
+            </div>
         )
-    }, [emails, isEmailVerificationAlertEnabled, settingsURL, status])
-
-    if (notices.length === 0) {
-        return null
     }
 
-    return (
-        <div className={classNames(styles.notices, className)}>
-            {notices.map(notice => (
-                <NoticeAlert key={notice.message} testId="notice-alert" className={alertClassName} notice={notice} />
-            ))}
-        </div>
-    )
+    return null
 }

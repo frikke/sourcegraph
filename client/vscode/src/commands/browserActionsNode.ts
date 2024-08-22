@@ -1,7 +1,10 @@
 import vscode, { env } from 'vscode'
 
+import { endpointSetting } from '../settings/endpointSetting'
+
 import { getSourcegraphFileUrl, repoInfo } from './git-helpers'
 import { generateSourcegraphBlobLink } from './initialize'
+
 /**
  * Open active file in the browser on the configured Sourcegraph instance.
  */
@@ -11,8 +14,7 @@ export async function browserActions(action: string, logRedirectEvent: (uri: str
         throw new Error('No active editor')
     }
     const uri = editor.document.uri
-    const instanceUrl =
-        vscode.workspace.getConfiguration('sourcegraph').get<string>('url') || 'https://sourcegraph.com/'
+    const instanceUrl = endpointSetting()
     let sourcegraphUrl = ''
     // check if the current file is a remote file or not
     if (uri.scheme === 'sourcegraph') {
@@ -52,13 +54,16 @@ export async function browserActions(action: string, logRedirectEvent: (uri: str
     logRedirectEvent(sourcegraphUrl)
     // Open in browser or Copy file link
     switch (action) {
-        case 'open':
+        case 'open': {
             await vscode.env.openExternal(vscode.Uri.parse(decodedUri))
             break
-        case 'copy':
+        }
+        case 'copy': {
             await env.clipboard.writeText(decodedUri).then(() => vscode.window.showInformationMessage('Copied!'))
             break
-        default:
+        }
+        default: {
             throw new Error(`Failed to ${action} file link: invalid URL`)
+        }
     }
 }

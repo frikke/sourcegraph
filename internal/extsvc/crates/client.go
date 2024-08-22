@@ -6,30 +6,31 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/sourcegraph/log"
+
 	"github.com/sourcegraph/sourcegraph/internal/httpcli"
 	"github.com/sourcegraph/sourcegraph/internal/ratelimit"
 )
 
 type Client struct {
-	cli httpcli.Doer
+	uncachedClient httpcli.Doer
 
 	// Self-imposed rate-limiter.
 	limiter *ratelimit.InstrumentedLimiter
 }
 
-type RustFile struct {
-	Name string
-	URL  string
-}
-
-func NewClient(urn string, cli httpcli.Doer) *Client {
-	return &Client{
-		cli:     cli,
-		limiter: ratelimit.DefaultRegistry.Get(urn),
+func NewClient(urn string, httpfactory *httpcli.Factory) (*Client, error) {
+	uncached, err := httpfactory.Doer(httpcli.NewCachedTransportOpt(httpcli.NoopCache{}, false))
+	if err != nil {
+		return nil, err
 	}
+	return &Client{
+		uncachedClient: uncached,
+		limiter:        ratelimit.NewInstrumentedLimiter(urn, ratelimit.NewGlobalRateLimiter(log.Scoped("RustCratesClient"), urn)),
+	}, nil
 }
 
-func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
+func (c *Client) Get(ctx context.Context, url string) (io.ReadCloser, error) {
 	if err := c.limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
@@ -40,7 +41,7 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 	}
 	req.Header.Add("User-Agent", "sourcegraph-crates-syncer (sourcegraph.com)")
 
-	b, err := c.do(req)
+	b, err := c.do(c.uncachedClient, req)
 	if err != nil {
 		return nil, err
 	}
@@ -61,22 +62,21 @@ func (e *Error) NotFound() bool {
 	return e.code == http.StatusNotFound
 }
 
-func (c *Client) do(req *http.Request) ([]byte, error) {
-	resp, err := c.cli.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-
-	bs, err := io.ReadAll(resp.Body)
+func (c *Client) do(doer httpcli.Doer, req *http.Request) (io.ReadCloser, error) {
+	resp, err := doer.Do(req)
 	if err != nil {
 		return nil, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+
+		bs, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, &Error{path: req.URL.Path, code: resp.StatusCode, message: fmt.Sprintf("failed to read non-200 body: %v", err)}
+		}
 		return nil, &Error{path: req.URL.Path, code: resp.StatusCode, message: string(bs)}
 	}
 
-	return bs, nil
+	return resp.Body, nil
 }

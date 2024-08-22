@@ -1,15 +1,14 @@
-import { DecoratorFn, Meta, Story } from '@storybook/react'
+import type { Decorator, Meta, StoryFn } from '@storybook/react'
 import { MATCH_ANY_PARAMETERS, WildcardMockLink } from 'wildcard-mock-link'
 
 import { getDocumentNode } from '@sourcegraph/http-client'
-import {
-    EMPTY_SETTINGS_CASCADE,
-    SettingsOrgSubject,
-    SettingsUserSubject,
-} from '@sourcegraph/shared/src/settings/settings'
+import type { OrgSettingFields, UserSettingFields } from '@sourcegraph/shared/src/graphql-operations'
+import { EMPTY_SETTINGS_CASCADE } from '@sourcegraph/shared/src/settings/settings'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 import { MockedTestProvider } from '@sourcegraph/shared/src/testing/apollo'
 
-import { WebStory } from '../../../../components/WebStory'
+import type { AuthenticatedUser } from '../../../../auth'
+import { WebStory, type WebStoryChildrenProps } from '../../../../components/WebStory'
 import { GET_BATCH_CHANGE_TO_EDIT } from '../../create/backend'
 import {
     ACTIVE_EXECUTORS_MOCK,
@@ -24,9 +23,11 @@ import { insertNameIntoLibraryItem } from '../yaml-util'
 import { EditBatchSpecPage } from './EditBatchSpecPage'
 import goImportsSample from './library/go-imports.batch.yaml'
 
-const decorator: DecoratorFn = story => (
+const decorator: Decorator = story => (
     <div className="p-3" style={{ height: '95vh', width: '100%' }}>
-        {story()}
+        <WebStory initialEntries={['/batch-changes/hello-world/edit']} path="/batch-changes/:batchChangeName/edit">
+            {story}
+        </WebStory>
     </div>
 )
 
@@ -37,20 +38,24 @@ const config: Meta = {
 
 export default config
 
-const FIXTURE_ORG: SettingsOrgSubject = {
+const FIXTURE_ORG: OrgSettingFields = {
     __typename: 'Org',
     name: 'sourcegraph',
     displayName: 'Sourcegraph',
     id: 'a',
     viewerCanAdminister: true,
+    settingsURL: null,
+    latestSettings: null,
 }
 
-const FIXTURE_USER: SettingsUserSubject = {
+const FIXTURE_USER: UserSettingFields = {
     __typename: 'User',
     username: 'alice',
     displayName: 'alice',
     id: 'b',
     viewerCanAdminister: true,
+    settingsURL: null,
+    latestSettings: null,
 }
 
 const SETTINGS_CASCADE = {
@@ -70,10 +75,11 @@ const FIRST_TIME_MOCKS = new WildcardMockLink([
         result: {
             data: {
                 batchChange: mockBatchChange({
+                    name: 'hello-world',
                     batchSpecs: {
                         nodes: [
                             mockBatchSpec({
-                                originalInput: insertNameIntoLibraryItem(goImportsSample, 'my-batch-change'),
+                                originalInput: insertNameIntoLibraryItem(goImportsSample, 'hello-world'),
                             }),
                         ],
                     },
@@ -86,21 +92,32 @@ const FIRST_TIME_MOCKS = new WildcardMockLink([
     ...UNSTARTED_CONNECTION_MOCKS,
 ])
 
-export const EditFirstTime: Story = () => (
-    <WebStory>
-        {props => (
-            <MockedTestProvider link={FIRST_TIME_MOCKS}>
-                <EditBatchSpecPage
-                    {...props}
-                    batchChange={{
-                        name: 'my-batch-change',
-                        namespace: 'test1234',
-                    }}
-                    settingsCascade={SETTINGS_CASCADE}
-                />
-            </MockedTestProvider>
-        )}
-    </WebStory>
+const MOCK_ORGANIZATION = {
+    __typename: 'Org',
+    name: 'acme-corp',
+    id: 'acme-corp-id',
+}
+
+const mockAuthenticatedUser = {
+    __typename: 'User',
+    username: 'alice',
+    displayName: 'alice',
+    id: 'b',
+    organizations: {
+        nodes: [MOCK_ORGANIZATION],
+    },
+} as AuthenticatedUser
+
+export const EditFirstTime: StoryFn<WebStoryChildrenProps> = props => (
+    <MockedTestProvider link={FIRST_TIME_MOCKS}>
+        <EditBatchSpecPage
+            {...props}
+            namespace={{ __typename: 'User', url: '', id: 'test1234' }}
+            settingsCascade={SETTINGS_CASCADE}
+            authenticatedUser={mockAuthenticatedUser}
+            telemetryRecorder={noOpTelemetryRecorder}
+        />
+    </MockedTestProvider>
 )
 
 EditFirstTime.storyName = 'editing for the first time'
@@ -114,11 +131,12 @@ const MULTIPLE_SPEC_MOCKS = new WildcardMockLink([
         result: {
             data: {
                 batchChange: mockBatchChange({
+                    name: 'hello-world',
                     batchSpecs: {
                         nodes: [
                             mockBatchSpec({
                                 id: 'new',
-                                originalInput: insertNameIntoLibraryItem(goImportsSample, 'my-batch-change'),
+                                originalInput: insertNameIntoLibraryItem(goImportsSample, 'hello-world'),
                             }),
                             mockBatchSpec({ id: 'old1' }),
                             mockBatchSpec({ id: 'old2' }),
@@ -133,21 +151,16 @@ const MULTIPLE_SPEC_MOCKS = new WildcardMockLink([
     ...UNSTARTED_WITH_CACHE_CONNECTION_MOCKS,
 ])
 
-export const EditLatestBatchSpec: Story = () => (
-    <WebStory>
-        {props => (
-            <MockedTestProvider link={MULTIPLE_SPEC_MOCKS}>
-                <EditBatchSpecPage
-                    {...props}
-                    batchChange={{
-                        name: 'my-batch-change',
-                        namespace: 'test1234',
-                    }}
-                    settingsCascade={SETTINGS_CASCADE}
-                />
-            </MockedTestProvider>
-        )}
-    </WebStory>
+export const EditLatestBatchSpec: StoryFn<WebStoryChildrenProps> = props => (
+    <MockedTestProvider link={MULTIPLE_SPEC_MOCKS}>
+        <EditBatchSpecPage
+            {...props}
+            namespace={{ __typename: 'User', url: '', id: 'test1234' }}
+            settingsCascade={SETTINGS_CASCADE}
+            authenticatedUser={mockAuthenticatedUser}
+            telemetryRecorder={noOpTelemetryRecorder}
+        />
+    </MockedTestProvider>
 )
 
 EditLatestBatchSpec.storyName = 'editing the latest batch spec'
@@ -165,21 +178,16 @@ const NOT_FOUND_MOCKS = new WildcardMockLink([
     ...UNSTARTED_CONNECTION_MOCKS,
 ])
 
-export const BatchChangeNotFound: Story = () => (
-    <WebStory>
-        {props => (
-            <MockedTestProvider link={NOT_FOUND_MOCKS}>
-                <EditBatchSpecPage
-                    {...props}
-                    batchChange={{
-                        name: 'doesnt-exist',
-                        namespace: 'test1234',
-                    }}
-                    settingsCascade={SETTINGS_CASCADE}
-                />
-            </MockedTestProvider>
-        )}
-    </WebStory>
+export const BatchChangeNotFound: StoryFn<WebStoryChildrenProps> = props => (
+    <MockedTestProvider link={NOT_FOUND_MOCKS}>
+        <EditBatchSpecPage
+            {...props}
+            namespace={{ __typename: 'User', url: '', id: 'test1234' }}
+            settingsCascade={SETTINGS_CASCADE}
+            authenticatedUser={mockAuthenticatedUser}
+            telemetryRecorder={noOpTelemetryRecorder}
+        />
+    </MockedTestProvider>
 )
 
 const INVALID_SPEC_MOCKS = new WildcardMockLink([
@@ -197,21 +205,16 @@ const INVALID_SPEC_MOCKS = new WildcardMockLink([
 
 BatchChangeNotFound.storyName = 'batch change not found'
 
-export const InvalidBatchSpec: Story = () => (
-    <WebStory>
-        {props => (
-            <MockedTestProvider link={INVALID_SPEC_MOCKS}>
-                <EditBatchSpecPage
-                    {...props}
-                    batchChange={{
-                        name: 'hello-world',
-                        namespace: 'test1234',
-                    }}
-                    settingsCascade={SETTINGS_CASCADE}
-                />
-            </MockedTestProvider>
-        )}
-    </WebStory>
+export const InvalidBatchSpec: StoryFn<WebStoryChildrenProps> = props => (
+    <MockedTestProvider link={INVALID_SPEC_MOCKS}>
+        <EditBatchSpecPage
+            {...props}
+            namespace={{ __typename: 'User', url: '', id: 'test1234' }}
+            settingsCascade={SETTINGS_CASCADE}
+            authenticatedUser={mockAuthenticatedUser}
+            telemetryRecorder={noOpTelemetryRecorder}
+        />
+    </MockedTestProvider>
 )
 
 InvalidBatchSpec.storyName = 'invalid batch spec'
@@ -229,21 +232,16 @@ const NO_EXECUTORS_MOCKS = new WildcardMockLink([
     ...UNSTARTED_CONNECTION_MOCKS,
 ])
 
-export const ExecutorsNotActive: Story = () => (
-    <WebStory>
-        {props => (
-            <MockedTestProvider link={NO_EXECUTORS_MOCKS}>
-                <EditBatchSpecPage
-                    {...props}
-                    batchChange={{
-                        name: 'hello-world',
-                        namespace: 'test1234',
-                    }}
-                    settingsCascade={SETTINGS_CASCADE}
-                />
-            </MockedTestProvider>
-        )}
-    </WebStory>
+export const ExecutorsNotActive: StoryFn<WebStoryChildrenProps> = props => (
+    <MockedTestProvider link={NO_EXECUTORS_MOCKS}>
+        <EditBatchSpecPage
+            {...props}
+            namespace={{ __typename: 'User', url: '', id: 'test1234' }}
+            settingsCascade={SETTINGS_CASCADE}
+            authenticatedUser={mockAuthenticatedUser}
+            telemetryRecorder={noOpTelemetryRecorder}
+        />
+    </MockedTestProvider>
 )
 
 ExecutorsNotActive.storyName = 'executors not active'

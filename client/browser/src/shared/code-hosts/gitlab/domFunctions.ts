@@ -1,14 +1,17 @@
-import { DiffPart } from '@sourcegraph/codeintellify'
+import type { DiffPart } from '@sourcegraph/codeintellify'
 
-import { DOMFunctions } from '../shared/codeViews'
+import type { DOMFunctions } from '../shared/codeViews'
 
 const getSingleFileCodeElementFromLineNumber = (
     codeView: HTMLElement,
     line: number,
     part?: DiffPart
 ): HTMLElement | null => codeView.querySelector<HTMLElement>(`#LC${line}`)
+
 export const singleFileDOMFunctions: DOMFunctions = {
-    getCodeElementFromTarget: target => target.closest('span.line'),
+    // We have to support div-like line markup and span-like line markup since
+    // different GitLab versions have different code layout markup.
+    getCodeElementFromTarget: target => target.closest('div.line, span.line'),
     getLineNumberFromCodeElement: codeElement => {
         const line = codeElement.id.replace(/^LC/, '')
         return parseInt(line, 10)

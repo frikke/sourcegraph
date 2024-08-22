@@ -1,167 +1,107 @@
 package lsifstore
 
 import (
+	"bytes"
 	"database/sql"
 
+	"github.com/lib/pq"
+	genslices "github.com/life4/genesis/slices"
+	"github.com/sourcegraph/scip/bindings/go/scip"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/sourcegraph/sourcegraph/internal/codeintel/codegraph"
+	"github.com/sourcegraph/sourcegraph/internal/codeintel/core"
+	"github.com/sourcegraph/sourcegraph/internal/codeintel/shared/ranges"
+	"github.com/sourcegraph/sourcegraph/internal/codeintel/uploads/shared"
 	"github.com/sourcegraph/sourcegraph/internal/database/basestore"
 	"github.com/sourcegraph/sourcegraph/lib/codeintel/precise"
 )
 
-// scanFirstDocumentData reads qualified document data from its given row object and returns
-// the first one. If no rows match the query, a false-valued flag is returned.
-func (s *store) scanFirstDocumentData(rows *sql.Rows, queryErr error) (_ QualifiedDocumentData, _ bool, err error) {
+type qualifiedDocumentData struct {
+	UploadID int
+	Path     string
+	SCIPData *scip.Document
+}
+
+func (s *store) scanDocumentData(rows *sql.Rows, queryErr error) (_ []qualifiedDocumentData, err error) {
 	if queryErr != nil {
-		return QualifiedDocumentData{}, false, queryErr
+		return nil, queryErr
+	}
+	defer func() { err = basestore.CloseRows(rows, err) }()
+
+	var values []qualifiedDocumentData
+	for rows.Next() {
+		record, err := s.scanSingleDocumentDataObject(rows)
+		if err != nil {
+			return nil, err
+		}
+
+		values = append(values, record)
+	}
+
+	return values, nil
+}
+
+func (s *store) scanFirstDocumentData(rows *sql.Rows, queryErr error) (_ qualifiedDocumentData, _ bool, err error) {
+	if queryErr != nil {
+		return qualifiedDocumentData{}, false, queryErr
 	}
 	defer func() { err = basestore.CloseRows(rows, err) }()
 
 	if rows.Next() {
 		record, err := s.scanSingleDocumentDataObject(rows)
 		if err != nil {
-			return QualifiedDocumentData{}, false, err
+			return qualifiedDocumentData{}, false, err
 		}
 
 		return record, true, nil
 	}
 
-	return QualifiedDocumentData{}, false, nil
+	return qualifiedDocumentData{}, false, nil
 }
 
-// scanSingleDocumentDataObject populates a qualified document data value from the given cursor.
-func (s *store) scanSingleDocumentDataObject(rows *sql.Rows) (QualifiedDocumentData, error) {
-	var rawData []byte
-	var encoded MarshalledDocumentData
-	var record QualifiedDocumentData
+func (s *store) scanSingleDocumentDataObject(rows *sql.Rows) (qualifiedDocumentData, error) {
+	var uploadID int
+	var path string
+	var compressedSCIPPayload []byte
 
-	if err := rows.Scan(
-		&record.UploadID,
-		&record.Path,
-		&rawData,
-		&encoded.Ranges,
-		&encoded.HoverResults,
-		&encoded.Monikers,
-		&encoded.PackageInformation,
-		&encoded.Diagnostics,
-	); err != nil {
-		return QualifiedDocumentData{}, err
+	if err := rows.Scan(&uploadID, &path, &compressedSCIPPayload); err != nil {
+		return qualifiedDocumentData{}, err
 	}
 
-	if len(rawData) != 0 {
-		data, err := s.serializer.UnmarshalLegacyDocumentData(rawData)
-		if err != nil {
-			return QualifiedDocumentData{}, err
-		}
-		record.Document = data
-	} else {
-		data, err := s.serializer.UnmarshalDocumentData(encoded)
-		if err != nil {
-			return QualifiedDocumentData{}, err
-		}
-		record.Document = data
-	}
-
-	return record, nil
-}
-
-// makeResultChunkVisitor returns a function that accepts a mapping function, reads
-// result chunk values from the given row object and calls the mapping function on
-// each decoded result set.
-func (s *store) makeResultChunkVisitor(rows *sql.Rows, queryErr error) func(func(int, precise.ResultChunkData)) error {
-	return func(f func(int, precise.ResultChunkData)) (err error) {
-		if queryErr != nil {
-			return queryErr
-		}
-		defer func() { err = basestore.CloseRows(rows, err) }()
-
-		var rawData []byte
-		for rows.Next() {
-			var index int
-			if err := rows.Scan(&index, &rawData); err != nil {
-				return err
-			}
-
-			data, err := s.serializer.UnmarshalResultChunkData(rawData)
-			if err != nil {
-				return err
-			}
-
-			f(index, data)
-		}
-
-		return nil
-	}
-}
-
-// makeDocumentVisitor returns a function that calls the given visitor function over each
-// matching decoded document value.
-func (s *store) makeDocumentVisitor(f func(string, precise.DocumentData)) func(rows *sql.Rows, queryErr error) error {
-	return func(rows *sql.Rows, queryErr error) (err error) {
-		if queryErr != nil {
-			return queryErr
-		}
-		defer func() { err = basestore.CloseRows(rows, err) }()
-
-		for rows.Next() {
-			record, err := s.scanSingleDocumentDataObject(rows)
-			if err != nil {
-				return err
-			}
-
-			f(record.Path, record.Document)
-		}
-
-		return nil
-	}
-}
-
-// scanQualifiedMonikerLocations reads moniker locations values from the given row object.
-func (s *store) scanQualifiedMonikerLocations(rows *sql.Rows, queryErr error) (_ []QualifiedMonikerLocations, err error) {
-	if queryErr != nil {
-		return nil, queryErr
-	}
-	defer func() { err = basestore.CloseRows(rows, err) }()
-
-	var values []QualifiedMonikerLocations
-	for rows.Next() {
-		record, err := s.scanSingleQualifiedMonikerLocationsObject(rows)
-		if err != nil {
-			return nil, err
-		}
-
-		values = append(values, record)
-	}
-
-	return values, nil
-}
-
-// scanSingleQualifiedMonikerLocationsObject populates a qualified moniker locations value
-// from the given cursor.
-func (s *store) scanSingleQualifiedMonikerLocationsObject(rows *sql.Rows) (QualifiedMonikerLocations, error) {
-	var rawData []byte
-	var record QualifiedMonikerLocations
-	if err := rows.Scan(&record.DumpID, &record.Scheme, &record.Identifier, &rawData); err != nil {
-		return QualifiedMonikerLocations{}, err
-	}
-
-	data, err := s.serializer.UnmarshalLocations(rawData)
+	scipPayload, err := shared.Decompressor.Decompress(bytes.NewReader(compressedSCIPPayload))
 	if err != nil {
-		return QualifiedMonikerLocations{}, err
+		return qualifiedDocumentData{}, err
 	}
-	record.Locations = data
 
-	return record, nil
+	var data scip.Document
+	if err := proto.Unmarshal(scipPayload, &data); err != nil {
+		return qualifiedDocumentData{}, err
+	}
+
+	qualifiedData := qualifiedDocumentData{
+		UploadID: uploadID,
+		Path:     path,
+		SCIPData: &data,
+	}
+	return qualifiedData, nil
 }
 
-// scanDocumentData reads qualified document data from the given row object.
-func (s *store) scanDocumentData(rows *sql.Rows, queryErr error) (_ []QualifiedDocumentData, err error) {
+type qualifiedMonikerLocations struct {
+	UploadID int
+	precise.MonikerLocations
+}
+
+// Post-condition: number of entries == number of unique (upload, symbol, document) triples.
+func (s *store) scanUploadSymbolLoci(rows *sql.Rows, queryErr error) (_ []codegraph.UploadSymbolLoci, err error) {
 	if queryErr != nil {
 		return nil, queryErr
 	}
 	defer func() { err = basestore.CloseRows(rows, err) }()
 
-	var values []QualifiedDocumentData
+	var values []codegraph.UploadSymbolLoci
 	for rows.Next() {
-		record, err := s.scanSingleDocumentDataObject(rows)
+		record, err := s.scanSingleUploadSymbolLoci(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -170,4 +110,31 @@ func (s *store) scanDocumentData(rows *sql.Rows, queryErr error) (_ []QualifiedD
 	}
 
 	return values, nil
+}
+
+func (s *store) scanSingleUploadSymbolLoci(rows *sql.Rows) (codegraph.UploadSymbolLoci, error) {
+	var uploadID int
+	var symbol string
+	var customEncodedRangesList pq.ByteaArray
+	var documentPaths pq.StringArray
+	if err := rows.Scan(&uploadID, &symbol, &customEncodedRangesList, &documentPaths); err != nil {
+		return codegraph.UploadSymbolLoci{}, err
+	}
+
+	loci := []codegraph.Locus{}
+	for i, docPath := range documentPaths {
+		scipRanges, err := ranges.DecodeRanges(customEncodedRangesList[i])
+		if err != nil {
+			return codegraph.UploadSymbolLoci{}, err
+		}
+		loci = append(loci, genslices.Map(scipRanges, func(r scip.Range) codegraph.Locus {
+			return codegraph.Locus{Path: core.NewUploadRelPathUnchecked(docPath), Range: r}
+		})...)
+	}
+
+	return codegraph.UploadSymbolLoci{
+		UploadID: uploadID,
+		Symbol:   symbol,
+		Loci:     loci,
+	}, nil
 }

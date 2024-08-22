@@ -50,11 +50,12 @@ type UserEmailsStore interface {
 	Get(ctx context.Context, userID int32, email string) (emailCanonicalCase string, verified bool, err error)
 	GetInitialSiteAdminInfo(ctx context.Context) (email string, tosAccepted bool, err error)
 	GetLatestVerificationSentEmail(ctx context.Context, email string) (*UserEmail, error)
-	GetPrimaryEmail(ctx context.Context, id int32) (email string, verified bool, err error)
+	GetPrimaryEmail(ctx context.Context, userID int32) (email string, verified bool, err error)
+	HasVerifiedEmail(ctx context.Context, userID int32) (bool, error)
 	GetVerifiedEmails(ctx context.Context, emails ...string) ([]*UserEmail, error)
 	ListByUser(ctx context.Context, opt UserEmailsListOptions) ([]*UserEmail, error)
 	Remove(ctx context.Context, userID int32, email string) error
-	SetLastVerification(ctx context.Context, userID int32, email, code string) error
+	SetLastVerification(ctx context.Context, userID int32, email, code string, when time.Time) error
 	SetPrimaryEmail(ctx context.Context, userID int32, email string) error
 	SetVerified(ctx context.Context, userID int32, email string, verified bool) error
 	Transact(ctx context.Context) (UserEmailsStore, error)
@@ -99,17 +100,24 @@ func (s *userEmailsStore) GetInitialSiteAdminInfo(ctx context.Context) (email st
 
 // GetPrimaryEmail gets the oldest email associated with the user, preferring a verified email to an
 // unverified email.
-func (s *userEmailsStore) GetPrimaryEmail(ctx context.Context, id int32) (email string, verified bool, err error) {
+func (s *userEmailsStore) GetPrimaryEmail(ctx context.Context, userID int32) (email string, verified bool, err error) {
 	if err := s.Handle().QueryRowContext(ctx, "SELECT email, verified_at IS NOT NULL AS verified FROM user_emails WHERE user_id=$1 AND is_primary",
-		id,
+		userID,
 	).Scan(&email, &verified); err != nil {
 		if err == sql.ErrNoRows {
-			return "", false, userEmailNotFoundError{[]any{fmt.Sprintf("id %d", id)}}
+			return "", false, userEmailNotFoundError{[]any{fmt.Sprintf("id %d", userID)}}
 		}
 
 		return "", false, err
 	}
 	return email, verified, nil
+}
+
+// HasVerifiedEmail returns whether the user with the given ID has a verified email.
+func (s *userEmailsStore) HasVerifiedEmail(ctx context.Context, userID int32) (bool, error) {
+	q := sqlf.Sprintf("SELECT true FROM user_emails WHERE user_id = %s AND verified_at IS NOT NULL LIMIT 1", userID)
+	verified, ok, err := basestore.ScanFirstBool(s.Query(ctx, q))
+	return ok && verified, err
 }
 
 // SetPrimaryEmail sets the primary email for a user.
@@ -161,12 +169,21 @@ func (s *userEmailsStore) Get(ctx context.Context, userID int32, email string) (
 
 // Add adds new user email. When added, it is always unverified.
 func (s *userEmailsStore) Add(ctx context.Context, userID int32, email string, verificationCode *string) error {
-	_, err := s.Handle().ExecContext(ctx, "INSERT INTO user_emails(user_id, email, verification_code) VALUES($1, $2, $3)", userID, email, verificationCode)
-	return err
+	query := sqlf.Sprintf("INSERT INTO user_emails(user_id, email, verification_code) VALUES(%s, %s, %s) ON CONFLICT ON CONSTRAINT user_emails_no_duplicates_per_user DO NOTHING", userID, email, verificationCode)
+	result, err := s.ExecResult(ctx, query)
+	if err != nil {
+		return err
+	}
+	if rowsAffected, err := result.RowsAffected(); err != nil {
+		return errors.Wrap(err, "getting rows affected")
+	} else if rowsAffected == 0 {
+		return errors.New("email address already registered for the user")
+	}
+	return nil
 }
 
-// Remove removes a user email. It returns an error if there is no such email associated with the user or the email
-// is the user's primary address
+// Remove removes a user email. It returns an error if there is no such email
+// associated with the user or the email is the user's primary address
 func (s *userEmailsStore) Remove(ctx context.Context, userID int32, email string) (err error) {
 	tx, err := s.Transact(ctx)
 	if err != nil {
@@ -192,9 +209,9 @@ func (s *userEmailsStore) Remove(ctx context.Context, userID int32, email string
 	return nil
 }
 
-// Verify verifies the user's email address given the email verification code. If the code is not
-// correct (not the one originally used when creating the user or adding the user email), then it
-// returns false.
+// Verify verifies the user's email address given the email verification code. If
+// the code is not correct (not the one originally used when creating the user or
+// adding the user email), then it returns false.
 func (s *userEmailsStore) Verify(ctx context.Context, userID int32, email, code string) (bool, error) {
 	var dbCode sql.NullString
 	if err := s.Handle().QueryRowContext(ctx, "SELECT verification_code FROM user_emails WHERE user_id=$1 AND email=$2", userID, email).Scan(&dbCode); err != nil {
@@ -203,7 +220,9 @@ func (s *userEmailsStore) Verify(ctx context.Context, userID int32, email, code 
 	if !dbCode.Valid {
 		return false, errors.New("email already verified")
 	}
-	// 🚨 SECURITY: Use constant-time comparisons to avoid leaking the verification code via timing attack. It is not important to avoid leaking the *length* of the code, because the length of verification codes is constant.
+	// 🚨 SECURITY: Use constant-time comparisons to avoid leaking the verification
+	// code via timing attack. It is not important to avoid leaking the *length* of
+	// the code, because the length of verification codes is constant.
 	if len(dbCode.String) != len(code) || subtle.ConstantTimeCompare([]byte(dbCode.String), []byte(code)) != 1 {
 		return false, nil
 	}
@@ -214,18 +233,60 @@ func (s *userEmailsStore) Verify(ctx context.Context, userID int32, email, code 
 	return true, nil
 }
 
-// SetVerified bypasses the normal email verification code process and manually sets the verified
-// status for an email.
+// SetVerified bypasses the normal email verification code process and manually
+// sets the verified status for an email.
 func (s *userEmailsStore) SetVerified(ctx context.Context, userID int32, email string, verified bool) error {
 	var res sql.Result
 	var err error
 	if verified {
 		// Mark as verified.
-		res, err = s.Handle().ExecContext(ctx, "UPDATE user_emails SET verification_code=null, verified_at=now() WHERE user_id=$1 AND email=$2", userID, email)
+		res, err = s.Handle().ExecContext(ctx,
+			`UPDATE user_emails
+			SET
+				verification_code=null,
+				verified_at=now(),
+				is_primary=(NOT EXISTS (
+					SELECT 1
+					FROM user_emails
+					WHERE
+						user_id=$1
+						AND email != $2
+						AND is_primary=TRUE
+				))
+			WHERE
+				user_id=$1
+				AND email=$2`,
+			userID, email)
+		if err != nil {
+			return errors.New("could not mark email as verified")
+		}
 	} else {
 		// Mark as unverified.
 		res, err = s.Handle().ExecContext(ctx, "UPDATE user_emails SET verification_code=null, verified_at=null WHERE user_id=$1 AND email=$2", userID, email)
+		if err != nil {
+			return errors.New("could not mark email as unverified")
+		}
 	}
+	nrows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if nrows == 0 {
+		return errors.New("user email not found")
+	}
+
+	// If successfully marked as verified, delete all matching unverified emails.
+	if verified {
+		// At this point the email is already verified and the operation successful, so if deletion returns any errors we ignore it.
+		_, _ = s.ExecResult(ctx, sqlf.Sprintf("DELETE FROM user_emails WHERE verified_at IS NULL AND email=%s", email))
+	}
+	return nil
+}
+
+// SetLastVerification sets the "last_verification_sent_at" column to now() and
+// updates the verification code for given email of the user.
+func (s *userEmailsStore) SetLastVerification(ctx context.Context, userID int32, email, code string, when time.Time) error {
+	res, err := s.Handle().ExecContext(ctx, "UPDATE user_emails SET last_verification_sent_at=$1, verification_code = $2 WHERE user_id=$3 AND email=$4", when, code, userID, email)
 	if err != nil {
 		return err
 	}
@@ -239,24 +300,9 @@ func (s *userEmailsStore) SetVerified(ctx context.Context, userID int32, email s
 	return nil
 }
 
-// SetLastVerification sets the "last_verification_sent_at" column to now() and updates the verification code for given email of the user.
-func (s *userEmailsStore) SetLastVerification(ctx context.Context, userID int32, email, code string) error {
-	res, err := s.Handle().ExecContext(ctx, "UPDATE user_emails SET last_verification_sent_at=now(), verification_code = $3 WHERE user_id=$1 AND email=$2", userID, email, code)
-	if err != nil {
-		return err
-	}
-	nrows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if nrows == 0 {
-		return errors.New("user email not found")
-	}
-	return nil
-}
-
-// GetLatestVerificationSentEmail returns the email with the lastest time of "last_verification_sent_at" column,
-// it excludes rows with "last_verification_sent_at IS NULL".
+// GetLatestVerificationSentEmail returns the email with the latest time of
+// "last_verification_sent_at" column, it excludes rows with
+// "last_verification_sent_at IS NULL".
 func (s *userEmailsStore) GetLatestVerificationSentEmail(ctx context.Context, email string) (*UserEmail, error) {
 	q := sqlf.Sprintf(`
 WHERE email=%s AND last_verification_sent_at IS NOT NULL
@@ -272,8 +318,9 @@ LIMIT 1
 	return emails[0], nil
 }
 
-// GetVerifiedEmails returns a list of verified emails from the candidate list. Some emails are excluded
-// from the results list because of unverified or simply don't exist.
+// GetVerifiedEmails returns a list of verified emails from the candidate list.
+// Some emails are excluded from the results list because of unverified or simply
+// don't exist.
 func (s *userEmailsStore) GetVerifiedEmails(ctx context.Context, emails ...string) ([]*UserEmail, error) {
 	if len(emails) == 0 {
 		return []*UserEmail{}, nil

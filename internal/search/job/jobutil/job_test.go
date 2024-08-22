@@ -6,21 +6,22 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"regexp/syntax"
-	"sort"
+	"regexp/syntax" //nolint:depguard // using the grafana fork of regexp clashes with zoekt, which uses the std regexp/syntax.
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/grafana/regexp"
-	"github.com/hexops/autogold"
+	"github.com/hexops/autogold/v2"
 	"github.com/sourcegraph/log"
 	"github.com/sourcegraph/log/logtest"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
+	zoektquery "github.com/sourcegraph/zoekt/query"
+
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/endpoint"
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver/gitdomain"
@@ -34,10 +35,10 @@ import (
 	"github.com/sourcegraph/sourcegraph/internal/search/searcher"
 	"github.com/sourcegraph/sourcegraph/internal/search/streaming"
 	zoektutil "github.com/sourcegraph/sourcegraph/internal/search/zoekt"
+	"github.com/sourcegraph/sourcegraph/internal/searcher/protocol"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 	"github.com/sourcegraph/sourcegraph/schema"
-	zoektquery "github.com/sourcegraph/zoekt/query"
 )
 
 func TestNewPlanJob(t *testing.T) {
@@ -50,620 +51,1180 @@ func TestNewPlanJob(t *testing.T) {
 		query:      `foo context:@userA`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeLiteral,
-		want: autogold.Want("user search context", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . literal)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (SEQUENTIAL
-          (ensureUnique . false)
-          (REPOPAGER
-            (repoOpts.searchContextSpec . @userA)
-            (PARTIALREPOS
-              (ZOEKTREPOSUBSETTEXTSEARCH
-                (query . substr:"foo")
-                (type . text))))
-          (REPOPAGER
-            (repoOpts.searchContextSpec . @userA)
-            (PARTIALREPOS
-              (SEARCHERTEXTSEARCH
-                (indexed . false)))))
-        (REPOSCOMPUTEEXCLUDED
-          (repoOpts.searchContextSpec . @userA))
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . literal)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
         (PARALLEL
-          NoopJob
-          (REPOSEARCH
-            (repoOpts.repoFilters.0 . foo)(repoOpts.searchContextSpec . @userA)
-            (repoNamePatterns . [(?i)foo])))))))`),
+          (SEQUENTIAL
+            (ensureUnique . false)
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.searchContextSpec . @userA)
+              (PARTIALREPOS
+                (ZOEKTREPOSUBSETTEXTSEARCH
+                  (fileMatchLimit . 10000)
+                  (select . )
+                  (zoektQueryRegexps . ["(?i)foo"])
+                  (query . substr:"foo")
+                  (type . text))))
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.searchContextSpec . @userA)
+              (PARTIALREPOS
+                (SEARCHERTEXTSEARCH
+                  (useFullDeadline . true)
+                  (patternInfo . TextPatternInfo{"foo",filematchlimit:10000})
+                  (numRepos . 0)
+                  (pathRegexps . ["(?i)foo"])
+                  (indexed . false))))
+            (REPOSEARCH
+              (repoOpts.repoFilters . [foo])
+              (repoOpts.searchContextSpec . @userA)
+              (repoNamePatterns . ["(?i)foo"])))
+          NOOP
+          (REPOSCOMPUTEEXCLUDED
+            (repoOpts.searchContextSpec . @userA))
+          NOOP)))))
+`),
 	}, {
 		query:      `foo context:global`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeLiteral,
-		want: autogold.Want("global search explicit context", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . literal)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (ZOEKTGLOBALTEXTSEARCH
-          (query . substr:"foo")
-          (type . text)
-          (repoOpts.searchContextSpec . global))
-        (REPOSCOMPUTEEXCLUDED
-          (repoOpts.searchContextSpec . global))
-        (REPOSEARCH
-          (repoOpts.repoFilters.0 . foo)(repoOpts.searchContextSpec . global)
-          (repoNamePatterns . [(?i)foo]))))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . literal)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (SEQUENTIAL
+            (ensureUnique . false)
+            (ZOEKTGLOBALTEXTSEARCH
+              (fileMatchLimit . 10000)
+              (select . )
+              (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+              (includePrivate . true)
+              (globalZoektQueryRegexps . ["(?i)foo"])
+              (query . substr:"foo")
+              (type . text)
+              (repoOpts.searchContextSpec . global))
+            (REPOSEARCH
+              (repoOpts.repoFilters . [foo])
+              (repoOpts.searchContextSpec . global)
+              (repoNamePatterns . ["(?i)foo"])))
+          (REPOSCOMPUTEEXCLUDED
+            (repoOpts.searchContextSpec . global))
+          NOOP)))))
+`),
 	}, {
 		query:      `foo`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeLiteral,
-		want: autogold.Want("global search implicit context", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . literal)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (ZOEKTGLOBALTEXTSEARCH
-          (query . substr:"foo")
-          (type . text)
-          )
-        (REPOSCOMPUTEEXCLUDED
-          )
-        (REPOSEARCH
-          (repoOpts.repoFilters.0 . foo)
-          (repoNamePatterns . [(?i)foo]))))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . literal)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (SEQUENTIAL
+            (ensureUnique . false)
+            (ZOEKTGLOBALTEXTSEARCH
+              (fileMatchLimit . 10000)
+              (select . )
+              (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+              (includePrivate . true)
+              (globalZoektQueryRegexps . ["(?i)foo"])
+              (query . substr:"foo")
+              (type . text))
+            (REPOSEARCH
+              (repoOpts.repoFilters . [foo])
+              (repoNamePatterns . ["(?i)foo"])))
+          REPOSCOMPUTEEXCLUDED
+          NOOP)))))
+`),
 	}, {
 		query:      `foo repo:sourcegraph/sourcegraph`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeLiteral,
-		want: autogold.Want("nonglobal repo", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . literal)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (SEQUENTIAL
-          (ensureUnique . false)
-          (REPOPAGER
-            (repoOpts.repoFilters.0 . sourcegraph/sourcegraph)
-            (PARTIALREPOS
-              (ZOEKTREPOSUBSETTEXTSEARCH
-                (query . substr:"foo")
-                (type . text))))
-          (REPOPAGER
-            (repoOpts.repoFilters.0 . sourcegraph/sourcegraph)
-            (PARTIALREPOS
-              (SEARCHERTEXTSEARCH
-                (indexed . false)))))
-        (REPOSCOMPUTEEXCLUDED
-          (repoOpts.repoFilters.0 . sourcegraph/sourcegraph))
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . literal)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
         (PARALLEL
-          NoopJob
-          (REPOSEARCH
-            (repoOpts.repoFilters.0 . sourcegraph/sourcegraph)(repoOpts.repoFilters.1 . foo)
-            (repoNamePatterns . [(?i)sourcegraph/sourcegraph (?i)foo])))))))`),
+          (SEQUENTIAL
+            (ensureUnique . false)
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.repoFilters . [sourcegraph/sourcegraph])
+              (PARTIALREPOS
+                (ZOEKTREPOSUBSETTEXTSEARCH
+                  (fileMatchLimit . 10000)
+                  (select . )
+                  (zoektQueryRegexps . ["(?i)foo"])
+                  (query . substr:"foo")
+                  (type . text))))
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.repoFilters . [sourcegraph/sourcegraph])
+              (PARTIALREPOS
+                (SEARCHERTEXTSEARCH
+                  (useFullDeadline . true)
+                  (patternInfo . TextPatternInfo{"foo",filematchlimit:10000})
+                  (numRepos . 0)
+                  (pathRegexps . ["(?i)foo"])
+                  (indexed . false))))
+            (REPOSEARCH
+              (repoOpts.repoFilters . [sourcegraph/sourcegraph foo])
+              (repoNamePatterns . ["(?i)sourcegraph/sourcegraph","(?i)foo"])))
+          NOOP
+          (REPOSCOMPUTEEXCLUDED
+            (repoOpts.repoFilters . [sourcegraph/sourcegraph]))
+          NOOP)))))
+`),
 	}, {
 		query:      `ok ok`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
-		want: autogold.Want("supported repo job", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (ZOEKTGLOBALTEXTSEARCH
-          (query . regex:"ok(?-s:.)*?ok")
-          (type . text)
-          )
-        (REPOSCOMPUTEEXCLUDED
-          )
-        (REPOSEARCH
-          (repoOpts.repoFilters.0 . (?:ok).*?(?:ok))
-          (repoNamePatterns . [(?i)(?:ok).*?(?:ok)]))))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (SEQUENTIAL
+            (ensureUnique . false)
+            (ZOEKTGLOBALTEXTSEARCH
+              (fileMatchLimit . 10000)
+              (select . )
+              (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+              (includePrivate . true)
+              (globalZoektQueryRegexps . ["(?i)(?-s:ok.*?ok)"])
+              (query . regex:"ok(?-s:.)*?ok")
+              (type . text))
+            (REPOSEARCH
+              (repoOpts.repoFilters . [(?:ok).*?(?:ok)])
+              (repoNamePatterns . ["(?i)(?:ok).*?(?:ok)"])))
+          REPOSCOMPUTEEXCLUDED
+          NOOP)))))
+`),
 	}, {
 		query:      `ok @thing`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeLiteral,
-		want: autogold.Want("supported repo job literal", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . literal)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (ZOEKTGLOBALTEXTSEARCH
-          (query . substr:"ok @thing")
-          (type . text)
-          )
-        (REPOSCOMPUTEEXCLUDED
-          )
-        (REPOSEARCH
-          (repoOpts.repoFilters.0 . ok )
-          (repoNamePatterns . [(?i)ok ]))))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . literal)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (SEQUENTIAL
+            (ensureUnique . false)
+            (ZOEKTGLOBALTEXTSEARCH
+              (fileMatchLimit . 10000)
+              (select . )
+              (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+              (includePrivate . true)
+              (globalZoektQueryRegexps . ["(?i)ok @thing"])
+              (query . substr:"ok @thing")
+              (type . text))
+            (REPOSEARCH
+              (repoOpts.repoFilters . [ok ])
+              (repoNamePatterns . ["(?i)ok "])))
+          REPOSCOMPUTEEXCLUDED
+          NOOP)))))
+`),
 	}, {
 		query:      `@nope`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
-		want: autogold.Want("unsupported repo job literal", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (ZOEKTGLOBALTEXTSEARCH
-          (query . substr:"@nope")
-          (type . text)
-          )
-        (REPOSCOMPUTEEXCLUDED
-          )
-        NoopJob))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (ZOEKTGLOBALTEXTSEARCH
+            (fileMatchLimit . 10000)
+            (select . )
+            (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+            (includePrivate . true)
+            (globalZoektQueryRegexps . ["(?i)@nope"])
+            (query . substr:"@nope")
+            (type . text))
+          REPOSCOMPUTEEXCLUDED
+          NOOP)))))
+`),
 	}, {
 		query:      `foo @bar`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
-		want: autogold.Want("unsupported repo job regexp", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (ZOEKTGLOBALTEXTSEARCH
-          (query . regex:"foo(?-s:.)*?@bar")
-          (type . text)
-          )
-        (REPOSCOMPUTEEXCLUDED
-          )
-        NoopJob))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (ZOEKTGLOBALTEXTSEARCH
+            (fileMatchLimit . 10000)
+            (select . )
+            (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+            (includePrivate . true)
+            (globalZoektQueryRegexps . ["(?i)(?-s:foo.*?@bar)"])
+            (query . regex:"foo(?-s:.)*?@bar")
+            (type . text))
+          REPOSCOMPUTEEXCLUDED
+          NOOP)))))
+`),
 	}, {
 		query:      `type:symbol test`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
-		want: autogold.Want("symbol", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (ZOEKTGLOBALSYMBOLSEARCH
-          (query . sym:substr:"test")
-          (type . symbol)
-          )
-        (REPOSCOMPUTEEXCLUDED
-          )
-        NoopJob))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (ZOEKTGLOBALSYMBOLSEARCH
+            (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+            (includePrivate . true)
+            (fileMatchLimit . 10000)
+            (select . )
+            (query . sym:substr:"test")
+            (type . symbol))
+          REPOSCOMPUTEEXCLUDED
+          NOOP)))))
+`),
 	}, {
 		query:      `type:commit test`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
-		want: autogold.Want("commit", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (COMMITSEARCH
-          (query . *protocol.MessageMatches(test))
-          (repoOpts.onlyCloned . true)
-          (diff . false)
-          (limit . 500))
-        (REPOSCOMPUTEEXCLUDED
-          )
-        NoopJob))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (REPOPAGER
+            (containsRefGlobs . false)
+            (repoOpts.onlyCloned . true)
+            (PARTIALREPOS
+              (COMMITSEARCH
+                (includeModifiedFiles . false)
+                (query . *protocol.MessageMatches(test))
+                (diff . false)
+                (limit . 10000))))
+          REPOSCOMPUTEEXCLUDED
+          NOOP)))))
+`),
 	}, {
 		query:      `type:diff test`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
-		want: autogold.Want("diff", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (DIFFSEARCH
-          (query . *protocol.DiffMatches(test))
-          (repoOpts.onlyCloned . true)
-          (diff . true)
-          (limit . 500))
-        (REPOSCOMPUTEEXCLUDED
-          )
-        NoopJob))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (REPOPAGER
+            (containsRefGlobs . false)
+            (repoOpts.onlyCloned . true)
+            (PARTIALREPOS
+              (DIFFSEARCH
+                (includeModifiedFiles . false)
+                (query . *protocol.DiffMatches(test))
+                (diff . true)
+                (limit . 10000))))
+          REPOSCOMPUTEEXCLUDED
+          NOOP)))))
+`),
 	}, {
 		query:      `type:file type:commit test`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
-		want: autogold.Want("streaming file or commit", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (ZOEKTGLOBALTEXTSEARCH
-          (query . content_substr:"test")
-          (type . text)
-          )
-        (COMMITSEARCH
-          (query . *protocol.MessageMatches(test))
-          (repoOpts.onlyCloned . true)
-          (diff . false)
-          (limit . 500))
-        (REPOSCOMPUTEEXCLUDED
-          )
-        NoopJob))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (ZOEKTGLOBALTEXTSEARCH
+            (fileMatchLimit . 10000)
+            (select . )
+            (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+            (includePrivate . true)
+            (globalZoektQueryRegexps . [])
+            (query . content_substr:"test")
+            (type . text))
+          (REPOPAGER
+            (containsRefGlobs . false)
+            (repoOpts.onlyCloned . true)
+            (PARTIALREPOS
+              (COMMITSEARCH
+                (includeModifiedFiles . false)
+                (query . *protocol.MessageMatches(test))
+                (diff . false)
+                (limit . 10000))))
+          REPOSCOMPUTEEXCLUDED
+          NOOP)))))
+`),
 	}, {
 		query:      `type:file type:path type:repo type:commit type:symbol repo:test test`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
-		want: autogold.Want("streaming many types", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (SEQUENTIAL
-          (ensureUnique . false)
-          (REPOPAGER
-            (repoOpts.repoFilters.0 . test)
-            (PARTIALREPOS
-              (ZOEKTREPOSUBSETTEXTSEARCH
-                (query . substr:"test")
-                (type . text))))
-          (REPOPAGER
-            (repoOpts.repoFilters.0 . test)
-            (PARTIALREPOS
-              (SEARCHERTEXTSEARCH
-                (indexed . false)))))
-        (REPOPAGER
-          (repoOpts.repoFilters.0 . test)
-          (PARTIALREPOS
-            (ZOEKTSYMBOLSEARCH
-              (query . sym:substr:"test"))))
-        (COMMITSEARCH
-          (query . *protocol.MessageMatches(test))
-          (repoOpts.repoFilters.0 . test)(repoOpts.onlyCloned . true)
-          (diff . false)
-          (limit . 500))
-        (REPOSCOMPUTEEXCLUDED
-          (repoOpts.repoFilters.0 . test))
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
         (PARALLEL
-          NoopJob
+          (SEQUENTIAL
+            (ensureUnique . false)
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.repoFilters . [test])
+              (PARTIALREPOS
+                (ZOEKTREPOSUBSETTEXTSEARCH
+                  (fileMatchLimit . 10000)
+                  (select . )
+                  (zoektQueryRegexps . ["(?i)test"])
+                  (query . substr:"test")
+                  (type . text))))
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.repoFilters . [test])
+              (PARTIALREPOS
+                (SEARCHERTEXTSEARCH
+                  (useFullDeadline . true)
+                  (patternInfo . TextPatternInfo{/test/,filematchlimit:10000})
+                  (numRepos . 0)
+                  (pathRegexps . ["(?i)test"])
+                  (indexed . false))))
+            (REPOSEARCH
+              (repoOpts.repoFilters . [test test])
+              (repoNamePatterns . ["(?i)test","(?i)test"])))
+          NOOP
           (REPOPAGER
-            (repoOpts.repoFilters.0 . test)
+            (containsRefGlobs . false)
+            (repoOpts.repoFilters . [test])
             (PARTIALREPOS
-              (SEARCHERSYMBOLSEARCH
-                (patternInfo.pattern . test)(patternInfo.isRegexp . true)(patternInfo.fileMatchLimit . 500)(patternInfo.patternMatchesPath . true)
-                (numRepos . 0)
-                (limit . 500))))
-          (REPOSEARCH
-            (repoOpts.repoFilters.0 . test)(repoOpts.repoFilters.1 . test)
-            (repoNamePatterns . [(?i)test (?i)test])))))))`),
+              (ZOEKTSYMBOLSEARCH
+                (fileMatchLimit . 10000)
+                (select . )
+                (query . sym:substr:"test"))))
+          (REPOPAGER
+            (containsRefGlobs . false)
+            (repoOpts.repoFilters . [test])
+            (repoOpts.onlyCloned . true)
+            (PARTIALREPOS
+              (COMMITSEARCH
+                (includeModifiedFiles . false)
+                (query . *protocol.MessageMatches(test))
+                (diff . false)
+                (limit . 10000))))
+          (REPOSCOMPUTEEXCLUDED
+            (repoOpts.repoFilters . [test]))
+          (PARALLEL
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.repoFilters . [test])
+              (PARTIALREPOS
+                (SEARCHERSYMBOLSEARCH
+                  (request.pattern . test)
+                  (numRepos . 0)
+                  (limit . 10000))))
+            NOOP))))))
+`),
 	}, {
 		query:      `type:file type:commit test`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
-		want: autogold.Want("batched file or commit", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (ZOEKTGLOBALTEXTSEARCH
-          (query . content_substr:"test")
-          (type . text)
-          )
-        (COMMITSEARCH
-          (query . *protocol.MessageMatches(test))
-          (repoOpts.onlyCloned . true)
-          (diff . false)
-          (limit . 500))
-        (REPOSCOMPUTEEXCLUDED
-          )
-        NoopJob))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (ZOEKTGLOBALTEXTSEARCH
+            (fileMatchLimit . 10000)
+            (select . )
+            (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+            (includePrivate . true)
+            (globalZoektQueryRegexps . [])
+            (query . content_substr:"test")
+            (type . text))
+          (REPOPAGER
+            (containsRefGlobs . false)
+            (repoOpts.onlyCloned . true)
+            (PARTIALREPOS
+              (COMMITSEARCH
+                (includeModifiedFiles . false)
+                (query . *protocol.MessageMatches(test))
+                (diff . false)
+                (limit . 10000))))
+          REPOSCOMPUTEEXCLUDED
+          NOOP)))))
+`),
 	}, {
 		query:      `type:file type:path type:repo type:commit type:symbol repo:test test`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
-		want: autogold.Want("batched many types", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (SEQUENTIAL
-          (ensureUnique . false)
-          (REPOPAGER
-            (repoOpts.repoFilters.0 . test)
-            (PARTIALREPOS
-              (ZOEKTREPOSUBSETTEXTSEARCH
-                (query . substr:"test")
-                (type . text))))
-          (REPOPAGER
-            (repoOpts.repoFilters.0 . test)
-            (PARTIALREPOS
-              (SEARCHERTEXTSEARCH
-                (indexed . false)))))
-        (REPOPAGER
-          (repoOpts.repoFilters.0 . test)
-          (PARTIALREPOS
-            (ZOEKTSYMBOLSEARCH
-              (query . sym:substr:"test"))))
-        (COMMITSEARCH
-          (query . *protocol.MessageMatches(test))
-          (repoOpts.repoFilters.0 . test)(repoOpts.onlyCloned . true)
-          (diff . false)
-          (limit . 500))
-        (REPOSCOMPUTEEXCLUDED
-          (repoOpts.repoFilters.0 . test))
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
         (PARALLEL
-          NoopJob
+          (SEQUENTIAL
+            (ensureUnique . false)
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.repoFilters . [test])
+              (PARTIALREPOS
+                (ZOEKTREPOSUBSETTEXTSEARCH
+                  (fileMatchLimit . 10000)
+                  (select . )
+                  (zoektQueryRegexps . ["(?i)test"])
+                  (query . substr:"test")
+                  (type . text))))
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.repoFilters . [test])
+              (PARTIALREPOS
+                (SEARCHERTEXTSEARCH
+                  (useFullDeadline . true)
+                  (patternInfo . TextPatternInfo{/test/,filematchlimit:10000})
+                  (numRepos . 0)
+                  (pathRegexps . ["(?i)test"])
+                  (indexed . false))))
+            (REPOSEARCH
+              (repoOpts.repoFilters . [test test])
+              (repoNamePatterns . ["(?i)test","(?i)test"])))
+          NOOP
           (REPOPAGER
-            (repoOpts.repoFilters.0 . test)
+            (containsRefGlobs . false)
+            (repoOpts.repoFilters . [test])
             (PARTIALREPOS
-              (SEARCHERSYMBOLSEARCH
-                (patternInfo.pattern . test)(patternInfo.isRegexp . true)(patternInfo.fileMatchLimit . 500)(patternInfo.patternMatchesPath . true)
-                (numRepos . 0)
-                (limit . 500))))
-          (REPOSEARCH
-            (repoOpts.repoFilters.0 . test)(repoOpts.repoFilters.1 . test)
-            (repoNamePatterns . [(?i)test (?i)test])))))))`),
+              (ZOEKTSYMBOLSEARCH
+                (fileMatchLimit . 10000)
+                (select . )
+                (query . sym:substr:"test"))))
+          (REPOPAGER
+            (containsRefGlobs . false)
+            (repoOpts.repoFilters . [test])
+            (repoOpts.onlyCloned . true)
+            (PARTIALREPOS
+              (COMMITSEARCH
+                (includeModifiedFiles . false)
+                (query . *protocol.MessageMatches(test))
+                (diff . false)
+                (limit . 10000))))
+          (REPOSCOMPUTEEXCLUDED
+            (repoOpts.repoFilters . [test]))
+          (PARALLEL
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.repoFilters . [test])
+              (PARTIALREPOS
+                (SEARCHERSYMBOLSEARCH
+                  (request.pattern . test)
+                  (numRepos . 0)
+                  (limit . 10000))))
+            NOOP))))))
+`),
 	}, {
 		query:      `(type:commit or type:diff) (a or b)`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
 		// TODO this output doesn't look right. There shouldn't be any zoekt or repo jobs
-		want: autogold.Want("complex commit diff", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (OR
-    (TIMEOUT
-      (timeout . 20s)
-      (LIMIT
-        (limit . 500)
-        (PARALLEL
-          (COMMITSEARCH
-            (query . (*protocol.MessageMatches((?:a)|(?:b))))
-            (repoOpts.onlyCloned . true)
-            (diff . false)
-            (limit . 500))
-          (REPOSCOMPUTEEXCLUDED
-            )
-          (OR
-            NoopJob
-            NoopJob))))
-    (TIMEOUT
-      (timeout . 20s)
-      (LIMIT
-        (limit . 500)
-        (PARALLEL
-          (DIFFSEARCH
-            (query . (*protocol.DiffMatches((?:a)|(?:b))))
-            (repoOpts.onlyCloned . true)
-            (diff . true)
-            (limit . 500))
-          (REPOSCOMPUTEEXCLUDED
-            )
-          (OR
-            NoopJob
-            NoopJob))))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (OR
+      (TIMEOUT
+        (timeout . 20s)
+        (LIMIT
+          (limit . 10000)
+          (PARALLEL
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.onlyCloned . true)
+              (PARTIALREPOS
+                (COMMITSEARCH
+                  (includeModifiedFiles . false)
+                  (query . (*protocol.MessageMatches((?:a)|(?:b))))
+                  (diff . false)
+                  (limit . 10000))))
+            REPOSCOMPUTEEXCLUDED
+            (OR
+              NOOP
+              NOOP))))
+      (TIMEOUT
+        (timeout . 20s)
+        (LIMIT
+          (limit . 10000)
+          (PARALLEL
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.onlyCloned . true)
+              (PARTIALREPOS
+                (DIFFSEARCH
+                  (includeModifiedFiles . false)
+                  (query . (*protocol.DiffMatches((?:a)|(?:b))))
+                  (diff . true)
+                  (limit . 10000))))
+            REPOSCOMPUTEEXCLUDED
+            (OR
+              NOOP
+              NOOP)))))))
+`),
 	}, {
 		query:      `(type:repo a) or (type:file b)`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
-		want: autogold.Want("disjunct types", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (OR
-    (TIMEOUT
-      (timeout . 20s)
-      (LIMIT
-        (limit . 500)
-        (PARALLEL
-          (REPOSCOMPUTEEXCLUDED
-            )
-          (REPOSEARCH
-            (repoOpts.repoFilters.0 . a)
-            (repoNamePatterns . [(?i)a])))))
-    (TIMEOUT
-      (timeout . 20s)
-      (LIMIT
-        (limit . 500)
-        (PARALLEL
-          (ZOEKTGLOBALTEXTSEARCH
-            (query . content_substr:"b")
-            (type . text)
-            )
-          (REPOSCOMPUTEEXCLUDED
-            )
-          NoopJob)))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (OR
+      (TIMEOUT
+        (timeout . 20s)
+        (LIMIT
+          (limit . 10000)
+          (PARALLEL
+            REPOSCOMPUTEEXCLUDED
+            (REPOSEARCH
+              (repoOpts.repoFilters . [a])
+              (repoNamePatterns . ["(?i)a"])))))
+      (TIMEOUT
+        (timeout . 20s)
+        (LIMIT
+          (limit . 10000)
+          (PARALLEL
+            (ZOEKTGLOBALTEXTSEARCH
+              (fileMatchLimit . 10000)
+              (select . )
+              (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+              (includePrivate . true)
+              (globalZoektQueryRegexps . [])
+              (query . content_substr:"b")
+              (type . text))
+            REPOSCOMPUTEEXCLUDED
+            NOOP))))))
+`),
 	}, {
 		query:      `type:symbol a or b`,
 		protocol:   search.Streaming,
 		searchType: query.SearchTypeRegex,
-		want: autogold.Want("symbol with or", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (ZOEKTGLOBALSYMBOLSEARCH
-          (query . (or sym:substr:"a" sym:substr:"b"))
-          (type . symbol)
-          )
-        (REPOSCOMPUTEEXCLUDED
-          )
-        (OR
-          NoopJob
-          NoopJob)))))`),
+		want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (ZOEKTGLOBALSYMBOLSEARCH
+            (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+            (includePrivate . true)
+            (fileMatchLimit . 10000)
+            (select . )
+            (query . (or sym:substr:"a" sym:substr:"b"))
+            (type . symbol))
+          REPOSCOMPUTEEXCLUDED
+          (OR
+            NOOP
+            NOOP))))))
+`),
 	},
 		{
 			query:      `repo:contains.path(a) repo:contains.content(b)`,
 			protocol:   search.Streaming,
 			searchType: query.SearchTypeRegex,
-			want: autogold.Want("repo contains path and repo contains content", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (REPOSCOMPUTEEXCLUDED
-          (repoOpts.hasFileContent[0].path . a)(repoOpts.hasFileContent[1].content . b))
-        (REPOSEARCH
-          (repoOpts.hasFileContent[0].path . a)(repoOpts.hasFileContent[1].content . b)
-          (repoNamePatterns . []))))))`),
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (REPOSCOMPUTEEXCLUDED
+            (repoOpts.hasFileContent[0].path . a)
+            (repoOpts.hasFileContent[1].content . b))
+          (REPOSEARCH
+            (repoOpts.hasFileContent[0].path . a)
+            (repoOpts.hasFileContent[1].content . b)
+            (repoNamePatterns . [])))))))
+`),
+		}, {
+			query:      `file:contains.content(a.*b)`,
+			protocol:   search.Streaming,
+			searchType: query.SearchTypeKeyword,
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . keyword)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (FILECONTAINSFILTER
+          (originalPatterns . [])
+          (filterPatterns . ["(?i:a.*b)"])
+          (PARALLEL
+            (ZOEKTGLOBALTEXTSEARCH
+              (fileMatchLimit . 10000)
+              (select . )
+              (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+              (includePrivate . true)
+              (globalZoektQueryRegexps . ["(?i)(?-s:a.*b)"])
+              (query . regex:"a(?-s:.)*b")
+              (type . text))
+            REPOSCOMPUTEEXCLUDED
+            NOOP))))))
+`),
+		}, {
+			query:      `repo:foo file:contains.content(a.*b) index:no`,
+			protocol:   search.Streaming,
+			searchType: query.SearchTypeKeyword,
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . keyword)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (FILECONTAINSFILTER
+          (originalPatterns . [])
+          (filterPatterns . ["(?i:a.*b)"])
+          (PARALLEL
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.repoFilters . [foo])
+              (repoOpts.useIndex . no)
+              (PARTIALREPOS
+                (ZOEKTREPOSUBSETTEXTSEARCH
+                  (fileMatchLimit . 10000)
+                  (select . )
+                  (zoektQueryRegexps . ["(?i)(?-s:a.*b)"])
+                  (query . regex:"a(?-s:.)*b")
+                  (type . text))))
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.repoFilters . [foo])
+              (repoOpts.useIndex . no)
+              (PARTIALREPOS
+                (SEARCHERTEXTSEARCH
+                  (useFullDeadline . true)
+                  (patternInfo . TextPatternInfo{(/a.*b/),filematchlimit:10000})
+                  (numRepos . 0)
+                  (pathRegexps . ["(?i)a.*b"])
+                  (indexed . false))))
+            (REPOSCOMPUTEEXCLUDED
+              (repoOpts.repoFilters . [foo])
+              (repoOpts.useIndex . no))
+            NOOP))))))
+`),
 		}, {
 			query:      `repo:contains.file(path:a content:b)`,
 			protocol:   search.Streaming,
 			searchType: query.SearchTypeRegex,
-			want: autogold.Want("repo contains path and content", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (REPOSCOMPUTEEXCLUDED
-          (repoOpts.hasFileContent[0].path . a)(repoOpts.hasFileContent[0].content . b))
-        (REPOSEARCH
-          (repoOpts.hasFileContent[0].path . a)(repoOpts.hasFileContent[0].content . b)
-          (repoNamePatterns . []))))))`),
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (REPOSCOMPUTEEXCLUDED
+            (repoOpts.hasFileContent[0].path . a)
+            (repoOpts.hasFileContent[0].content . b))
+          (REPOSEARCH
+            (repoOpts.hasFileContent[0].path . a)
+            (repoOpts.hasFileContent[0].content . b)
+            (repoNamePatterns . [])))))))
+`),
 		}, {
 			query:      `repo:has(key:value)`,
 			protocol:   search.Streaming,
 			searchType: query.SearchTypeRegex,
-			want: autogold.Want("repo has kvp", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (REPOSCOMPUTEEXCLUDED
-          (repoOpts.hasKVPs[0].key . key)(repoOpts.hasKVPs[0].value . value))
-        (REPOSEARCH
-          (repoOpts.hasKVPs[0].key . key)(repoOpts.hasKVPs[0].value . value)
-          (repoNamePatterns . []))))))`),
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (REPOSCOMPUTEEXCLUDED
+            (repoOpts.hasKVPs[0].key . ^key$)
+            (repoOpts.hasKVPs[0].value . ^value$))
+          (REPOSEARCH
+            (repoOpts.hasKVPs[0].key . ^key$)
+            (repoOpts.hasKVPs[0].value . ^value$)
+            (repoNamePatterns . [])))))))
+`),
 		}, {
 			query:      `repo:has.tag(tag)`,
 			protocol:   search.Streaming,
 			searchType: query.SearchTypeRegex,
-			want: autogold.Want("repo has tag", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . regex)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (REPOSCOMPUTEEXCLUDED
-          (repoOpts.hasKVPs[0].key . tag))
-        (REPOSEARCH
-          (repoOpts.hasKVPs[0].key . tag)
-          (repoNamePatterns . []))))))`),
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (REPOSCOMPUTEEXCLUDED
+            (repoOpts.hasKVPs[0].key . ^tag$))
+          (REPOSEARCH
+            (repoOpts.hasKVPs[0].key . ^tag$)
+            (repoNamePatterns . [])))))))
+`),
+		}, {
+			query:      `repo:has.topic(mytopic)`,
+			protocol:   search.Streaming,
+			searchType: query.SearchTypeRegex,
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (REPOSCOMPUTEEXCLUDED
+            (repoOpts.hasTopics[0].topic . mytopic))
+          (REPOSEARCH
+            (repoOpts.hasTopics[0].topic . mytopic)
+            (repoNamePatterns . [])))))))
+`),
+		}, {
+			query:      `repo:has.tag(tag) foo`,
+			protocol:   search.Streaming,
+			searchType: query.SearchTypeRegex,
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . regex)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (SEQUENTIAL
+            (ensureUnique . false)
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.hasKVPs[0].key . ^tag$)
+              (PARTIALREPOS
+                (ZOEKTREPOSUBSETTEXTSEARCH
+                  (fileMatchLimit . 10000)
+                  (select . )
+                  (zoektQueryRegexps . ["(?i)foo"])
+                  (query . substr:"foo")
+                  (type . text))))
+            (REPOPAGER
+              (containsRefGlobs . false)
+              (repoOpts.hasKVPs[0].key . ^tag$)
+              (PARTIALREPOS
+                (SEARCHERTEXTSEARCH
+                  (useFullDeadline . true)
+                  (patternInfo . TextPatternInfo{/foo/,filematchlimit:10000})
+                  (numRepos . 0)
+                  (pathRegexps . ["(?i)foo"])
+                  (indexed . false))))
+            (REPOSEARCH
+              (repoOpts.repoFilters . [foo])
+              (repoOpts.hasKVPs[0].key . ^tag$)
+              (repoNamePatterns . ["(?i)foo"])))
+          NOOP
+          (REPOSCOMPUTEEXCLUDED
+            (repoOpts.hasKVPs[0].key . ^tag$))
+          NOOP)))))
+`),
 		}, {
 			query:      `(...)`,
 			protocol:   search.Streaming,
 			searchType: query.SearchTypeStructural,
-			want: autogold.Want("stream structural search", `
-(ALERT
-  (query . )
-  (originalQuery . )
-  (patternType . structural)
-  (TIMEOUT
-    (timeout . 20s)
-    (LIMIT
-      (limit . 500)
-      (PARALLEL
-        (REPOSCOMPUTEEXCLUDED
-          )
-        (STRUCTURALSEARCH
-          (patternInfo.pattern . (:[_]))(patternInfo.isStructural . true)(patternInfo.fileMatchLimit . 500)
-          )))))`),
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . structural)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          REPOSCOMPUTEEXCLUDED
+          (REPOPAGER
+            (containsRefGlobs . false)
+            (PARTIALREPOS
+              (STRUCTURALSEARCH
+                (useFullDeadline . true)
+                (useIndex . yes)
+                (patternInfo.query . "(:[_])")
+                (patternInfo.isStructural . true)
+                (patternInfo.fileMatchLimit . 10000)))))))))
+`),
+		},
+		{
+			query:      `context:global repo:sourcegraph/.* are all things possible? lang:go`,
+			protocol:   search.Streaming,
+			searchType: query.SearchTypeCodyContext,
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . codycontext)
+    NOOP))
+`),
+		},
+		{
+			query:      `context:global repo:sourcegraph/.* what is symf? lang:go`,
+			protocol:   search.Streaming,
+			searchType: query.SearchTypeCodyContext,
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . codycontext)
+    (CODYCONTEXTSEARCH
+      (patterns . ["readme","symf"])
+      (codeCount . 12)
+      (textCount . 3))))
+`),
+		},
+		// The next query shows an unexpected way that a query is
+		// translated into a global zoekt query, all depending on if context:
+		// is specified (which it normally is). We expect to just have one
+		// global zoekt query, but with context we do not. Recording this test
+		// to capture the current inefficiency.
+		{
+			query:      `context:global (foo AND bar AND baz) OR "foo bar baz"`,
+			protocol:   search.Streaming,
+			searchType: query.SearchTypeKeyword,
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . keyword)
+    (OR
+      (TIMEOUT
+        (timeout . 20s)
+        (LIMIT
+          (limit . 10000)
+          (PARALLEL
+            (ZOEKTGLOBALTEXTSEARCH
+              (fileMatchLimit . 10000)
+              (select . )
+              (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+              (includePrivate . true)
+              (globalZoektQueryRegexps . ["(?i)foo","(?i)bar","(?i)baz"])
+              (query . (and substr:"foo" substr:"bar" substr:"baz"))
+              (type . text)
+              (repoOpts.searchContextSpec . global))
+            (REPOSCOMPUTEEXCLUDED
+              (repoOpts.searchContextSpec . global))
+            (AND
+              (LIMIT
+                (limit . 40000)
+                (REPOSEARCH
+                  (repoOpts.repoFilters . [foo])
+                  (repoOpts.searchContextSpec . global)
+                  (repoNamePatterns . ["(?i)foo"])))
+              (LIMIT
+                (limit . 40000)
+                (REPOSEARCH
+                  (repoOpts.repoFilters . [bar])
+                  (repoOpts.searchContextSpec . global)
+                  (repoNamePatterns . ["(?i)bar"])))
+              (LIMIT
+                (limit . 40000)
+                (REPOSEARCH
+                  (repoOpts.repoFilters . [baz])
+                  (repoOpts.searchContextSpec . global)
+                  (repoNamePatterns . ["(?i)baz"])))))))
+      (TIMEOUT
+        (timeout . 20s)
+        (LIMIT
+          (limit . 10000)
+          (PARALLEL
+            (SEQUENTIAL
+              (ensureUnique . false)
+              (ZOEKTGLOBALTEXTSEARCH
+                (fileMatchLimit . 10000)
+                (select . )
+                (repoScope . ["(and branch=\"HEAD\" rawConfig:RcOnlyPublic|RcNoForks|RcNoArchived)"])
+                (includePrivate . true)
+                (globalZoektQueryRegexps . ["(?i)foo bar baz"])
+                (query . substr:"foo bar baz")
+                (type . text))
+              (REPOSEARCH
+                (repoOpts.repoFilters . [foo bar baz])
+                (repoNamePatterns . ["(?i)foo bar baz"])))
+            REPOSCOMPUTEEXCLUDED
+            NOOP))))))
+`),
+		},
+
+		// This test shows that we can handle languages not in Linguist
+		{
+			query:      `context:global repo:sourcegraph/.* lang:magik`,
+			protocol:   search.Streaming,
+			searchType: query.SearchTypeKeyword,
+			want: autogold.Expect(`
+(LOG
+  (ALERT
+    (features . error decoding features)
+    (protocol . Streaming)
+    (onSourcegraphDotCom . true)
+    (query . )
+    (originalQuery . )
+    (patternType . keyword)
+    (TIMEOUT
+      (timeout . 20s)
+      (LIMIT
+        (limit . 10000)
+        (PARALLEL
+          (REPOPAGER
+            (containsRefGlobs . false)
+            (repoOpts.repoFilters . [sourcegraph/.*])
+            (repoOpts.searchContextSpec . global)
+            (PARTIALREPOS
+              (ZOEKTREPOSUBSETTEXTSEARCH
+                (fileMatchLimit . 10000)
+                (select . )
+                (zoektQueryRegexps . ["(?i)(?im:\\.MAGIK$)"])
+                (query . file_regex:"(?i:\\.MAGIK)(?m:$)")
+                (type . text))))
+          (REPOPAGER
+            (containsRefGlobs . false)
+            (repoOpts.repoFilters . [sourcegraph/.*])
+            (repoOpts.searchContextSpec . global)
+            (PARTIALREPOS
+              (SEARCHERTEXTSEARCH
+                (useFullDeadline . true)
+                (patternInfo . TextPatternInfo{//,filematchlimit:10000,lang:magik,f:"(?i)\\.magik$"})
+                (numRepos . 0)
+                (pathRegexps . ["(?i)\\.magik$"])
+                (indexed . false))))
+          (REPOSCOMPUTEEXCLUDED
+            (repoOpts.repoFilters . [sourcegraph/.*])
+            (repoOpts.searchContextSpec . global))
+          NOOP)))))
+`),
 		},
 	}
 
 	for _, tc := range cases {
-		t.Run(tc.want.Name(), func(t *testing.T) {
+		t.Run(tc.query, func(t *testing.T) {
 			plan, err := query.Pipeline(query.Init(tc.query, tc.searchType))
 			require.NoError(t, err)
 
@@ -678,7 +1239,7 @@ func TestNewPlanJob(t *testing.T) {
 			j, err := NewPlanJob(inputs, plan)
 			require.NoError(t, err)
 
-			tc.want.Equal(t, "\n"+printer.SexpPretty(j))
+			tc.want.Equal(t, sPrintSexpMax(j))
 		})
 	}
 }
@@ -698,16 +1259,16 @@ func TestToEvaluateJob(t *testing.T) {
 		return "\n" + printer.SexpPretty(j) + "\n"
 	}
 
-	autogold.Want("root limit for streaming search", `
+	autogold.Expect(`
 (REPOSEARCH
-  (repoOpts.repoFilters.0 . foo)
-  (repoNamePatterns . [(?i)foo]))
+  (repoOpts.repoFilters . [foo])
+  (repoNamePatterns . ["(?i)foo"]))
 `).Equal(t, test("foo", search.Streaming))
 
-	autogold.Want("root limit for batch search", `
+	autogold.Expect(`
 (REPOSEARCH
-  (repoOpts.repoFilters.0 . foo)
-  (repoNamePatterns . [(?i)foo]))
+  (repoOpts.repoFilters . [foo])
+  (repoNamePatterns . ["(?i)foo"]))
 `).Equal(t, test("foo", search.Batch))
 }
 
@@ -715,147 +1276,154 @@ func TestToTextPatternInfo(t *testing.T) {
 	cases := []struct {
 		input  string
 		output autogold.Value
+		feat   search.Features
 	}{{
 		input:  `type:repo archived`,
-		output: autogold.Want("01", `{"Pattern":"archived","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"archived","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `type:repo archived archived:yes`,
-		output: autogold.Want("02", `{"Pattern":"archived","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"archived","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `type:repo sgtest/mux`,
-		output: autogold.Want("04", `{"Pattern":"sgtest/mux","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"sgtest/mux","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `type:repo sgtest/mux fork:yes`,
-		output: autogold.Want("05", `{"Pattern":"sgtest/mux","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"sgtest/mux","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `"func main() {\n" patterntype:regexp type:file`,
-		output: autogold.Want("10", `{"Pattern":"func main\\(\\) \\{\n","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"func main() {\n","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `"func main() {\n" -repo:go-diff patterntype:regexp type:file`,
-		output: autogold.Want("11", `{"Pattern":"func main\\(\\) \\{\n","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"func main() {\n","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/go-diff$ String case:yes type:file`,
-		output: autogold.Want("12", `{"Pattern":"String","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":true,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":true,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"String","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":true,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":true,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/java-langserver$@v1 void sendPartialResult(Object requestId, JsonPatch jsonPatch); patterntype:literal type:file`,
-		output: autogold.Want("13", `{"Pattern":"void sendPartialResult\\(Object requestId, JsonPatch jsonPatch\\);","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"void sendPartialResult(Object requestId, JsonPatch jsonPatch);","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/java-langserver$@v1 void sendPartialResult(Object requestId, JsonPatch jsonPatch); patterntype:literal count:1 type:file`,
-		output: autogold.Want("14", `{"Pattern":"void sendPartialResult\\(Object requestId, JsonPatch jsonPatch\\);","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":1,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"void sendPartialResult(Object requestId, JsonPatch jsonPatch);","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":1,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/java-langserver$ \nimport index:only patterntype:regexp type:file`,
-		output: autogold.Want("15", `{"Pattern":"\\nimport","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"only","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"\\nimport","IsNegated":false,"IsRegExp":true,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"only","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/java-langserver$ \nimport index:no patterntype:regexp type:file`,
-		output: autogold.Want("16", `{"Pattern":"\\nimport","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"no","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"\\nimport","IsNegated":false,"IsRegExp":true,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"no","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/java-langserver$ doesnot734734743734743exist`,
-		output: autogold.Want("17", `{"Pattern":"doesnot734734743734743exist","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"doesnot734734743734743exist","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/sourcegraph-typescript$ type:commit test`,
-		output: autogold.Want("21", `{"Pattern":"test","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"test","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/go-diff$ type:diff main`,
-		output: autogold.Want("22", `{"Pattern":"main","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"main","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/go-diff$ repohascommitafter:"2019-01-01" test patterntype:literal`,
-		output: autogold.Want("23", `{"Pattern":"test","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"test","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `^func.*$ patterntype:regexp index:only type:file`,
-		output: autogold.Want("24", `{"Pattern":"^func.*$","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"only","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"^func.*$","IsNegated":false,"IsRegExp":true,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"only","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `fork:only patterntype:regexp FORK_SENTINEL`,
-		output: autogold.Want("25", `{"Pattern":"FORK_SENTINEL","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"FORK_SENTINEL","IsNegated":false,"IsRegExp":true,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `\bfunc\b lang:go type:file patterntype:regexp`,
-		output: autogold.Want("26", `{"Pattern":"\\bfunc\\b","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":["\\.go$"],"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":["go"]}`),
-	}, {
-		input:  `repo:^github\.com/sgtest/go-diff$ make(:[1]) index:only patterntype:structural count:3`,
-		output: autogold.Want("29", `{"Pattern":"make(:[1])","IsNegated":false,"IsRegExp":false,"IsStructuralPat":true,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":3,"Index":"only","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
-	}, {
-		input:  `repo:^github\.com/sgtest/go-diff$ make(:[1]) lang:go rule:'where "backcompat" == "backcompat"' patterntype:structural`,
-		output: autogold.Want("30", `{"Pattern":"make(:[1])","IsNegated":false,"IsRegExp":false,"IsStructuralPat":true,"CombyRule":"where \"backcompat\" == \"backcompat\"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":["\\.go$"],"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":["go"]}`),
-	}, {
-		input:  `repo:^github\.com/sgtest/go-diff$@adde71 make(:[1]) index:no patterntype:structural count:3`,
-		output: autogold.Want("31", `{"Pattern":"make(:[1])","IsNegated":false,"IsRegExp":false,"IsStructuralPat":true,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":3,"Index":"no","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
-	}, {
-		input:  `repo:^github\.com/sgtest/sourcegraph-typescript$ file:^README\.md "basic :[_] access :[_]" patterntype:structural`,
-		output: autogold.Want("32", `{"Pattern":"\"basic :[_] access :[_]\"","IsNegated":false,"IsRegExp":false,"IsStructuralPat":true,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":["^README\\.md"],"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"\\bfunc\\b","IsNegated":false,"IsRegExp":true,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":["(?i)\\.go$"],"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":["go"]}`),
 	}, {
 		input:  `no results for { ... } raises alert repo:^github\.com/sgtest/go-diff$`,
-		output: autogold.Want("34", `{"Pattern":"no results for \\{ \\.\\.\\. \\} raises alert","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"no results for { ... } raises alert","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/go-diff$ patternType:regexp \ and /`,
-		output: autogold.Want("49", `{"Pattern":"(?:\\ and).*?(?:/)","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"(?:\\ and).*?(?:/)","IsNegated":false,"IsRegExp":true,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/go-diff$ (not .svg) patterntype:literal`,
-		output: autogold.Want("52", `{"Pattern":"\\.svg","IsNegated":true,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":".svg","IsNegated":true,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/sourcegraph-typescript$ (Fetches OR file:language-server.ts)`,
-		output: autogold.Want("72", `{"Pattern":"Fetches","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"Fetches","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/sourcegraph-typescript$ ((file:^renovate\.json extends) or file:progress.ts createProgressProvider)`,
-		output: autogold.Want("73", `{"Pattern":"extends","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":["^renovate\\.json"],"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"extends","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":["^renovate\\.json"],"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/sourcegraph-typescript$ (type:diff or type:commit) author:felix yarn`,
-		output: autogold.Want("74", `{"Pattern":"yarn","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"yarn","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `repo:^github\.com/sgtest/sourcegraph-typescript$ (type:diff or type:commit) subscription after:"june 11 2019" before:"june 13 2019"`,
-		output: autogold.Want("75", `{"Pattern":"subscription","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"subscription","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `(repo:^github\.com/sgtest/go-diff$@garo/lsif-indexing-campaign:test-already-exist-pr or repo:^github\.com/sgtest/sourcegraph-typescript$) file:README.md #`,
-		output: autogold.Want("78", `{"Pattern":"#","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":["README.md"],"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"#","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":["README.md"],"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `(repo:^github\.com/sgtest/sourcegraph-typescript$ or repo:^github\.com/sgtest/go-diff$) package diff provides`,
-		output: autogold.Want("79", `{"Pattern":"package diff provides","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"package diff provides","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:contains.file(path:noexist.go) test`,
-		output: autogold.Want("83", `{"Pattern":"test","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"test","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:contains.file(path:go.mod) count:100 fmt`,
-		output: autogold.Want("87", `{"Pattern":"fmt","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":100,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"fmt","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":100,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `type:commit LSIF`,
-		output: autogold.Want("90", `{"Pattern":"LSIF","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"LSIF","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `repo:contains.file(path:diff.pb.go) type:commit LSIF`,
-		output: autogold.Want("91", `{"Pattern":"LSIF","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"LSIF","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
 	}, {
 		input:  `repo:go-diff patterntype:literal HunkNoChunksize select:repo`,
-		output: autogold.Want("93", `{"Pattern":"HunkNoChunksize","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":["repo"],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"HunkNoChunksize","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":["repo"],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:go-diff patterntype:literal HunkNoChunksize select:file`,
-		output: autogold.Want("96", `{"Pattern":"HunkNoChunksize","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":["file"],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"HunkNoChunksize","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":["file"],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:go-diff patterntype:literal HunkNoChunksize select:content`,
-		output: autogold.Want("98", `{"Pattern":"HunkNoChunksize","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":["content"],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"HunkNoChunksize","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":["content"],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:go-diff patterntype:literal HunkNoChunksize`,
-		output: autogold.Want("99", `{"Pattern":"HunkNoChunksize","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"HunkNoChunksize","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:go-diff patterntype:literal HunkNoChunksize select:commit`,
-		output: autogold.Want("100", `{"Pattern":"HunkNoChunksize","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":["commit"],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
-	}, {
-		input:  `repo:go-diff patterntype:literal HunkNoChunksize select:symbol`,
-		output: autogold.Want("101", `{"Pattern":"HunkNoChunksize","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":["symbol"],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
-	}, {
-		input:  `repo:go-diff patterntype:literal type:symbol HunkNoChunksize select:symbol`,
-		output: autogold.Want("102", `{"Pattern":"HunkNoChunksize","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":["symbol"],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":false,"PatternMatchesPath":false,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"HunkNoChunksize","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":["commit"],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `foo\d "bar*" patterntype:regexp`,
-		output: autogold.Want("105", `{"Pattern":"(?:foo\\d).*?(?:bar\\*)","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"(?:foo\\d).*?(?:bar\\*)","IsNegated":false,"IsRegExp":true,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `patterntype:regexp // literal slash`,
-		output: autogold.Want("107", `{"Pattern":"(?://).*?(?:literal).*?(?:slash)","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect(`{"Query":{"Value":"(?://).*?(?:literal).*?(?:slash)","IsNegated":false,"IsRegExp":true,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
 	}, {
 		input:  `repo:contains.path(Dockerfile)`,
-		output: autogold.Want("108", `{"Pattern":"","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect("Error"),
 	}, {
 		input:  `repohasfile:Dockerfile`,
-		output: autogold.Want("109", `{"Pattern":"","IsNegated":false,"IsRegExp":true,"IsStructuralPat":false,"CombyRule":"","IsWordMatch":false,"IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePatterns":null,"ExcludePattern":"","PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+		output: autogold.Expect("Error"),
+	}, {
+		input:  `repo:^github\.com/sgtest/go-diff$ make(:[1]) index:only patterntype:structural count:3`,
+		output: autogold.Expect(`{"Query":{"Value":"make(:[1])","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":true,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":3,"Index":"only","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+	}, {
+		input:  `repo:^github\.com/sgtest/go-diff$ make(:[1]) lang:go rule:'where "backcompat" == "backcompat"' patterntype:structural`,
+		output: autogold.Expect(`{"Query":{"Value":"make(:[1])","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":true,"CombyRule":"where \"backcompat\" == \"backcompat\"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":["(?i)\\.go$"],"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":["go"]}`),
+	}, {
+		input:  `repo:^github\.com/sgtest/go-diff$@adde71 make(:[1]) index:no patterntype:structural count:3`,
+		output: autogold.Expect(`{"Query":{"Value":"make(:[1])","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":true,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":3,"Index":"no","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+	}, {
+		input:  `repo:^github\.com/sgtest/sourcegraph-typescript$ file:^README\.md "basic :[_] access :[_]" patterntype:structural`,
+		output: autogold.Expect(`{"Query":{"Value":"\"basic :[_] access :[_]\"","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":true,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":["^README\\.md"],"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":null}`),
+	}, {
+		input:  `repo:^github\.com/sgtest/sourcegraph-typescript$ lang:typescript "basic :[_] access :[_]" patterntype:structural`,
+		feat:   search.Features{ContentBasedLangFilters: true},
+		output: autogold.Expect(`{"Query":{"Value":"\"basic :[_] access :[_]\"","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":true,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":["TypeScript"],"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":true,"Languages":["typescript"]}`),
+	}, {
+		input:  `sgtest lang:magik type:file`,
+		feat:   search.Features{ContentBasedLangFilters: true},
+		output: autogold.Expect(`{"Query":{"Value":"sgtest","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":null,"ExcludePaths":"","IncludeLangs":["Magik"],"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":["magik"]}`),
+	}, {
+		input:  `sgtest lang:magik type:file`,
+		feat:   search.Features{ContentBasedLangFilters: false},
+		output: autogold.Expect(`{"Query":{"Value":"sgtest","IsNegated":false,"IsRegExp":false,"Boost":false},"IsStructuralPat":false,"CombyRule":"","IsCaseSensitive":false,"FileMatchLimit":30,"Index":"yes","Select":[],"IncludePaths":["(?i)\\.magik$"],"ExcludePaths":"","IncludeLangs":null,"ExcludeLangs":null,"PathPatternsAreCaseSensitive":false,"PatternMatchesContent":true,"PatternMatchesPath":false,"Languages":["magik"]}`),
 	}}
 
-	test := func(input string) string {
+	test := func(input string, feat search.Features) string {
 		searchType := overrideSearchType(input, query.SearchTypeLiteral)
 		plan, err := query.Pipeline(query.Init(input, searchType))
 		if err != nil {
@@ -865,17 +1433,100 @@ func TestToTextPatternInfo(t *testing.T) {
 			return "Empty"
 		}
 		b := plan[0]
-		types, _ := b.ToParseTree().StringValues(query.FieldType)
-		mode := search.Batch
-		resultTypes := computeResultTypes(types, b, query.SearchTypeLiteral)
-		p := toTextPatternInfo(b, resultTypes, mode)
+		resultTypes := computeResultTypes(b, query.SearchTypeLiteral, defaultResultTypes)
+		p, err := toTextPatternInfo(b, resultTypes, &feat, limits.DefaultMaxSearchResults)
+		if err != nil {
+			return "Error"
+		}
 		v, _ := json.Marshal(p)
 		return string(v)
 	}
 
 	for _, tc := range cases {
-		t.Run(tc.output.Name(), func(t *testing.T) {
-			tc.output.Equal(t, test(tc.input))
+		t.Run(tc.input, func(t *testing.T) {
+			tc.output.Equal(t, test(tc.input, tc.feat))
+		})
+	}
+}
+
+func TestToTextPatternInfoBoost(t *testing.T) {
+	basic := query.Basic{Pattern: query.Operator{
+		Kind: query.And,
+		Operands: []query.Node{
+			query.Pattern{
+				Value:      "lorem ipsum",
+				Annotation: query.Annotation{Labels: query.Boost | query.Literal},
+			},
+			query.Pattern{
+				Value:      "dolor sit",
+				Annotation: query.Annotation{Labels: query.Literal},
+			}},
+	}}
+
+	patternInfo, err := toTextPatternInfo(basic, defaultResultTypes, &search.Features{}, limits.DefaultMaxSearchResults)
+	require.NoError(t, err)
+
+	want := &protocol.AndNode{
+		Children: []protocol.QueryNode{
+			&protocol.PatternNode{Value: "lorem ipsum", Boost: true},
+			&protocol.PatternNode{Value: "dolor sit"},
+		},
+	}
+
+	if cmp.Diff(want, patternInfo.Query) != "" {
+		t.Fatalf("unexpected query: %v", patternInfo.Query)
+	}
+}
+
+func TestToSymbolSearchRequest(t *testing.T) {
+	cases := []struct {
+		input   string
+		output  autogold.Value
+		feat    search.Features
+		wantErr bool
+	}{{
+		input:  `repo:go-diff patterntype:literal HunkNoChunksize select:symbol  file:^README\.md `,
+		output: autogold.Expect(`{"RegexpPattern":"HunkNoChunksize","IsCaseSensitive":false,"IncludePatterns":["^README\\.md"],"ExcludePattern":"","IncludeLangs":null,"ExcludeLangs":null}`),
+	}, {
+		input:  `repo:go-diff patterntype:literal type:symbol HunkNoChunksize select:symbol -file:^README\.md `,
+		output: autogold.Expect(`{"RegexpPattern":"HunkNoChunksize","IsCaseSensitive":false,"IncludePatterns":null,"ExcludePattern":"^README\\.md","IncludeLangs":null,"ExcludeLangs":null}`),
+	}, {
+		input:  `repo:go-diff type:symbol`,
+		output: autogold.Expect(`{"RegexpPattern":"","IsCaseSensitive":false,"IncludePatterns":null,"ExcludePattern":"","IncludeLangs":null,"ExcludeLangs":null}`),
+	}, {
+		input:   `type:symbol NOT option`,
+		output:  autogold.Expect("null"),
+		wantErr: true,
+	}, {
+		input:  `repo:go-diff type:symbol HunkNoChunksize lang:Julia -lang:R`,
+		output: autogold.Expect(`{"RegexpPattern":"HunkNoChunksize","IsCaseSensitive":false,"IncludePatterns":["(?i)\\.jl$"],"ExcludePattern":"(?i)(?:\\.r$)|(?:\\.rd$)|(?:\\.rsx$)|(?:(^|/)\\.Rprofile$)|(?:(^|/)expr-dist$)","IncludeLangs":null,"ExcludeLangs":null}`),
+	}, {
+		input:  `repo:go-diff type:symbol HunkNoChunksize lang:Julia -lang:R`,
+		feat:   search.Features{ContentBasedLangFilters: true},
+		output: autogold.Expect(`{"RegexpPattern":"HunkNoChunksize","IsCaseSensitive":false,"IncludePatterns":null,"ExcludePattern":"","IncludeLangs":["Julia"],"ExcludeLangs":["R"]}`),
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			plan, err := query.Pipeline(query.Init(tc.input, query.SearchTypeLiteral))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			b := plan[0]
+			var pattern *query.Pattern
+			if p, ok := b.Pattern.(query.Pattern); ok {
+				pattern = &p
+			}
+
+			f := query.Flat{Parameters: b.Parameters, Pattern: pattern}
+			r, err := toSymbolSearchRequest(f, &tc.feat)
+
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("mismatch error = %v, wantErr %v", err, tc.wantErr)
+			}
+			v, _ := json.Marshal(r)
+			tc.output.Equal(t, string(v))
 		})
 	}
 }
@@ -899,6 +1550,35 @@ func overrideSearchType(input string, searchType query.SearchType) query.SearchT
 		}
 	})
 	return searchType
+}
+
+func Test_computeResultTypes(t *testing.T) {
+	test := func(input string, searchType query.SearchType) string {
+		plan, _ := query.Pipeline(query.Init(input, searchType))
+		b := plan[0]
+		resultTypes := computeResultTypes(b, searchType, defaultResultTypes)
+		return resultTypes.String()
+	}
+
+	t.Run("standard, only search file content when type not set", func(t *testing.T) {
+		autogold.Expect("file").Equal(t, test("path:foo content:bar", query.SearchTypeStandard))
+	})
+
+	t.Run("standard, plain pattern searches repo path file content", func(t *testing.T) {
+		autogold.Expect("file, path, repo").Equal(t, test("path:foo bar", query.SearchTypeStandard))
+	})
+
+	t.Run("keyword, only search file content when type not set", func(t *testing.T) {
+		autogold.Expect("file").Equal(t, test("path:foo content:bar", query.SearchTypeKeyword))
+	})
+
+	t.Run("keyword, plain pattern searches repo path file content", func(t *testing.T) {
+		autogold.Expect("file, path, repo").Equal(t, test("path:foo bar", query.SearchTypeKeyword))
+	})
+
+	t.Run("keyword, only search file content with negation", func(t *testing.T) {
+		autogold.Expect("file").Equal(t, test("path:foo content:bar -content:baz", query.SearchTypeKeyword))
+	})
 }
 
 func TestRepoSubsetTextSearch(t *testing.T) {
@@ -948,7 +1628,7 @@ func TestRepoSubsetTextSearch(t *testing.T) {
 	}
 	defer func() { searcher.MockSearchFilesInRepo = nil }()
 
-	zoekt := &searchbackend.FakeSearcher{}
+	zoekt := &searchbackend.FakeStreamer{}
 
 	q, err := query.ParseLiteral("foo")
 	if err != nil {
@@ -958,10 +1638,12 @@ func TestRepoSubsetTextSearch(t *testing.T) {
 
 	patternInfo := &search.TextPatternInfo{
 		FileMatchLimit: limits.DefaultMaxSearchResults,
-		Pattern:        "foo",
+		Query: &protocol.PatternNode{
+			Value: "foo",
+		},
 	}
 
-	matches, common, err := RunRepoSubsetTextSearch(
+	matches, common, err := runRepoSubsetTextSearch(
 		context.Background(),
 		logtest.Scoped(t),
 		patternInfo,
@@ -969,7 +1651,6 @@ func TestRepoSubsetTextSearch(t *testing.T) {
 		q,
 		zoekt,
 		endpoint.Static("test"),
-		search.DefaultMode,
 		false,
 	)
 	if err != nil {
@@ -986,12 +1667,12 @@ func TestRepoSubsetTextSearch(t *testing.T) {
 		"foo/cloning":          search.RepoStatusCloning,
 		"foo/missing":          search.RepoStatusMissing,
 		"foo/missing-database": search.RepoStatusMissing,
-		"foo/timedout":         search.RepoStatusTimedout,
+		"foo/timedout":         search.RepoStatusTimedOut,
 	})
 
 	// If we specify a rev and it isn't found, we fail the whole search since
 	// that should be checked earlier.
-	_, _, err = RunRepoSubsetTextSearch(
+	_, _, err = runRepoSubsetTextSearch(
 		context.Background(),
 		logtest.Scoped(t),
 		patternInfo,
@@ -999,10 +1680,9 @@ func TestRepoSubsetTextSearch(t *testing.T) {
 		q,
 		zoekt,
 		endpoint.Static("test"),
-		search.DefaultMode,
 		false,
 	)
-	if !errors.HasType(err, &gitdomain.RevisionNotFoundError{}) {
+	if !errors.HasType[*gitdomain.RevisionNotFoundError](err) {
 		t.Fatalf("searching non-existent rev expected to fail with RevisionNotFoundError got: %v", err)
 	}
 }
@@ -1050,7 +1730,7 @@ func TestSearchFilesInReposStream(t *testing.T) {
 	}
 	defer func() { searcher.MockSearchFilesInRepo = nil }()
 
-	zoekt := &searchbackend.FakeSearcher{}
+	zoekt := &searchbackend.FakeStreamer{}
 
 	q, err := query.ParseLiteral("foo")
 	if err != nil {
@@ -1059,10 +1739,12 @@ func TestSearchFilesInReposStream(t *testing.T) {
 
 	patternInfo := &search.TextPatternInfo{
 		FileMatchLimit: limits.DefaultMaxSearchResults,
-		Pattern:        "foo",
+		Query: &protocol.PatternNode{
+			Value: "foo",
+		},
 	}
 
-	matches, _, err := RunRepoSubsetTextSearch(
+	matches, _, err := runRepoSubsetTextSearch(
 		context.Background(),
 		logtest.Scoped(t),
 		patternInfo,
@@ -1070,7 +1752,6 @@ func TestSearchFilesInReposStream(t *testing.T) {
 		q,
 		zoekt,
 		endpoint.Static("test"),
-		search.DefaultMode,
 		false,
 	)
 	if err != nil {
@@ -1118,13 +1799,7 @@ func TestSearchFilesInRepos_multipleRevsPerRepo(t *testing.T) {
 	}
 	defer func() { searcher.MockSearchFilesInRepo = nil }()
 
-	trueVal := true
-	conf.Mock(&conf.Unified{SiteConfiguration: schema.SiteConfiguration{
-		ExperimentalFeatures: &schema.ExperimentalFeatures{SearchMultipleRevisionsPerRepository: &trueVal},
-	}})
-	defer conf.Mock(nil)
-
-	zoekt := &searchbackend.FakeSearcher{}
+	zoekt := &searchbackend.FakeStreamer{}
 
 	q, err := query.ParseLiteral("foo")
 	if err != nil {
@@ -1133,12 +1808,14 @@ func TestSearchFilesInRepos_multipleRevsPerRepo(t *testing.T) {
 
 	patternInfo := &search.TextPatternInfo{
 		FileMatchLimit: limits.DefaultMaxSearchResults,
-		Pattern:        "foo",
+		Query: &protocol.PatternNode{
+			Value: "foo",
+		},
 	}
 
 	repos := makeRepositoryRevisions("foo@master:mybranch:branch3:branch4")
 
-	matches, _, err := RunRepoSubsetTextSearch(
+	matches, _, err := runRepoSubsetTextSearch(
 		context.Background(),
 		logtest.Scoped(t),
 		patternInfo,
@@ -1146,7 +1823,6 @@ func TestSearchFilesInRepos_multipleRevsPerRepo(t *testing.T) {
 		q,
 		zoekt,
 		endpoint.Static("test"),
-		search.DefaultMode,
 		false,
 	)
 	if err != nil {
@@ -1157,7 +1833,7 @@ func TestSearchFilesInRepos_multipleRevsPerRepo(t *testing.T) {
 	for i, match := range matches {
 		matchKeys[i] = match.Key()
 	}
-	sort.Slice(matchKeys, func(i, j int) bool { return matchKeys[i].Less(matchKeys[j]) })
+	slices.SortFunc(matchKeys, result.Key.Compare)
 
 	wantResultKeys := []result.Key{
 		{Repo: "foo", Commit: "branch3", Path: "main.go"},
@@ -1246,16 +1922,20 @@ func TestZoektQueryPatternsAsRegexps(t *testing.T) {
 func makeRepositoryRevisions(repos ...string) []*search.RepositoryRevisions {
 	r := make([]*search.RepositoryRevisions, len(repos))
 	for i, repospec := range repos {
-		repoName, revSpecs := search.ParseRepositoryRevisions(repospec)
-		revs := make([]string, 0, len(revSpecs))
-		for _, revSpec := range revSpecs {
+		repoRevs, err := query.ParseRepositoryRevisions(repospec)
+		if err != nil {
+			panic(errors.Errorf("unexpected error parsing repo spec %s", repospec))
+		}
+
+		revs := make([]string, 0, len(repoRevs.Revs))
+		for _, revSpec := range repoRevs.Revs {
 			revs = append(revs, revSpec.RevSpec)
 		}
 		if len(revs) == 0 {
 			// treat empty list as HEAD
 			revs = []string{""}
 		}
-		r[i] = &search.RepositoryRevisions{Repo: mkRepos(repoName)[0], Revs: revs}
+		r[i] = &search.RepositoryRevisions{Repo: mkRepos(repoRevs.Repo)[0], Revs: revs}
 	}
 	return r
 }
@@ -1276,19 +1956,17 @@ func mkRepos(names ...string) []types.MinimalRepo {
 	return repos
 }
 
-// RunRepoSubsetTextSearch is a convenience function that simulates the RepoSubsetTextSearch job.
-func RunRepoSubsetTextSearch(
+// runRepoSubsetTextSearch is a convenience function that simulates the RepoSubsetTextSearch job.
+func runRepoSubsetTextSearch(
 	ctx context.Context,
 	logger log.Logger,
 	patternInfo *search.TextPatternInfo,
 	repos []*search.RepositoryRevisions,
 	q query.Q,
-	zoekt *searchbackend.FakeSearcher,
+	zoekt *searchbackend.FakeStreamer,
 	searcherURLs *endpoint.Map,
-	mode search.GlobalSearchMode,
 	useFullDeadline bool,
 ) ([]*result.FileMatch, streaming.Stats, error) {
-	notSearcherOnly := mode != search.SearcherOnly
 	searcherArgs := &search.SearcherParameters{
 		PatternInfo:     patternInfo,
 		UseFullDeadline: useFullDeadline,
@@ -1311,46 +1989,50 @@ func RunRepoSubsetTextSearch(
 
 	g, ctx := errgroup.WithContext(ctx)
 
-	if notSearcherOnly {
-		b, err := query.ToBasicQuery(q)
-		if err != nil {
-			return nil, streaming.Stats{}, err
-		}
-
-		types, _ := q.StringValues(query.FieldType)
-		var resultTypes result.Types
-		if len(types) == 0 {
-			resultTypes = result.TypeFile | result.TypePath | result.TypeRepo
-		} else {
-			for _, t := range types {
-				resultTypes = resultTypes.With(result.TypeFromString[t])
-			}
-		}
-
-		typ := search.TextRequest
-		zoektQuery, err := zoektutil.QueryToZoektQuery(b, resultTypes, nil, typ)
-		if err != nil {
-			return nil, streaming.Stats{}, err
-		}
-
-		zoektJob := &zoektutil.RepoSubsetTextSearchJob{
-			Repos:          indexed,
-			Query:          zoektQuery,
-			Typ:            search.TextRequest,
-			FileMatchLimit: patternInfo.FileMatchLimit,
-			Select:         patternInfo.Select,
-			Since:          nil,
-		}
-
-		// Run literal and regexp searches on indexed repositories.
-		g.Go(func() error {
-			_, err := zoektJob.Run(ctx, job.RuntimeClients{
-				Logger: logger,
-				Zoekt:  zoekt,
-			}, agg)
-			return err
-		})
+	b, err := query.ToBasicQuery(q)
+	if err != nil {
+		return nil, streaming.Stats{}, err
 	}
+
+	fieldTypes, _ := q.StringValues(query.FieldType)
+	var resultTypes result.Types
+	if len(fieldTypes) == 0 {
+		resultTypes = result.TypeFile | result.TypePath | result.TypeRepo
+	} else {
+		for _, t := range fieldTypes {
+			resultTypes = resultTypes.With(result.TypeFromString[t])
+		}
+	}
+
+	typ := search.TextRequest
+	zoektQuery, err := zoektutil.QueryToZoektQuery(b, resultTypes, &search.Features{}, typ)
+	if err != nil {
+		return nil, streaming.Stats{}, err
+	}
+
+	zoektParams := &search.ZoektParameters{
+		FileMatchLimit:  patternInfo.FileMatchLimit,
+		Typ:             typ,
+		Select:          patternInfo.Select,
+		NumContextLines: 0,
+	}
+
+	zoektJob := &zoektutil.RepoSubsetTextSearchJob{
+		Repos:       indexed,
+		Query:       zoektQuery,
+		Typ:         typ,
+		ZoektParams: zoektParams,
+		Since:       nil,
+	}
+
+	// Run literal and regexp searches on indexed repositories.
+	g.Go(func() error {
+		_, err := zoektJob.Run(ctx, job.RuntimeClients{
+			Logger: logger,
+			Zoekt:  zoekt,
+		}, agg)
+		return err
+	})
 
 	// Concurrently run searcher for all unindexed repos regardless whether text or regexp.
 	g.Go(func() error {
@@ -1359,6 +2041,7 @@ func RunRepoSubsetTextSearch(
 			Repos:           unindexed,
 			Indexed:         false,
 			UseFullDeadline: searcherArgs.UseFullDeadline,
+			NumContextLines: searcherArgs.NumContextLines,
 		}
 
 		_, err := searcherJob.Run(ctx, job.RuntimeClients{

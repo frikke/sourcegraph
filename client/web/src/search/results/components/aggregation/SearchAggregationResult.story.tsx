@@ -1,23 +1,25 @@
-import { MockedResponse } from '@apollo/client/testing/core'
-import { Meta, Story } from '@storybook/react'
+import type { MockedResponse } from '@apollo/client/testing/core'
+import type { Meta, StoryFn } from '@storybook/react'
 import { noop } from 'lodash'
 
-import { BrandedStory } from '@sourcegraph/branded/src/components/BrandedStory'
 import { getDocumentNode } from '@sourcegraph/http-client'
-import { SearchPatternType } from '@sourcegraph/shared/src/schema'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 import { NOOP_TELEMETRY_SERVICE } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import { MockedTestProvider } from '@sourcegraph/shared/src/testing/apollo'
+import { BrandedStory } from '@sourcegraph/wildcard/src/stories'
 
-import { GetSearchAggregationResult, SearchAggregationMode } from '../../../../graphql-operations'
+import {
+    type GetSearchAggregationResult,
+    SearchAggregationMode,
+    SearchPatternType,
+} from '../../../../graphql-operations'
 
 import { AGGREGATION_SEARCH_QUERY } from './hooks'
 import { SearchAggregationResult } from './SearchAggregationResult'
 
 const config: Meta = {
     title: 'web/search/results/SearchAggregationResult',
-    parameters: {
-        chromatic: { disableSnapshots: false },
-    },
+    parameters: {},
 }
 
 export default config
@@ -70,22 +72,19 @@ const SEARCH_AGGREGATION_MOCK: MockedResponse<GetSearchAggregationResult> = {
                             __typename: 'AggregationGroup',
                             label: 'ExampleFrom',
                             count: 38,
-                            query:
-                                'context:global repo:^github\\.com/sourcegraph/sourcegraph$ /query(?:ExampleFrom)string/',
+                            query: 'context:global repo:^github\\.com/sourcegraph/sourcegraph$ /query(?:ExampleFrom)string/',
                         },
                         {
                             __typename: 'AggregationGroup',
                             label: '       ',
                             count: 26,
-                            query:
-                                'context:global repo:^github\\.com/sourcegraph/sourcegraph$ /query(?:       )string/',
+                            query: 'context:global repo:^github\\.com/sourcegraph/sourcegraph$ /query(?:       )string/',
                         },
                         {
                             __typename: 'AggregationGroup',
                             label: ', summaryQuery, err := makeEventLogsQueries(s.DateRange, s.Grouping, []',
                             count: 15,
-                            query:
-                                'context:global repo:^github\\.com/sourcegraph/sourcegraph$ /query(?:, summaryQuery, err := makeEventLogsQueries\\(s\\.DateRange, s\\.Grouping, \\[\\])string/',
+                            query: 'context:global repo:^github\\.com/sourcegraph/sourcegraph$ /query(?:, summaryQuery, err := makeEventLogsQueries\\(s\\.DateRange, s\\.Grouping, \\[\\])string/',
                         },
                         {
                             __typename: 'AggregationGroup',
@@ -103,8 +102,7 @@ const SEARCH_AGGREGATION_MOCK: MockedResponse<GetSearchAggregationResult> = {
                             __typename: 'AggregationGroup',
                             label: 'Parameters: map[string][]',
                             count: 8,
-                            query:
-                                'context:global repo:^github\\.com/sourcegraph/sourcegraph$ /query(?:Parameters: map\\[string\\]\\[\\])string/',
+                            query: 'context:global repo:^github\\.com/sourcegraph/sourcegraph$ /query(?:Parameters: map\\[string\\]\\[\\])string/',
                         },
                     ],
                 },
@@ -139,7 +137,7 @@ const SEARCH_AGGREGATION_MOCK: MockedResponse<GetSearchAggregationResult> = {
     },
 }
 
-export const SearchAggregationResultDemo: Story = () => (
+export const SearchAggregationResultDemo: StoryFn = () => (
     <BrandedStory>
         {() => (
             <MockedTestProvider mocks={[SEARCH_AGGREGATION_MOCK]}>
@@ -148,6 +146,7 @@ export const SearchAggregationResultDemo: Story = () => (
                     patternType={SearchPatternType.literal}
                     caseSensitive={false}
                     telemetryService={NOOP_TELEMETRY_SERVICE}
+                    telemetryRecorder={noOpTelemetryRecorder}
                     onQuerySubmit={noop}
                 />
             </MockedTestProvider>

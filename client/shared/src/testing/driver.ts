@@ -1,36 +1,42 @@
 import * as os from 'os'
 import * as path from 'path'
 
-import realPercySnapshot from '@percy/puppeteer'
 import delay from 'delay'
 import expect from 'expect'
 import * as jsonc from 'jsonc-parser'
 import { escapeRegExp } from 'lodash'
 import { readFile } from 'mz/fs'
 import puppeteer, {
-    PageEventObject,
-    Page,
-    Serializable,
-    LaunchOptions,
-    ConsoleMessage,
-    Target,
-    BrowserLaunchArgumentOptions,
-    BrowserConnectOptions,
+    type BrowserConnectOptions,
+    type BrowserLaunchArgumentOptions,
+    type ConsoleMessage,
+    type LaunchOptions,
+    type Page,
+    type PageEventObject,
+    type Serializable,
+    type Target,
 } from 'puppeteer'
-import { from, fromEvent, merge, Subscription } from 'rxjs'
-import { filter, map, concatAll, mergeMap, mergeAll, takeUntil } from 'rxjs/operators'
+import { Subscription, from, fromEvent, merge } from 'rxjs'
+import { concatAll, filter, map, mergeAll, mergeMap, takeUntil } from 'rxjs/operators'
 import { Key } from 'ts-key-enum'
 
 import { isDefined, logger } from '@sourcegraph/common'
-import { dataOrThrowErrors, gql, GraphQLResult } from '@sourcegraph/http-client'
+import { dataOrThrowErrors, gql, type GraphQLResult } from '@sourcegraph/http-client'
 
-import { ExternalServiceKind } from '../graphql-operations'
-import { IMutation, IQuery, IRepository } from '../schema'
-import { Settings } from '../settings/settings'
+import type {
+    ExternalServiceKind,
+    ExternalServicesForTestsResult,
+    OverwriteSettingsForTestsResult,
+    RepositoryNameForTestsResult,
+    SiteForTestsResult,
+    UpdateSiteConfigurationForTestsResult,
+    UserSettingsForTestsResult,
+} from '../graphql-operations'
+import type { Settings } from '../settings/settings'
 
 import { getConfig } from './config'
 import { formatPuppeteerConsoleMessage } from './console'
-import { readEnvironmentBoolean, retry } from './utils'
+import { retry } from './utils'
 
 /**
  * Returns a Promise for the next emission of the given event on the given Puppeteer page.
@@ -38,9 +44,16 @@ import { readEnvironmentBoolean, retry } from './utils'
 export const oncePageEvent = <E extends keyof PageEventObject>(page: Page, eventName: E): Promise<PageEventObject[E]> =>
     new Promise(resolve => page.once(eventName, resolve))
 
-export const percySnapshot = readEnvironmentBoolean({ variable: 'PERCY_ON', defaultValue: false })
-    ? realPercySnapshot
-    : () => Promise.resolve()
+export const extractStyles = (page: puppeteer.Page): Promise<string> =>
+    page.evaluate(() =>
+        Array.from(document.styleSheets).reduce(
+            (styleSheetRules, styleSheet) =>
+                styleSheetRules.concat(
+                    Array.from(styleSheet.cssRules).reduce((rules, rule) => rules.concat(rule.cssText), '')
+                ),
+            ''
+        )
+    )
 
 export const BROWSER_EXTENSION_DEV_ID = 'bmfbcejdknlknpncfpeloejonjoledha'
 
@@ -111,9 +124,17 @@ function findElementRegexpStrings(
 }
 
 function findElementMatchingRegexps(tag: string, regexps: string[]): HTMLElement | null {
-    for (const regexpString of regexps) {
-        const regexp = new RegExp(regexpString)
-        for (const element of document.querySelectorAll<HTMLElement>(tag)) {
+    // This method is invoked via puppeteer.Page.eval* and runs in the browser context. This method
+    // must not use anything outside its own scope such as variables or functions. Therefore this
+    // method must be written in legacy-compatible JavaScript.
+    const elements = document.querySelectorAll<HTMLElement>(tag)
+
+    // eslint-disable-next-line @typescript-eslint/prefer-for-of
+    for (let regexI = 0; regexI < regexps.length; regexI++) {
+        const regexp = new RegExp(regexps[regexI])
+        // eslint-disable-next-line @typescript-eslint/prefer-for-of
+        for (let elementI = 0; elementI < elements.length; elementI++) {
+            const element = elements[elementI]
             if (!element.offsetParent) {
                 // Ignore hidden elements
                 continue
@@ -134,10 +155,7 @@ function getDebugExpressionFromRegexp(tag: string, regexp: string): string {
 
 // Console logs with these keywords will be removed from the console output.
 const MUTE_CONSOLE_KEYWORDS = [
-    '[webpack-dev-server]',
     'Download the React DevTools',
-    '[HMR]',
-    '[WDS]',
     'Warning: componentWillReceiveProps has been renamed',
     'Download the Apollo DevTools',
     'Compiled in DEBUG mode',
@@ -204,7 +222,7 @@ export class Driver {
         }
     }
 
-    public async ensureLoggedIn({
+    public async ensureSignedIn({
         username,
         password,
         email,
@@ -214,44 +232,54 @@ export class Driver {
         email?: string
     }): Promise<void> {
         /**
-         * Wait for redirects to complete to avoid using an outdated page URL.
-         *
-         * In case a user is not authenticated, and site-init is required, two redirects happen:
-         * 1. Redirect to /sign-in?returnTo=%2F
-         * 2. Redirect to /site-admin/init
+         * Waiting here for all redirects is not stable. We try to use the signin form first because
+         * it's the most frequent use-case. If we cannot find its selector we fall back to the signup form.
          */
-        await this.page.goto(this.sourcegraphBaseUrl, { waitUntil: 'networkidle0' })
+        await this.page.goto(this.sourcegraphBaseUrl)
+
+        // Skip setup wizard
         await this.page.evaluate(() => {
-            localStorage.setItem('has-dismissed-browser-ext-toast', 'true')
-            localStorage.setItem('has-dismissed-integrations-toast', 'true')
-            localStorage.setItem('has-dismissed-survey-toast', 'true')
+            localStorage.setItem('setup.skipped', 'true')
         })
 
-        const url = new URL(this.page.url())
-
-        if (url.pathname === '/site-admin/init') {
-            await this.page.waitForSelector('.test-signup-form')
-            if (email) {
-                await this.page.type('input[name=email]', email)
-            }
-            await this.page.type('input[name=username]', username)
-            await this.page.type('input[name=password]', password)
-            await this.page.waitForSelector('button[type=submit]:not(:disabled)')
-            // TODO(uwedeportivo): investigate race condition between puppeteer clicking this very fast and
-            // background gql client request fetching ViewerSettings. this race condition results in the gql request
-            // "winning" sometimes without proper credentials which confuses the login state machine and it navigates
-            // you back to the login page
-            await delay(1000)
-            await this.page.click('button[type=submit]')
-            await this.page.waitForNavigation({ timeout: 300000 })
-        } else if (url.pathname === '/sign-in') {
-            await this.page.waitForSelector('.test-signin-form')
+        /**
+         * In case a user is not authenticated, and site-init is NOT required, one redirect happens:
+         * 1. Redirect to /sign-in?returnTo=%2F
+         */
+        try {
+            logger.log('Trying to use the signin form...')
+            await this.page.waitForSelector('.test-signin-form', { timeout: 10000 })
             await this.page.type('input', username)
             await this.page.type('input[name=password]', password)
             // TODO(uwedeportivo): see comment above, same reason
             await delay(1000)
             await this.page.click('button[type=submit]')
             await this.page.waitForNavigation({ timeout: 300000 })
+        } catch (error) {
+            /**
+             * In case a user is not authenticated, and site-init is required, two redirects happen:
+             * 1. Redirect to /sign-in?returnTo=%2F
+             * 2. Redirect to /site-admin/init
+             */
+            if (error.message.includes('waiting for selector `.test-signin-form` failed')) {
+                logger.log('Failed to use the signin form. Trying the signup form...')
+                await this.page.waitForSelector('.test-signup-form')
+                if (email) {
+                    await this.page.type('input[name=email]', email)
+                }
+                await this.page.type('input[name=username]', username)
+                await this.page.type('input[name=password]', password)
+                await this.page.waitForSelector('button[type=submit]:not(:disabled)')
+                // TODO(uwedeportivo): investigate race condition between puppeteer clicking this very fast and
+                // background gql client request fetching ViewerSettings. this race condition results in the gql request
+                // "winning" sometimes without proper credentials which confuses the login state machine and it navigates
+                // you back to the login page
+                await delay(1000)
+                await this.page.click('button[type=submit]')
+                await this.page.waitForNavigation({ timeout: 300000 })
+            } else {
+                throw error
+            }
         }
     }
 
@@ -331,12 +359,14 @@ export class Driver {
         // Pasting does not work on macOS. See:  https://github.com/GoogleChrome/puppeteer/issues/1313
         method = os.platform() === 'darwin' ? 'type' : method
         switch (method) {
-            case 'type':
+            case 'type': {
                 await this.page.keyboard.type(text)
                 break
-            case 'paste':
+            }
+            case 'paste': {
                 await this.paste(text)
                 break
+            }
         }
     }
 
@@ -382,7 +412,7 @@ export class Driver {
     }): Promise<void> {
         // Use the graphQL API to query external services on the instance.
         const { externalServices } = dataOrThrowErrors(
-            await this.makeGraphQLRequest<IQuery>({
+            await this.makeGraphQLRequest<ExternalServicesForTestsResult>({
                 request: gql`
                     query ExternalServicesForTests {
                         externalServices(first: 1) {
@@ -462,9 +492,7 @@ export class Driver {
     }
 
     public async paste(value: string): Promise<void> {
-        await this.page.evaluate(async (value: string) => {
-            await navigator.clipboard.writeText(value)
-        }, value)
+        await this.page.evaluate((value: string) => navigator.clipboard.writeText(value), value)
         const modifier = os.platform() === 'darwin' ? Key.Meta : Key.Control
         await this.page.keyboard.down(modifier)
         await this.page.keyboard.press('v')
@@ -565,10 +593,10 @@ export class Driver {
         return response
     }
 
-    public async getRepository(name: string): Promise<Pick<IRepository, 'id'>> {
-        const response = await this.makeGraphQLRequest<IQuery>({
+    public async getRepository(name: string): Promise<RepositoryNameForTestsResult['repository']> {
+        const response = await this.makeGraphQLRequest<RepositoryNameForTestsResult>({
             request: gql`
-                query($name: String!) {
+                query RepositoryNameForTests($name: String!) {
                     repository(name: $name) {
                         id
                     }
@@ -587,7 +615,7 @@ export class Driver {
         path: jsonc.JSONPath,
         editFunction: (oldValue: jsonc.Node | undefined) => any
     ): Promise<void> {
-        const currentConfigResponse = await this.makeGraphQLRequest<IQuery>({
+        const currentConfigResponse = await this.makeGraphQLRequest<SiteForTestsResult>({
             request: gql`
                 query SiteForTests {
                     site {
@@ -605,7 +633,7 @@ export class Driver {
         const { site } = dataOrThrowErrors(currentConfigResponse)
         const currentConfig = site.configuration.effectiveContents
         const newConfig = modifyJSONC(currentConfig, path, editFunction)
-        const updateConfigResponse = await this.makeGraphQLRequest<IMutation>({
+        const updateConfigResponse = await this.makeGraphQLRequest<UpdateSiteConfigurationForTestsResult>({
             request: gql`
                 mutation UpdateSiteConfigurationForTests($lastID: Int!, $input: String!) {
                     updateSiteConfiguration(lastID: $lastID, input: $input)
@@ -628,7 +656,7 @@ export class Driver {
     }
 
     public async setUserSettings<S extends Settings>(settings: S): Promise<void> {
-        const currentSettingsResponse = await this.makeGraphQLRequest<IQuery>({
+        const currentSettingsResponse = await this.makeGraphQLRequest<UserSettingsForTestsResult>({
             request: gql`
                 query UserSettingsForTests {
                     currentUser {
@@ -648,7 +676,7 @@ export class Driver {
             throw new Error('no currentUser')
         }
 
-        const updateConfigResponse = await this.makeGraphQLRequest<IMutation>({
+        const updateConfigResponse = await this.makeGraphQLRequest<OverwriteSettingsForTestsResult>({
             request: gql`
                 mutation OverwriteSettingsForTests($subject: ID!, $lastID: Int, $contents: String!) {
                     settingsMutation(input: { subject: $subject, lastID: $lastID }) {
@@ -672,7 +700,6 @@ export class Driver {
     /**
      * Finds the first HTML element matching the text using the regular expressions returned in
      * {@link findElementRegexpStrings}.
-     *
      * @param options specifies additional parameters for finding the element. If you want to wait
      * until the element appears, specify the `wait` field (which can contain additional inner
      * options for how long to wait).
@@ -798,7 +825,7 @@ export async function createDriverForTest(options?: Partial<DriverOptions>): Pro
 
     // Chrome
     args.push(`--window-size=${config.windowWidth},${config.windowHeight}`)
-    if (process.getuid() === 0) {
+    if (process.getuid?.() === 0) {
         // TODO don't run as root in CI
         logger.warn('Running as root, disabling sandbox')
         args.push('--no-sandbox', '--disable-setuid-sandbox')
@@ -810,7 +837,7 @@ export async function createDriverForTest(options?: Partial<DriverOptions>): Pro
         }
         if (!manifest.permissions.includes('<all_urls>')) {
             throw new Error(
-                'Browser extension was not built with permissions for all URLs.\nThis is necessary because permissions cannot be granted by e2e tests.\nTo fix, run `EXTENSION_PERMISSIONS_ALL_URLS=true yarn run dev` inside the browser/ directory.'
+                'Browser extension was not built with permissions for all URLs.\nThis is necessary because permissions cannot be granted by e2e tests.\nTo fix, run `EXTENSION_PERMISSIONS_ALL_URLS=true pnpm run dev` inside the browser/ directory.'
             )
         }
         args.push(`--disable-extensions-except=${chromeExtensionPath}`, `--load-extension=${chromeExtensionPath}`)

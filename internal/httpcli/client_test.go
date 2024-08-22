@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -24,6 +23,7 @@ import (
 	"github.com/PuerkitoBio/rehttp"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/sourcegraph/log/logtest"
 
@@ -190,7 +190,7 @@ func TestNewCertPool(t *testing.T) {
 			certs: []string{cert},
 			assert: func(t testing.TB, cli *http.Client) {
 				pool := cli.Transport.(*http.Transport).TLSClientConfig.RootCAs
-				for _, have := range pool.Subjects() {
+				for _, have := range pool.Subjects() { //nolint:staticcheck // pool.Subjects, see https://github.com/golang/go/issues/46287
 					if bytes.Contains(have, []byte(subject)) {
 						return
 					}
@@ -346,7 +346,7 @@ func TestErrorResilience(t *testing.T) {
 				ContextErrorMiddleware,
 			),
 			NewErrorResilientTransportOpt(
-				NewRetryPolicy(20),
+				NewRetryPolicy(20, time.Second),
 				rehttp.ExpJitterDelay(50*time.Millisecond, 5*time.Second),
 			),
 		).Doer()
@@ -369,7 +369,7 @@ func TestErrorResilience(t *testing.T) {
 				ContextErrorMiddleware,
 			),
 			NewErrorResilientTransportOpt(
-				NewRetryPolicy(0), // zero retries
+				NewRetryPolicy(0, time.Second), // zero retries
 				rehttp.ExpJitterDelay(50*time.Millisecond, 5*time.Second),
 			),
 		).Doer()
@@ -387,7 +387,7 @@ func TestErrorResilience(t *testing.T) {
 	t.Run("no such host", func(t *testing.T) {
 		// spy on policy so we see what decisions it makes
 		retries := 0
-		policy := NewRetryPolicy(5) // smaller retries for faster failures
+		policy := NewRetryPolicy(5, time.Second) // smaller retries for faster failures
 		wrapped := func(a rehttp.Attempt) bool {
 			if policy(a) {
 				retries++
@@ -405,9 +405,8 @@ func TestErrorResilience(t *testing.T) {
 				// hardcode what go returns for DNS not found to avoid
 				// flakiness across machines. However, CI correctly respects
 				// this so we continue to run against a real DNS server on CI.
-				if os.Getenv("CI") == "" {
-					cli.Transport = notFoundTransport{}
-				}
+				// TODO(burmudar): Fix DNS infrastructure in Aspect Workflows Infra
+				cli.Transport = notFoundTransport{}
 				return nil
 			},
 			NewErrorResilientTransportOpt(
@@ -478,8 +477,8 @@ func TestLoggingMiddleware(t *testing.T) {
 
 		// Check log entries for logged fields about retries
 		logEntries := exportLogs()
-		assert.Len(t, logEntries, 2) // should have a scope debug log, and the entry we want
-		entry := logEntries[1]
+		require.Len(t, logEntries, 1)
+		entry := logEntries[0]
 		assert.Contains(t, entry.Scope, "httpcli")
 		assert.NotEmpty(t, entry.Fields["error"])
 	})
@@ -493,7 +492,7 @@ func TestLoggingMiddleware(t *testing.T) {
 				NewLoggingMiddleware(logger),
 			),
 			NewErrorResilientTransportOpt(
-				NewRetryPolicy(20),
+				NewRetryPolicy(20, time.Second),
 				rehttp.ExpJitterDelay(50*time.Millisecond, 5*time.Second),
 			),
 		).Doer()
@@ -530,6 +529,68 @@ func TestLoggingMiddleware(t *testing.T) {
 		}
 		assert.NotZero(t, attemptsLogged)
 	})
+
+	t.Run("log redisLoggerMiddleware error", func(t *testing.T) {
+		const wantErrMessage = "redisLoggingError"
+		redisErrorMiddleware := func(next Doer) Doer {
+			return DoerFunc(func(req *http.Request) (*http.Response, error) {
+				// simplified version of what we do in redisLoggerMiddleware, since
+				// we just test that adding and reading the context key/value works
+				var middlewareErrors error
+				defer func() {
+					if middlewareErrors != nil {
+						*req = *req.WithContext(context.WithValue(req.Context(),
+							redisLoggingMiddlewareErrorKey, middlewareErrors))
+					}
+				}()
+
+				middlewareErrors = errors.New(wantErrMessage)
+
+				return next.Do(req)
+			})
+		}
+
+		logger, exportLogs := logtest.Captured(t)
+
+		cli, _ := NewFactory(
+			NewMiddleware(
+				ContextErrorMiddleware,
+				redisErrorMiddleware,
+				NewLoggingMiddleware(logger),
+			),
+		).Doer()
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		t.Cleanup(srv.Close)
+
+		req, _ := http.NewRequest("GET", srv.URL, nil)
+		_, err := cli.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Check log entries for logged fields about retries
+		logEntries := exportLogs()
+		assert.Greater(t, len(logEntries), 0)
+		var found bool
+		for _, entry := range logEntries {
+			// Check for appropriate scope
+			if !strings.Contains(entry.Scope, "httpcli") {
+				continue
+			}
+
+			// Check for redisLoggerErr
+			errField, ok := entry.Fields["redisLoggerErr"]
+			if !ok {
+				continue
+			}
+			if assert.Contains(t, errField, wantErrMessage) {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found)
+	})
 }
 
 type notFoundTransport struct{}
@@ -538,7 +599,10 @@ func (notFoundTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, &net.DNSError{IsNotFound: true}
 }
 
-func TestExpJitterDelay(t *testing.T) {
+func TestExpJitterDelayOrRetryAfterDelay(t *testing.T) {
+	// Ensure that at least one value is not base.
+	var hasNonBase bool
+
 	prop := func(b, m uint32, a uint16) bool {
 		base := time.Duration(b)
 		max := time.Duration(m)
@@ -547,7 +611,7 @@ func TestExpJitterDelay(t *testing.T) {
 		}
 		attempt := int(a)
 
-		delay := ExpJitterDelay(base, max)(rehttp.Attempt{
+		delay := ExpJitterDelayOrRetryAfterDelay(base, max)(rehttp.Attempt{
 			Index: attempt,
 		})
 
@@ -562,6 +626,10 @@ func TestExpJitterDelay(t *testing.T) {
 			return false
 		}
 
+		if delay > base {
+			hasNonBase = true
+		}
+
 		return true
 	}
 
@@ -569,14 +637,61 @@ func TestExpJitterDelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assert.True(t, hasNonBase, "at least one delay should be greater than base")
+
+	t.Run("respect Retry-After header", func(t *testing.T) {
+		for _, tc := range []struct {
+			name            string
+			base            time.Duration
+			max             time.Duration
+			responseHeaders http.Header
+			wantDelay       time.Duration
+		}{
+			{
+				name:            "seconds: up to max",
+				max:             3 * time.Second,
+				responseHeaders: http.Header{"Retry-After": []string{"20"}},
+				wantDelay:       3 * time.Second,
+			},
+			{
+				name:            "seconds: at least base",
+				base:            2 * time.Second,
+				max:             3 * time.Second,
+				responseHeaders: http.Header{"Retry-After": []string{"1"}},
+				wantDelay:       2 * time.Second,
+			},
+			{
+				name:            "seconds: exactly as provided",
+				base:            1 * time.Second,
+				max:             3 * time.Second,
+				responseHeaders: http.Header{"Retry-After": []string{"2"}},
+				wantDelay:       2 * time.Second,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				assert.Equal(t, tc.wantDelay, ExpJitterDelayOrRetryAfterDelay(tc.base, tc.max)(rehttp.Attempt{
+					Index: 2,
+					Response: &http.Response{
+						Header: tc.responseHeaders,
+					},
+				}))
+			})
+		}
+	})
 }
 
-//nolint:unparam // unparam complains that `code` always has same value across call-sites, but that's OK
 func newFakeClient(code int, body []byte, err error) Doer {
+	return newFakeClientWithHeaders(map[string][]string{}, code, body, err)
+}
+
+func newFakeClientWithHeaders(respHeaders map[string][]string, code int, body []byte, err error) Doer {
 	return DoerFunc(func(r *http.Request) (*http.Response, error) {
 		rr := httptest.NewRecorder()
+		for k, v := range respHeaders {
+			rr.Header()[k] = v
+		}
 		_, _ = rr.Write(body)
-		rr.WriteHeader(code)
+		rr.Code = code
 		return rr.Result(), err
 	})
 }
@@ -585,4 +700,542 @@ type bogusTransport struct{}
 
 func (t bogusTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	panic("should not be called")
+}
+
+func TestRetryAfter(t *testing.T) {
+	t.Run("Not set", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+
+		t.Cleanup(srv.Close)
+
+		req, err := http.NewRequest("GET", srv.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// spy on policy so we see what decisions it makes
+		retries := 0
+		policy := NewRetryPolicy(5, time.Second) // smaller retries for faster failures
+		wrapped := func(a rehttp.Attempt) bool {
+			if policy(a) {
+				retries++
+				return true
+			}
+			return false
+		}
+
+		cli, _ := NewFactory(
+			NewMiddleware(
+				ContextErrorMiddleware,
+			),
+			NewErrorResilientTransportOpt(
+				wrapped,
+				rehttp.ExpJitterDelay(50*time.Millisecond, 5*time.Second),
+			),
+		).Doer()
+
+		res, err := cli.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if res.StatusCode != 429 {
+			t.Fatalf("want status code 429, got: %d", res.StatusCode)
+		}
+
+		if want := 5; retries != want {
+			t.Fatalf("expected %d retries, got %d", want, retries)
+		}
+	})
+	t.Run("Format seconds", func(t *testing.T) {
+		t.Run("Within configured limit", func(t *testing.T) {
+			for _, responseCode := range []int{
+				http.StatusTooManyRequests,
+				http.StatusServiceUnavailable,
+			} {
+				t.Run(fmt.Sprintf("%d", responseCode), func(t *testing.T) {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Add("retry-after", "1") // 1 second is smaller than the 2s we give the retry policy below.
+						w.WriteHeader(responseCode)
+					}))
+
+					t.Cleanup(srv.Close)
+
+					req, err := http.NewRequest("GET", srv.URL, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					// spy on policy so we see what decisions it makes
+					retries := 0
+					policy := NewRetryPolicy(5, 2*time.Second) // smaller retries for faster failures
+					wrapped := func(a rehttp.Attempt) bool {
+						if policy(a) {
+							retries++
+							return true
+						}
+						return false
+					}
+
+					cli, _ := NewFactory(
+						NewMiddleware(
+							ContextErrorMiddleware,
+						),
+						NewErrorResilientTransportOpt(
+							wrapped,
+							rehttp.ExpJitterDelay(50*time.Millisecond, 5*time.Second),
+						),
+					).Doer()
+
+					res, err := cli.Do(req)
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					if res.StatusCode != responseCode {
+						t.Fatalf("want status code %d, got: %d",
+							responseCode, res.StatusCode)
+					}
+
+					if want := 5; retries != want {
+						t.Fatalf("expected %d retries, got %d", want, retries)
+					}
+				})
+			}
+		})
+		t.Run("Exceeds configured limit", func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Add("retry-after", "2") // 2 seconds is larger than the 1s we give the retry policy below.
+				w.WriteHeader(http.StatusTooManyRequests)
+			}))
+
+			t.Cleanup(srv.Close)
+
+			req, err := http.NewRequest("GET", srv.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// spy on policy so we see what decisions it makes
+			retries := 0
+			policy := NewRetryPolicy(5, time.Second) // smaller retries for faster failures
+			wrapped := func(a rehttp.Attempt) bool {
+				if policy(a) {
+					retries++
+					return true
+				}
+				return false
+			}
+
+			cli, _ := NewFactory(
+				NewMiddleware(
+					ContextErrorMiddleware,
+				),
+				NewErrorResilientTransportOpt(
+					wrapped,
+					rehttp.ExpJitterDelay(50*time.Millisecond, 5*time.Second),
+				),
+			).Doer()
+
+			res, err := cli.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if res.StatusCode != 429 {
+				t.Fatalf("want status code 429, got: %d", res.StatusCode)
+			}
+
+			if want := 0; retries != want {
+				t.Fatalf("expected %d retries, got %d", want, retries)
+			}
+		})
+	})
+	t.Run("Format Date", func(t *testing.T) {
+		now := time.Now()
+		t.Run("Within configured limit", func(t *testing.T) {
+			for _, responseCode := range []int{
+				http.StatusTooManyRequests,
+				http.StatusServiceUnavailable,
+			} {
+				t.Run(fmt.Sprintf("%d", responseCode), func(t *testing.T) {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Add("retry-after", now.Add(time.Second).Format(time.RFC1123)) // 1 second is smaller than the 2s we give the retry policy below.
+						w.WriteHeader(responseCode)
+					}))
+
+					t.Cleanup(srv.Close)
+
+					req, err := http.NewRequest("GET", srv.URL, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					// spy on policy so we see what decisions it makes
+					retries := 0
+					policy := NewRetryPolicy(5, 2*time.Second) // smaller retries for faster failures
+					wrapped := func(a rehttp.Attempt) bool {
+						if policy(a) {
+							retries++
+							return true
+						}
+						return false
+					}
+
+					cli, _ := NewFactory(
+						NewMiddleware(
+							ContextErrorMiddleware,
+						),
+						NewErrorResilientTransportOpt(
+							wrapped,
+							rehttp.ExpJitterDelay(50*time.Millisecond, 5*time.Second),
+						),
+					).Doer()
+
+					res, err := cli.Do(req)
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					if res.StatusCode != responseCode {
+						t.Fatalf("want status code %d, got: %d",
+							responseCode, res.StatusCode)
+					}
+
+					if want := 5; retries != want {
+						t.Fatalf("expected %d retries, got %d", want, retries)
+					}
+				})
+			}
+		})
+		t.Run("Exceeds configured limit", func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Add("retry-after", now.Add(5*time.Second).Format(time.RFC1123)) // 5 seconds is larger than the 1s we give the retry policy below.
+				w.WriteHeader(http.StatusTooManyRequests)
+			}))
+
+			t.Cleanup(srv.Close)
+
+			req, err := http.NewRequest("GET", srv.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// spy on policy so we see what decisions it makes
+			retries := 0
+			policy := NewRetryPolicy(5, time.Second) // smaller retries for faster failures
+			wrapped := func(a rehttp.Attempt) bool {
+				if policy(a) {
+					retries++
+					return true
+				}
+				return false
+			}
+
+			cli, _ := NewFactory(
+				NewMiddleware(
+					ContextErrorMiddleware,
+				),
+				NewErrorResilientTransportOpt(
+					wrapped,
+					rehttp.ExpJitterDelay(50*time.Millisecond, 5*time.Second),
+				),
+			).Doer()
+
+			res, err := cli.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if res.StatusCode != 429 {
+				t.Fatalf("want status code 429, got: %d", res.StatusCode)
+			}
+
+			if want := 0; retries != want {
+				t.Fatalf("expected %d retries, got %d", want, retries)
+			}
+		})
+	})
+	t.Run("Invalid retry-after header", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Add("retry-after", "unparseable")
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+
+		t.Cleanup(srv.Close)
+
+		req, err := http.NewRequest("GET", srv.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// spy on policy so we see what decisions it makes
+		retries := 0
+		policy := NewRetryPolicy(5, 2*time.Second) // smaller retries for faster failures
+		wrapped := func(a rehttp.Attempt) bool {
+			if policy(a) {
+				retries++
+				return true
+			}
+			return false
+		}
+
+		cli, _ := NewFactory(
+			NewMiddleware(
+				ContextErrorMiddleware,
+			),
+			NewErrorResilientTransportOpt(
+				wrapped,
+				rehttp.ExpJitterDelay(50*time.Millisecond, 5*time.Second),
+			),
+		).Doer()
+
+		res, err := cli.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if res.StatusCode != 429 {
+			t.Fatalf("want status code 429, got: %d", res.StatusCode)
+		}
+
+		if want := 5; retries != want {
+			t.Fatalf("expected %d retries, got %d", want, retries)
+		}
+	})
+}
+
+// TestRetryBasedOnStatusCode verifies we take the returned HTTP status code
+// into account with our retry behavior.
+func TestRetryBasedOnStatusCode(t *testing.T) {
+	verifyRetryBehavior := func(t *testing.T, statusCode int, expectedToRetry bool) {
+		// Fake webserver, always returning the same status code.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(statusCode)
+		}))
+		t.Cleanup(srv.Close)
+
+		req, err := http.NewRequest("GET", srv.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var attempts int
+		policy := NewRetryPolicy(1 /* max retries */, time.Second)
+		wrappedPolicy := func(a rehttp.Attempt) bool {
+			attempts++
+			return policy(a)
+		}
+
+		cli, err := NewFactory(
+			NewMiddleware(
+				ContextErrorMiddleware,
+			),
+			NewErrorResilientTransportOpt(
+				wrappedPolicy,
+				rehttp.ExpJitterDelay(50*time.Millisecond, 5*time.Second),
+			),
+		).Doer()
+		require.NoError(t, err)
+
+		res, err := cli.Do(req)
+		require.NoError(t, err)
+
+		assert.Equal(t, statusCode, res.StatusCode)
+		if expectedToRetry {
+			assert.Equal(t, 2, attempts, "expected HTTP request to be retried, but was not")
+		} else {
+			assert.Equal(t, 1, attempts, "expected HTTP request to not be retired, but was")
+		}
+	}
+
+	tests := []struct {
+		statusCode    int
+		expectRetries bool
+	}{
+		// Retrying a successfull 200 response doesn't make sense.
+		{http.StatusOK, false},
+
+		// We shouldn't retry 400 requests, because by definition the problem is client-side.
+		{http.StatusBadRequest, false},
+
+		// The server is clear that we need to slow down, so we will retry after a delay.
+		{http.StatusTooManyRequests, true},
+
+		// Internal Server Error is hopefully transient, so retrying may be appropriate.
+		{http.StatusInternalServerError, true},
+
+		// No need to retry the status if the endpoint isn't implemented.
+		{http.StatusNotImplemented, false},
+
+		// Bad Gateway is in the 5xx rate, and can potentially be resolved automatically.
+		// So retrying may be appropriate.
+		{http.StatusBadGateway, true},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("StatusCode%d", test.statusCode), func(t *testing.T) {
+			verifyRetryBehavior(t, test.statusCode, test.expectRetries)
+		})
+	}
+}
+
+func TestDoExternalRequestCountMetricsMiddleware(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		observeFuncRan := false
+		observe := func(host, method string, statusCode int) {
+			observeFuncRan = true
+
+			if diff := cmp.Diff("example.com", host); diff != "" {
+				t.Errorf("unexpected host (-want +got):\n%s", diff)
+			}
+
+			if diff := cmp.Diff("POST", method); diff != "" {
+				t.Errorf("unexpected method (-want +got):\n%s", diff)
+			}
+
+			if diff := cmp.Diff(http.StatusOK, statusCode); diff != "" {
+				t.Errorf("unexpected status code (-want +got):\n%s", diff)
+			}
+		}
+		next := newFakeClient(http.StatusOK, nil, nil)
+
+		cli := doExternalRequestCountMetricsMiddleware(next, observe)
+
+		req, _ := http.NewRequest("POST", "http://example.com", nil)
+		_, err := cli.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !observeFuncRan {
+			t.Error("observe() was not called")
+		}
+	})
+
+	t.Run("returns -1 status code if next Doer fails", func(t *testing.T) {
+		observeFuncRan := false
+		observe := func(host, method string, statusCode int) {
+			observeFuncRan = true
+			if diff := cmp.Diff("example.com", host); diff != "" {
+				t.Errorf("unexpected host (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff("POST", method); diff != "" {
+				t.Errorf("unexpected method (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(-1, statusCode); diff != "" {
+				t.Errorf("unexpected status code (-want +got):\n%s", diff)
+			}
+		}
+
+		expectedError := errors.New("fake error")
+
+		next := newFakeClient(http.StatusOK, nil, expectedError)
+
+		cli := doExternalRequestCountMetricsMiddleware(next, observe)
+
+		req, _ := http.NewRequest("POST", "http://example.com", nil)
+		_, err := cli.Do(req)
+		if !errors.Is(err, expectedError) {
+			t.Errorf("unexpected error: %s", err)
+		}
+
+		if !observeFuncRan {
+			t.Error("observe() was not called")
+		}
+
+	})
+
+	t.Run("prefers request.Host over request.URL.Host", func(t *testing.T) {
+		observeFuncRan := false
+		wrongHost, rightHost := "example.org", "example.com"
+
+		observe := func(host, method string, statusCode int) {
+			observeFuncRan = true
+			if diff := cmp.Diff(rightHost, host); diff != "" {
+				t.Errorf("unexpected host (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff("POST", method); diff != "" {
+				t.Errorf("unexpected method (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(http.StatusOK, statusCode); diff != "" {
+				t.Errorf("unexpected status code (-want +got):\n%s", diff)
+			}
+		}
+
+		next := newFakeClient(http.StatusOK, nil, nil)
+
+		cli := doExternalRequestCountMetricsMiddleware(next, observe)
+
+		req, _ := http.NewRequest("POST", fmt.Sprintf("http://%s", rightHost), nil)
+		req.URL.Host = wrongHost
+		_, err := cli.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !observeFuncRan {
+			t.Error("observe() was not called")
+		}
+	})
+
+	t.Run("falls back to request.URL.Host if request.Host is empty", func(t *testing.T) {
+		observeFuncRan := false
+		rightHost := "example.com"
+
+		observe := func(host, method string, statusCode int) {
+			observeFuncRan = true
+			if diff := cmp.Diff(rightHost, host); diff != "" {
+				t.Errorf("unexpected host (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff("POST", method); diff != "" {
+				t.Errorf("unexpected method (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(http.StatusOK, statusCode); diff != "" {
+				t.Errorf("unexpected status code (-want +got):\n%s", diff)
+			}
+		}
+
+		next := newFakeClient(http.StatusOK, nil, nil)
+
+		cli := doExternalRequestCountMetricsMiddleware(next, observe)
+
+		req, _ := http.NewRequest("POST", fmt.Sprintf("http://%s", rightHost), nil)
+		req.Host = ""
+		_, err := cli.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !observeFuncRan {
+			t.Error("observe() was not called")
+		}
+	})
+
+	t.Run("host is unknown if both request.Host and request.URL.Host are empty", func(t *testing.T) {
+		observeFuncRan := false
+
+		observe := func(host, method string, statusCode int) {
+			observeFuncRan = true
+			if diff := cmp.Diff("<unknown>", host); diff != "" {
+				t.Errorf("unexpected host (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff("POST", method); diff != "" {
+				t.Errorf("unexpected method (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(http.StatusOK, statusCode); diff != "" {
+				t.Errorf("unexpected status code (-want +got):\n%s", diff)
+			}
+		}
+
+		next := newFakeClient(http.StatusOK, nil, nil)
+
+		cli := doExternalRequestCountMetricsMiddleware(next, observe)
+
+		req, _ := http.NewRequest("POST", "http://", nil)
+		req.Host = ""
+		_, err := cli.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !observeFuncRan {
+			t.Error("observe() was not called")
+		}
+	})
 }

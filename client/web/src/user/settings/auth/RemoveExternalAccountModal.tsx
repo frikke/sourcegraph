@@ -1,25 +1,28 @@
 import React, { useCallback, useState } from 'react'
 
-import { Form } from '@sourcegraph/branded/src/components/Form'
-import { asError, ErrorLike } from '@sourcegraph/common'
+import { lastValueFrom } from 'rxjs'
+
+import { asError, type ErrorLike } from '@sourcegraph/common'
 import { gql, dataOrThrowErrors } from '@sourcegraph/http-client'
-import { Button, Modal, H3 } from '@sourcegraph/wildcard'
+import { Button, Modal, H3, Form } from '@sourcegraph/wildcard'
 
 import { requestGraphQL } from '../../../backend/graphql'
-import { Scalars, DeleteExternalAccountResult, DeleteExternalAccountVariables } from '../../../graphql-operations'
+import type { Scalars, DeleteExternalAccountResult, DeleteExternalAccountVariables } from '../../../graphql-operations'
 
 const deleteUserExternalAccount = async (externalAccount: Scalars['ID']): Promise<void> => {
     dataOrThrowErrors(
-        await requestGraphQL<DeleteExternalAccountResult, DeleteExternalAccountVariables>(
-            gql`
-                mutation DeleteExternalAccount($externalAccount: ID!) {
-                    deleteExternalAccount(externalAccount: $externalAccount) {
-                        alwaysNil
+        await lastValueFrom(
+            requestGraphQL<DeleteExternalAccountResult, DeleteExternalAccountVariables>(
+                gql`
+                    mutation DeleteExternalAccount($externalAccount: ID!) {
+                        deleteExternalAccount(externalAccount: $externalAccount) {
+                            alwaysNil
+                        }
                     }
-                }
-            `,
-            { externalAccount }
-        ).toPromise()
+                `,
+                { externalAccount }
+            )
+        )
     )
 }
 
@@ -31,8 +34,9 @@ export const RemoveExternalAccountModal: React.FunctionComponent<
         onDidRemove: (id: string, name: string) => void
         onDidCancel: () => void
         onDidError: (error: ErrorLike) => void
+        isOpen: boolean
     }>
-> = ({ id, name, onDidRemove, onDidCancel, onDidError }) => {
+> = ({ id, name, onDidRemove, onDidCancel, onDidError, isOpen }) => {
     const [isLoading, setIsLoading] = useState(false)
 
     const onAccountRemove = useCallback<React.FormEventHandler<HTMLFormElement>>(
@@ -57,6 +61,7 @@ export const RemoveExternalAccountModal: React.FunctionComponent<
             aria-labelledby={`heading--disconnect-${name}`}
             aria-describedby={`description--disconnect-${name}`}
             onDismiss={onDidCancel}
+            isOpen={isOpen}
         >
             <H3 id={`heading--disconnect-${name}`} className="text-danger mb-4">
                 Disconnect {name}?

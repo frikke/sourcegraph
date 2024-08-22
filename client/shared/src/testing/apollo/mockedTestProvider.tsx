@@ -1,8 +1,8 @@
 import React, { useMemo } from 'react'
 
-import { MockedProvider, MockedProviderProps } from '@apollo/client/testing'
+import { MockedProvider, type MockedProviderProps } from '@apollo/client/testing'
 
-import { generateCache } from '@sourcegraph/http-client'
+import { generateCache } from '../../backend/apolloCache'
 
 export const MockedTestProvider: React.FunctionComponent<React.PropsWithChildren<MockedProviderProps>> = ({
     children,

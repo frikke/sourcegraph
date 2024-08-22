@@ -16,69 +16,6 @@ CREATE FUNCTION get_file_extension(path text) RETURNS text
     RETURN substring(path FROM '\.([^\.]*)$');
 END; $_$;
 
-CREATE FUNCTION lsif_data_docs_search_private_delete() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-UPDATE lsif_data_apidocs_num_search_results_private SET count = count - (select count(*) from oldtbl);
-RETURN NULL;
-END $$;
-
-CREATE FUNCTION lsif_data_docs_search_private_insert() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-UPDATE lsif_data_apidocs_num_search_results_private SET count = count + (select count(*) from newtbl);
-RETURN NULL;
-END $$;
-
-CREATE FUNCTION lsif_data_docs_search_public_delete() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-UPDATE lsif_data_apidocs_num_search_results_public SET count = count - (select count(*) from oldtbl);
-RETURN NULL;
-END $$;
-
-CREATE FUNCTION lsif_data_docs_search_public_insert() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-UPDATE lsif_data_apidocs_num_search_results_public SET count = count + (select count(*) from newtbl);
-RETURN NULL;
-END $$;
-
-CREATE FUNCTION lsif_data_documentation_pages_delete() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-UPDATE lsif_data_apidocs_num_pages SET count = count - (select count(*) from oldtbl);
-UPDATE lsif_data_apidocs_num_dumps SET count = count - (select count(DISTINCT dump_id) from oldtbl);
-UPDATE lsif_data_apidocs_num_dumps_indexed SET count = count - (select count(DISTINCT dump_id) from oldtbl WHERE search_indexed='true');
-RETURN NULL;
-END $$;
-
-CREATE FUNCTION lsif_data_documentation_pages_insert() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-UPDATE lsif_data_apidocs_num_pages SET count = count + (select count(*) from newtbl);
-UPDATE lsif_data_apidocs_num_dumps SET count = count + (select count(DISTINCT dump_id) from newtbl);
-UPDATE lsif_data_apidocs_num_dumps_indexed SET count = count + (select count(DISTINCT dump_id) from newtbl WHERE search_indexed='true');
-RETURN NULL;
-END $$;
-
-CREATE FUNCTION lsif_data_documentation_pages_update() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-WITH
-    beforeIndexed AS (SELECT count(DISTINCT dump_id) FROM oldtbl WHERE search_indexed='true'),
-    afterIndexed AS (SELECT count(DISTINCT dump_id) FROM newtbl WHERE search_indexed='true')
-UPDATE lsif_data_apidocs_num_dumps_indexed SET count=count + ((select * from afterIndexed) - (select * from beforeIndexed));
-RETURN NULL;
-END $$;
-
 CREATE FUNCTION path_prefixes(path text) RETURNS text[]
     LANGUAGE plpgsql IMMUTABLE
     AS $$ BEGIN
@@ -102,677 +39,254 @@ CREATE FUNCTION singleton_integer(value integer) RETURNS integer[]
     RETURN ARRAY[value];
 END; $$;
 
-CREATE FUNCTION update_lsif_data_definitions_schema_versions_insert() RETURNS trigger
+CREATE FUNCTION update_codeintel_scip_document_lookup_schema_versions_insert() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
-    INSERT INTO
-        lsif_data_definitions_schema_versions
+    INSERT INTO codeintel_scip_document_lookup_schema_versions
     SELECT
-        dump_id,
+        upload_id,
         MIN(schema_version) as min_schema_version,
         MAX(schema_version) as max_schema_version
-    FROM
-        newtab
-    GROUP BY
-        dump_id
-    ON CONFLICT (dump_id) DO UPDATE SET
+    FROM newtab
+    JOIN codeintel_scip_documents ON codeintel_scip_documents.id = newtab.document_id
+    GROUP BY newtab.upload_id
+    ON CONFLICT (upload_id) DO UPDATE SET
         -- Update with min(old_min, new_min) and max(old_max, new_max)
-        min_schema_version = LEAST(lsif_data_definitions_schema_versions.min_schema_version, EXCLUDED.min_schema_version),
-        max_schema_version = GREATEST(lsif_data_definitions_schema_versions.max_schema_version, EXCLUDED.max_schema_version);
-
+        min_schema_version = LEAST(codeintel_scip_document_lookup_schema_versions.min_schema_version, EXCLUDED.min_schema_version),
+        max_schema_version = GREATEST(codeintel_scip_document_lookup_schema_versions.max_schema_version, EXCLUDED.max_schema_version);
     RETURN NULL;
 END $$;
 
-CREATE FUNCTION update_lsif_data_documents_schema_versions_insert() RETURNS trigger
+CREATE FUNCTION update_codeintel_scip_documents_dereference_logs_delete() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
-    INSERT INTO
-        lsif_data_documents_schema_versions
-    SELECT
-        dump_id,
-        MIN(schema_version) as min_schema_version,
-        MAX(schema_version) as max_schema_version
-    FROM
-        newtab
-    GROUP BY
-        dump_id
-    ON CONFLICT (dump_id) DO UPDATE SET
-        -- Update with min(old_min, new_min) and max(old_max, new_max)
-        min_schema_version = LEAST(lsif_data_documents_schema_versions.min_schema_version, EXCLUDED.min_schema_version),
-        max_schema_version = GREATEST(lsif_data_documents_schema_versions.max_schema_version, EXCLUDED.max_schema_version);
-
+    INSERT INTO codeintel_scip_documents_dereference_logs (document_id)
+    SELECT document_id FROM oldtab;
     RETURN NULL;
 END $$;
 
-CREATE FUNCTION update_lsif_data_implementations_schema_versions_insert() RETURNS trigger
+CREATE FUNCTION update_codeintel_scip_symbols_schema_versions_insert() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
-    INSERT INTO
-        lsif_data_implementations_schema_versions
+    INSERT INTO codeintel_scip_symbols_schema_versions
     SELECT
-        dump_id,
+        upload_id,
         MIN(schema_version) as min_schema_version,
         MAX(schema_version) as max_schema_version
-    FROM
-        newtab
-    GROUP BY
-        dump_id
-    ON CONFLICT (dump_id) DO UPDATE SET
+    FROM newtab
+    GROUP BY upload_id
+    ON CONFLICT (upload_id) DO UPDATE SET
         -- Update with min(old_min, new_min) and max(old_max, new_max)
-        min_schema_version = LEAST   (lsif_data_implementations_schema_versions.min_schema_version, EXCLUDED.min_schema_version),
-        max_schema_version = GREATEST(lsif_data_implementations_schema_versions.max_schema_version, EXCLUDED.max_schema_version);
-
+        min_schema_version = LEAST(codeintel_scip_symbols_schema_versions.min_schema_version, EXCLUDED.min_schema_version),
+        max_schema_version = GREATEST(codeintel_scip_symbols_schema_versions.max_schema_version, EXCLUDED.max_schema_version);
     RETURN NULL;
 END $$;
 
-CREATE FUNCTION update_lsif_data_references_schema_versions_insert() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$ BEGIN
-    INSERT INTO
-        lsif_data_references_schema_versions
-    SELECT
-        dump_id,
-        MIN(schema_version) as min_schema_version,
-        MAX(schema_version) as max_schema_version
-    FROM
-        newtab
-    GROUP BY
-        dump_id
-    ON CONFLICT (dump_id) DO UPDATE SET
-        -- Update with min(old_min, new_min) and max(old_max, new_max)
-        min_schema_version = LEAST(lsif_data_references_schema_versions.min_schema_version, EXCLUDED.min_schema_version),
-        max_schema_version = GREATEST(lsif_data_references_schema_versions.max_schema_version, EXCLUDED.max_schema_version);
-
-    RETURN NULL;
-END $$;
-
-CREATE TABLE lsif_data_apidocs_num_dumps (
-    count bigint
-);
-
-CREATE TABLE lsif_data_apidocs_num_dumps_indexed (
-    count bigint
-);
-
-CREATE TABLE lsif_data_apidocs_num_pages (
-    count bigint
-);
-
-CREATE TABLE lsif_data_apidocs_num_search_results_private (
-    count bigint
-);
-
-CREATE TABLE lsif_data_apidocs_num_search_results_public (
-    count bigint
-);
-
-CREATE TABLE lsif_data_definitions (
+CREATE TABLE codeintel_last_reconcile (
     dump_id integer NOT NULL,
-    scheme text NOT NULL,
-    identifier text NOT NULL,
-    data bytea,
-    schema_version integer NOT NULL,
-    num_locations integer NOT NULL
+    last_reconcile_at timestamp with time zone NOT NULL,
+    tenant_id integer
 );
 
-COMMENT ON TABLE lsif_data_definitions IS 'Associates (document, range) pairs with the import monikers attached to the range.';
+COMMENT ON TABLE codeintel_last_reconcile IS 'Stores the last time processed LSIF data was reconciled with the other database.';
 
-COMMENT ON COLUMN lsif_data_definitions.dump_id IS 'The identifier of the associated dump in the lsif_uploads table (state=completed).';
+CREATE TABLE codeintel_scip_document_lookup (
+    id bigint NOT NULL,
+    upload_id integer NOT NULL,
+    document_path text NOT NULL,
+    document_id bigint NOT NULL,
+    tenant_id integer
+);
 
-COMMENT ON COLUMN lsif_data_definitions.scheme IS 'The moniker scheme.';
+COMMENT ON TABLE codeintel_scip_document_lookup IS 'A mapping from file paths to document references within a particular SCIP index.';
 
-COMMENT ON COLUMN lsif_data_definitions.identifier IS 'The moniker identifier.';
+COMMENT ON COLUMN codeintel_scip_document_lookup.id IS 'An auto-generated identifier. This column is used as a foreign key target to reduce occurrences of the full document path value.';
 
-COMMENT ON COLUMN lsif_data_definitions.data IS 'A gob-encoded payload conforming to an array of [LocationData](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@3.26/-/blob/enterprise/lib/codeintel/semantic/types.go#L106:6) types.';
+COMMENT ON COLUMN codeintel_scip_document_lookup.upload_id IS 'The identifier of the upload that provided this SCIP index.';
 
-COMMENT ON COLUMN lsif_data_definitions.schema_version IS 'The schema version of this row - used to determine presence and encoding of data.';
+COMMENT ON COLUMN codeintel_scip_document_lookup.document_path IS 'The file path to the document relative to the root of the index.';
 
-COMMENT ON COLUMN lsif_data_definitions.num_locations IS 'The number of locations stored in the data field.';
+COMMENT ON COLUMN codeintel_scip_document_lookup.document_id IS 'The foreign key to the shared document payload (see the table [`codeintel_scip_document_lookup`](#table-publiccodeintel_scip_document_lookup)).';
 
-CREATE TABLE lsif_data_definitions_schema_versions (
-    dump_id integer NOT NULL,
+CREATE SEQUENCE codeintel_scip_document_lookup_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+ALTER SEQUENCE codeintel_scip_document_lookup_id_seq OWNED BY codeintel_scip_document_lookup.id;
+
+CREATE TABLE codeintel_scip_document_lookup_schema_versions (
+    upload_id integer NOT NULL,
     min_schema_version integer,
-    max_schema_version integer
+    max_schema_version integer,
+    tenant_id integer
 );
 
-COMMENT ON TABLE lsif_data_definitions_schema_versions IS 'Tracks the range of schema_versions for each upload in the lsif_data_definitions table.';
+COMMENT ON TABLE codeintel_scip_document_lookup_schema_versions IS 'Tracks the range of `schema_versions` values associated with each SCIP index in the [`codeintel_scip_document_lookup`](#table-publiccodeintel_scip_document_lookup) table.';
 
-COMMENT ON COLUMN lsif_data_definitions_schema_versions.dump_id IS 'The identifier of the associated dump in the lsif_uploads table.';
+COMMENT ON COLUMN codeintel_scip_document_lookup_schema_versions.upload_id IS 'The identifier of the associated SCIP index.';
 
-COMMENT ON COLUMN lsif_data_definitions_schema_versions.min_schema_version IS 'A lower-bound on the `lsif_data_definitions.schema_version` where `lsif_data_definitions.dump_id = dump_id`.';
+COMMENT ON COLUMN codeintel_scip_document_lookup_schema_versions.min_schema_version IS 'A lower-bound on the `schema_version` values of the records in the table [`codeintel_scip_document_lookup`](#table-publiccodeintel_scip_document_lookup) where the `upload_id` column matches the associated SCIP index.';
 
-COMMENT ON COLUMN lsif_data_definitions_schema_versions.max_schema_version IS 'An upper-bound on the `lsif_data_definitions.schema_version` where `lsif_data_definitions.dump_id = dump_id`.';
+COMMENT ON COLUMN codeintel_scip_document_lookup_schema_versions.max_schema_version IS 'An upper-bound on the `schema_version` values of the records in the table [`codeintel_scip_document_lookup`](#table-publiccodeintel_scip_document_lookup) where the `upload_id` column matches the associated SCIP index.';
 
-CREATE TABLE lsif_data_docs_search_current_private (
-    repo_id integer NOT NULL,
-    dump_root text NOT NULL,
-    lang_name_id integer NOT NULL,
-    dump_id integer NOT NULL,
-    last_cleanup_scan_at timestamp with time zone DEFAULT now() NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    id integer NOT NULL
-);
-
-COMMENT ON TABLE lsif_data_docs_search_current_private IS 'A table indicating the most current search index for a unique repository, root, and language.';
-
-COMMENT ON COLUMN lsif_data_docs_search_current_private.repo_id IS 'The repository identifier of the associated dump.';
-
-COMMENT ON COLUMN lsif_data_docs_search_current_private.dump_root IS 'The root of the associated dump.';
-
-COMMENT ON COLUMN lsif_data_docs_search_current_private.lang_name_id IS 'The interned index name of the associated dump.';
-
-COMMENT ON COLUMN lsif_data_docs_search_current_private.dump_id IS 'The associated dump identifier.';
-
-COMMENT ON COLUMN lsif_data_docs_search_current_private.last_cleanup_scan_at IS 'The last time this record was checked as part of a data retention scan.';
-
-COMMENT ON COLUMN lsif_data_docs_search_current_private.created_at IS 'The time this record was inserted. The records with the latest created_at value for the same repository, root, and language is the only visible one and others will be deleted asynchronously.';
-
-CREATE SEQUENCE lsif_data_docs_search_current_private_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE lsif_data_docs_search_current_private_id_seq OWNED BY lsif_data_docs_search_current_private.id;
-
-CREATE TABLE lsif_data_docs_search_current_public (
-    repo_id integer NOT NULL,
-    dump_root text NOT NULL,
-    lang_name_id integer NOT NULL,
-    dump_id integer NOT NULL,
-    last_cleanup_scan_at timestamp with time zone DEFAULT now() NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    id integer NOT NULL
-);
-
-COMMENT ON TABLE lsif_data_docs_search_current_public IS 'A table indicating the most current search index for a unique repository, root, and language.';
-
-COMMENT ON COLUMN lsif_data_docs_search_current_public.repo_id IS 'The repository identifier of the associated dump.';
-
-COMMENT ON COLUMN lsif_data_docs_search_current_public.dump_root IS 'The root of the associated dump.';
-
-COMMENT ON COLUMN lsif_data_docs_search_current_public.lang_name_id IS 'The interned index name of the associated dump.';
-
-COMMENT ON COLUMN lsif_data_docs_search_current_public.dump_id IS 'The associated dump identifier.';
-
-COMMENT ON COLUMN lsif_data_docs_search_current_public.last_cleanup_scan_at IS 'The last time this record was checked as part of a data retention scan.';
-
-COMMENT ON COLUMN lsif_data_docs_search_current_public.created_at IS 'The time this record was inserted. The records with the latest created_at value for the same repository, root, and language is the only visible one and others will be deleted asynchronously.';
-
-CREATE SEQUENCE lsif_data_docs_search_current_public_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE lsif_data_docs_search_current_public_id_seq OWNED BY lsif_data_docs_search_current_public.id;
-
-CREATE TABLE lsif_data_docs_search_lang_names_private (
+CREATE TABLE codeintel_scip_documents (
     id bigint NOT NULL,
-    lang_name text NOT NULL,
-    tsv tsvector NOT NULL
-);
-
-COMMENT ON TABLE lsif_data_docs_search_lang_names_private IS 'Each unique language name being stored in the API docs search index.';
-
-COMMENT ON COLUMN lsif_data_docs_search_lang_names_private.id IS 'The ID of the language name.';
-
-COMMENT ON COLUMN lsif_data_docs_search_lang_names_private.lang_name IS 'The lowercase language name (go, java, etc.) OR, if unknown, the LSIF indexer name.';
-
-COMMENT ON COLUMN lsif_data_docs_search_lang_names_private.tsv IS 'Indexed tsvector for the lang_name field. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-CREATE SEQUENCE lsif_data_docs_search_lang_names_private_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE lsif_data_docs_search_lang_names_private_id_seq OWNED BY lsif_data_docs_search_lang_names_private.id;
-
-CREATE TABLE lsif_data_docs_search_lang_names_public (
-    id bigint NOT NULL,
-    lang_name text NOT NULL,
-    tsv tsvector NOT NULL
-);
-
-COMMENT ON TABLE lsif_data_docs_search_lang_names_public IS 'Each unique language name being stored in the API docs search index.';
-
-COMMENT ON COLUMN lsif_data_docs_search_lang_names_public.id IS 'The ID of the language name.';
-
-COMMENT ON COLUMN lsif_data_docs_search_lang_names_public.lang_name IS 'The lowercase language name (go, java, etc.) OR, if unknown, the LSIF indexer name.';
-
-COMMENT ON COLUMN lsif_data_docs_search_lang_names_public.tsv IS 'Indexed tsvector for the lang_name field. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-CREATE SEQUENCE lsif_data_docs_search_lang_names_public_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE lsif_data_docs_search_lang_names_public_id_seq OWNED BY lsif_data_docs_search_lang_names_public.id;
-
-CREATE TABLE lsif_data_docs_search_private (
-    id bigint NOT NULL,
-    repo_id integer NOT NULL,
-    dump_id integer NOT NULL,
-    dump_root text NOT NULL,
-    path_id text NOT NULL,
-    detail text NOT NULL,
-    lang_name_id integer NOT NULL,
-    repo_name_id integer NOT NULL,
-    tags_id integer NOT NULL,
-    search_key text NOT NULL,
-    search_key_tsv tsvector NOT NULL,
-    search_key_reverse_tsv tsvector NOT NULL,
-    label text NOT NULL,
-    label_tsv tsvector NOT NULL,
-    label_reverse_tsv tsvector NOT NULL
-);
-
-COMMENT ON TABLE lsif_data_docs_search_private IS 'A tsvector search index over API documentation (private repos only)';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.id IS 'The row ID of the search result.';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.repo_id IS 'The repo ID, from the main app DB repo table. Used to search over a select set of repos by ID.';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.dump_id IS 'The identifier of the associated dump in the lsif_uploads table (state=completed).';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.dump_root IS 'Identical to lsif_dumps.root; The working directory of the indexer image relative to the repository root.';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.path_id IS 'The fully qualified documentation page path ID, e.g. including "#section". See GraphQL codeintel.schema:documentationPage for what this is.';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.detail IS 'The detail string (e.g. the full function signature and its docs). See protocol/documentation.go:Documentation';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.lang_name_id IS 'The programming language (or indexer name) that produced the result. Foreign key into lsif_data_docs_search_lang_names_private.';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.repo_name_id IS 'The repository name that produced the result. Foreign key into lsif_data_docs_search_repo_names_private.';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.tags_id IS 'The tags from the documentation node. Foreign key into lsif_data_docs_search_tags_private.';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.search_key IS 'The search key generated by the indexer, e.g. mux.Router.ServeHTTP. It is language-specific, and likely unique within a repository (but not always.) See protocol/documentation.go:Documentation.SearchKey';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.search_key_tsv IS 'Indexed tsvector for the search_key field. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.search_key_reverse_tsv IS 'Indexed tsvector for the reverse of the search_key field, for suffix lexeme/word matching. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.label IS 'The label string of the result, e.g. a one-line function signature. See protocol/documentation.go:Documentation';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.label_tsv IS 'Indexed tsvector for the label field. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-COMMENT ON COLUMN lsif_data_docs_search_private.label_reverse_tsv IS 'Indexed tsvector for the reverse of the label field, for suffix lexeme/word matching. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-CREATE SEQUENCE lsif_data_docs_search_private_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE lsif_data_docs_search_private_id_seq OWNED BY lsif_data_docs_search_private.id;
-
-CREATE TABLE lsif_data_docs_search_public (
-    id bigint NOT NULL,
-    repo_id integer NOT NULL,
-    dump_id integer NOT NULL,
-    dump_root text NOT NULL,
-    path_id text NOT NULL,
-    detail text NOT NULL,
-    lang_name_id integer NOT NULL,
-    repo_name_id integer NOT NULL,
-    tags_id integer NOT NULL,
-    search_key text NOT NULL,
-    search_key_tsv tsvector NOT NULL,
-    search_key_reverse_tsv tsvector NOT NULL,
-    label text NOT NULL,
-    label_tsv tsvector NOT NULL,
-    label_reverse_tsv tsvector NOT NULL
-);
-
-COMMENT ON TABLE lsif_data_docs_search_public IS 'A tsvector search index over API documentation (public repos only)';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.id IS 'The row ID of the search result.';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.repo_id IS 'The repo ID, from the main app DB repo table. Used to search over a select set of repos by ID.';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.dump_id IS 'The identifier of the associated dump in the lsif_uploads table (state=completed).';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.dump_root IS 'Identical to lsif_dumps.root; The working directory of the indexer image relative to the repository root.';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.path_id IS 'The fully qualified documentation page path ID, e.g. including "#section". See GraphQL codeintel.schema:documentationPage for what this is.';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.detail IS 'The detail string (e.g. the full function signature and its docs). See protocol/documentation.go:Documentation';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.lang_name_id IS 'The programming language (or indexer name) that produced the result. Foreign key into lsif_data_docs_search_lang_names_public.';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.repo_name_id IS 'The repository name that produced the result. Foreign key into lsif_data_docs_search_repo_names_public.';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.tags_id IS 'The tags from the documentation node. Foreign key into lsif_data_docs_search_tags_public.';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.search_key IS 'The search key generated by the indexer, e.g. mux.Router.ServeHTTP. It is language-specific, and likely unique within a repository (but not always.) See protocol/documentation.go:Documentation.SearchKey';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.search_key_tsv IS 'Indexed tsvector for the search_key field. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.search_key_reverse_tsv IS 'Indexed tsvector for the reverse of the search_key field, for suffix lexeme/word matching. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.label IS 'The label string of the result, e.g. a one-line function signature. See protocol/documentation.go:Documentation';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.label_tsv IS 'Indexed tsvector for the label field. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-COMMENT ON COLUMN lsif_data_docs_search_public.label_reverse_tsv IS 'Indexed tsvector for the reverse of the label field, for suffix lexeme/word matching. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-CREATE SEQUENCE lsif_data_docs_search_public_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE lsif_data_docs_search_public_id_seq OWNED BY lsif_data_docs_search_public.id;
-
-CREATE TABLE lsif_data_docs_search_repo_names_private (
-    id bigint NOT NULL,
-    repo_name text NOT NULL,
-    tsv tsvector NOT NULL,
-    reverse_tsv tsvector NOT NULL
-);
-
-COMMENT ON TABLE lsif_data_docs_search_repo_names_private IS 'Each unique repository name being stored in the API docs search index.';
-
-COMMENT ON COLUMN lsif_data_docs_search_repo_names_private.id IS 'The ID of the repository name.';
-
-COMMENT ON COLUMN lsif_data_docs_search_repo_names_private.repo_name IS 'The fully qualified name of the repository.';
-
-COMMENT ON COLUMN lsif_data_docs_search_repo_names_private.tsv IS 'Indexed tsvector for the lang_name field. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-COMMENT ON COLUMN lsif_data_docs_search_repo_names_private.reverse_tsv IS 'Indexed tsvector for the reverse of the lang_name field, for suffix lexeme/word matching. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-CREATE SEQUENCE lsif_data_docs_search_repo_names_private_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE lsif_data_docs_search_repo_names_private_id_seq OWNED BY lsif_data_docs_search_repo_names_private.id;
-
-CREATE TABLE lsif_data_docs_search_repo_names_public (
-    id bigint NOT NULL,
-    repo_name text NOT NULL,
-    tsv tsvector NOT NULL,
-    reverse_tsv tsvector NOT NULL
-);
-
-COMMENT ON TABLE lsif_data_docs_search_repo_names_public IS 'Each unique repository name being stored in the API docs search index.';
-
-COMMENT ON COLUMN lsif_data_docs_search_repo_names_public.id IS 'The ID of the repository name.';
-
-COMMENT ON COLUMN lsif_data_docs_search_repo_names_public.repo_name IS 'The fully qualified name of the repository.';
-
-COMMENT ON COLUMN lsif_data_docs_search_repo_names_public.tsv IS 'Indexed tsvector for the lang_name field. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-COMMENT ON COLUMN lsif_data_docs_search_repo_names_public.reverse_tsv IS 'Indexed tsvector for the reverse of the lang_name field, for suffix lexeme/word matching. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-CREATE SEQUENCE lsif_data_docs_search_repo_names_public_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE lsif_data_docs_search_repo_names_public_id_seq OWNED BY lsif_data_docs_search_repo_names_public.id;
-
-CREATE TABLE lsif_data_docs_search_tags_private (
-    id bigint NOT NULL,
-    tags text NOT NULL,
-    tsv tsvector NOT NULL
-);
-
-COMMENT ON TABLE lsif_data_docs_search_tags_private IS 'Each uniques sequence of space-separated tags being stored in the API docs search index.';
-
-COMMENT ON COLUMN lsif_data_docs_search_tags_private.id IS 'The ID of the tags.';
-
-COMMENT ON COLUMN lsif_data_docs_search_tags_private.tags IS 'The full sequence of space-separated tags. See protocol/documentation.go:Documentation';
-
-COMMENT ON COLUMN lsif_data_docs_search_tags_private.tsv IS 'Indexed tsvector for the tags field. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-CREATE SEQUENCE lsif_data_docs_search_tags_private_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE lsif_data_docs_search_tags_private_id_seq OWNED BY lsif_data_docs_search_tags_private.id;
-
-CREATE TABLE lsif_data_docs_search_tags_public (
-    id bigint NOT NULL,
-    tags text NOT NULL,
-    tsv tsvector NOT NULL
-);
-
-COMMENT ON TABLE lsif_data_docs_search_tags_public IS 'Each uniques sequence of space-separated tags being stored in the API docs search index.';
-
-COMMENT ON COLUMN lsif_data_docs_search_tags_public.id IS 'The ID of the tags.';
-
-COMMENT ON COLUMN lsif_data_docs_search_tags_public.tags IS 'The full sequence of space-separated tags. See protocol/documentation.go:Documentation';
-
-COMMENT ON COLUMN lsif_data_docs_search_tags_public.tsv IS 'Indexed tsvector for the tags field. Crafted for ordered, case, and punctuation sensitivity, see data_write_documentation.go:textSearchVector.';
-
-CREATE SEQUENCE lsif_data_docs_search_tags_public_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE lsif_data_docs_search_tags_public_id_seq OWNED BY lsif_data_docs_search_tags_public.id;
-
-CREATE TABLE lsif_data_documentation_mappings (
-    dump_id integer NOT NULL,
-    path_id text NOT NULL,
-    result_id integer NOT NULL,
-    file_path text
-);
-
-COMMENT ON TABLE lsif_data_documentation_mappings IS 'Maps documentation path IDs to their corresponding integral documentationResult vertex IDs, which are unique within a dump.';
-
-COMMENT ON COLUMN lsif_data_documentation_mappings.dump_id IS 'The identifier of the associated dump in the lsif_uploads table (state=completed).';
-
-COMMENT ON COLUMN lsif_data_documentation_mappings.path_id IS 'The documentation page path ID, see see GraphQL codeintel.schema:documentationPage for what this is.';
-
-COMMENT ON COLUMN lsif_data_documentation_mappings.result_id IS 'The documentationResult vertex ID.';
-
-COMMENT ON COLUMN lsif_data_documentation_mappings.file_path IS 'The document file path for the documentationResult, if any. e.g. the path to the file where the symbol described by this documentationResult is located, if it is a symbol.';
-
-CREATE TABLE lsif_data_documentation_pages (
-    dump_id integer NOT NULL,
-    path_id text NOT NULL,
-    data bytea,
-    search_indexed boolean DEFAULT false
-);
-
-COMMENT ON TABLE lsif_data_documentation_pages IS 'Associates documentation pathIDs to their documentation page hierarchy chunk.';
-
-COMMENT ON COLUMN lsif_data_documentation_pages.dump_id IS 'The identifier of the associated dump in the lsif_uploads table (state=completed).';
-
-COMMENT ON COLUMN lsif_data_documentation_pages.path_id IS 'The documentation page path ID, see see GraphQL codeintel.schema:documentationPage for what this is.';
-
-COMMENT ON COLUMN lsif_data_documentation_pages.data IS 'A gob-encoded payload conforming to a `type DocumentationPageData struct` pointer (lib/codeintel/semantic/types.go)';
-
-CREATE TABLE lsif_data_documentation_path_info (
-    dump_id integer NOT NULL,
-    path_id text NOT NULL,
-    data bytea
-);
-
-COMMENT ON TABLE lsif_data_documentation_path_info IS 'Associates documentation page pathIDs to information about what is at that pathID, its immediate children, etc.';
-
-COMMENT ON COLUMN lsif_data_documentation_path_info.dump_id IS 'The identifier of the associated dump in the lsif_uploads table (state=completed).';
-
-COMMENT ON COLUMN lsif_data_documentation_path_info.path_id IS 'The documentation page path ID, see see GraphQL codeintel.schema:documentationPage for what this is.';
-
-COMMENT ON COLUMN lsif_data_documentation_path_info.data IS 'A gob-encoded payload conforming to a `type DocumentationPathInoData struct` pointer (lib/codeintel/semantic/types.go)';
-
-CREATE TABLE lsif_data_documents (
-    dump_id integer NOT NULL,
-    path text NOT NULL,
-    data bytea,
+    payload_hash bytea NOT NULL,
     schema_version integer NOT NULL,
-    num_diagnostics integer NOT NULL,
-    ranges bytea,
-    hovers bytea,
-    monikers bytea,
-    packages bytea,
-    diagnostics bytea
+    raw_scip_payload bytea NOT NULL,
+    tenant_id integer
 );
 
-COMMENT ON TABLE lsif_data_documents IS 'Stores reference, hover text, moniker, and diagnostic data about a particular text document witin a dump.';
+COMMENT ON TABLE codeintel_scip_documents IS 'A lookup of SCIP [Document](https://sourcegraph.com/search?q=context:%40sourcegraph/all+repo:%5Egithub%5C.com/sourcegraph/scip%24+file:%5Escip%5C.proto+message+Document&patternType=standard) payloads by their hash.';
 
-COMMENT ON COLUMN lsif_data_documents.dump_id IS 'The identifier of the associated dump in the lsif_uploads table (state=completed).';
+COMMENT ON COLUMN codeintel_scip_documents.id IS 'An auto-generated identifier. This column is used as a foreign key target to reduce occurrences of the full payload hash value.';
 
-COMMENT ON COLUMN lsif_data_documents.path IS 'The path of the text document relative to the associated dump root.';
+COMMENT ON COLUMN codeintel_scip_documents.payload_hash IS 'A deterministic hash of the raw SCIP payload. We use this as a unique value to enforce deduplication between indexes with the same document data.';
 
-COMMENT ON COLUMN lsif_data_documents.data IS 'A gob-encoded payload conforming to the [DocumentData](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@3.26/-/blob/enterprise/lib/codeintel/semantic/types.go#L13:6) type. This field is being migrated across ranges, hovers, monikers, packages, and diagnostics columns and will be removed in a future release of Sourcegraph.';
+COMMENT ON COLUMN codeintel_scip_documents.schema_version IS 'The schema version of this row - used to determine presence and encoding of (future) denormalized data.';
 
-COMMENT ON COLUMN lsif_data_documents.schema_version IS 'The schema version of this row - used to determine presence and encoding of data.';
+COMMENT ON COLUMN codeintel_scip_documents.raw_scip_payload IS 'The raw, canonicalized SCIP [Document](https://sourcegraph.com/search?q=context:%40sourcegraph/all+repo:%5Egithub%5C.com/sourcegraph/scip%24+file:%5Escip%5C.proto+message+Document&patternType=standard) payload.';
 
-COMMENT ON COLUMN lsif_data_documents.num_diagnostics IS 'The number of diagnostics stored in the data field.';
-
-COMMENT ON COLUMN lsif_data_documents.ranges IS 'A gob-encoded payload conforming to the [Ranges](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@3.26/-/blob/enterprise/lib/codeintel/semantic/types.go#L14:2) field of the DocumentDatatype.';
-
-COMMENT ON COLUMN lsif_data_documents.hovers IS 'A gob-encoded payload conforming to the [HoversResults](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@3.26/-/blob/enterprise/lib/codeintel/semantic/types.go#L15:2) field of the DocumentDatatype.';
-
-COMMENT ON COLUMN lsif_data_documents.monikers IS 'A gob-encoded payload conforming to the [Monikers](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@3.26/-/blob/enterprise/lib/codeintel/semantic/types.go#L16:2) field of the DocumentDatatype.';
-
-COMMENT ON COLUMN lsif_data_documents.packages IS 'A gob-encoded payload conforming to the [PackageInformation](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@3.26/-/blob/enterprise/lib/codeintel/semantic/types.go#L17:2) field of the DocumentDatatype.';
-
-COMMENT ON COLUMN lsif_data_documents.diagnostics IS 'A gob-encoded payload conforming to the [Diagnostics](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@3.26/-/blob/enterprise/lib/codeintel/semantic/types.go#L18:2) field of the DocumentDatatype.';
-
-CREATE TABLE lsif_data_documents_schema_versions (
-    dump_id integer NOT NULL,
-    min_schema_version integer,
-    max_schema_version integer
+CREATE TABLE codeintel_scip_documents_dereference_logs (
+    id bigint NOT NULL,
+    document_id bigint NOT NULL,
+    last_removal_time timestamp with time zone DEFAULT now() NOT NULL,
+    tenant_id integer
 );
 
-COMMENT ON TABLE lsif_data_documents_schema_versions IS 'Tracks the range of schema_versions for each upload in the lsif_data_documents table.';
+COMMENT ON TABLE codeintel_scip_documents_dereference_logs IS 'A list of document rows that were recently dereferenced by the deletion of an index.';
 
-COMMENT ON COLUMN lsif_data_documents_schema_versions.dump_id IS 'The identifier of the associated dump in the lsif_uploads table.';
+COMMENT ON COLUMN codeintel_scip_documents_dereference_logs.document_id IS 'The identifier of the document that was dereferenced.';
 
-COMMENT ON COLUMN lsif_data_documents_schema_versions.min_schema_version IS 'A lower-bound on the `lsif_data_documents.schema_version` where `lsif_data_documents.dump_id = dump_id`.';
+COMMENT ON COLUMN codeintel_scip_documents_dereference_logs.last_removal_time IS 'The time that the log entry was inserted.';
 
-COMMENT ON COLUMN lsif_data_documents_schema_versions.max_schema_version IS 'An upper-bound on the `lsif_data_documents.schema_version` where `lsif_data_documents.dump_id = dump_id`.';
+CREATE SEQUENCE codeintel_scip_documents_dereference_logs_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
 
-CREATE TABLE lsif_data_implementations (
-    dump_id integer NOT NULL,
-    scheme text NOT NULL,
-    identifier text NOT NULL,
-    data bytea,
+ALTER SEQUENCE codeintel_scip_documents_dereference_logs_id_seq OWNED BY codeintel_scip_documents_dereference_logs.id;
+
+CREATE SEQUENCE codeintel_scip_documents_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+ALTER SEQUENCE codeintel_scip_documents_id_seq OWNED BY codeintel_scip_documents.id;
+
+CREATE TABLE codeintel_scip_metadata (
+    id bigint NOT NULL,
+    upload_id integer NOT NULL,
+    tool_name text NOT NULL,
+    tool_version text NOT NULL,
+    tool_arguments text[] NOT NULL,
+    text_document_encoding text NOT NULL,
+    protocol_version integer NOT NULL,
+    tenant_id integer
+);
+
+COMMENT ON TABLE codeintel_scip_metadata IS 'Global metadatadata about a single processed upload.';
+
+COMMENT ON COLUMN codeintel_scip_metadata.id IS 'An auto-generated identifier.';
+
+COMMENT ON COLUMN codeintel_scip_metadata.upload_id IS 'The identifier of the upload that provided this SCIP index.';
+
+COMMENT ON COLUMN codeintel_scip_metadata.tool_name IS 'Name of the indexer that produced this index.';
+
+COMMENT ON COLUMN codeintel_scip_metadata.tool_version IS 'Version of the indexer that produced this index.';
+
+COMMENT ON COLUMN codeintel_scip_metadata.tool_arguments IS 'Command-line arguments that were used to invoke this indexer.';
+
+COMMENT ON COLUMN codeintel_scip_metadata.text_document_encoding IS 'The encoding of the text documents within this index. May affect range boundaries.';
+
+COMMENT ON COLUMN codeintel_scip_metadata.protocol_version IS 'The version of the SCIP protocol used to encode this index.';
+
+CREATE SEQUENCE codeintel_scip_metadata_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+ALTER SEQUENCE codeintel_scip_metadata_id_seq OWNED BY codeintel_scip_metadata.id;
+
+CREATE TABLE codeintel_scip_symbol_names (
+    id integer NOT NULL,
+    upload_id integer NOT NULL,
+    name_segment text NOT NULL,
+    prefix_id integer,
+    tenant_id integer
+);
+
+COMMENT ON TABLE codeintel_scip_symbol_names IS 'Stores a prefix tree of symbol names within a particular upload.';
+
+COMMENT ON COLUMN codeintel_scip_symbol_names.id IS 'An identifier unique within the index for this symbol name segment.';
+
+COMMENT ON COLUMN codeintel_scip_symbol_names.upload_id IS 'The identifier of the upload that provided this SCIP index.';
+
+COMMENT ON COLUMN codeintel_scip_symbol_names.name_segment IS 'The portion of the symbol name that is unique to this symbol and its children.';
+
+COMMENT ON COLUMN codeintel_scip_symbol_names.prefix_id IS 'The identifier of the segment that forms the prefix of this symbol, if any.';
+
+CREATE TABLE codeintel_scip_symbols (
+    upload_id integer NOT NULL,
+    document_lookup_id bigint NOT NULL,
     schema_version integer NOT NULL,
-    num_locations integer NOT NULL
+    definition_ranges bytea,
+    reference_ranges bytea,
+    implementation_ranges bytea,
+    type_definition_ranges bytea,
+    symbol_id integer NOT NULL,
+    tenant_id integer
 );
 
-COMMENT ON TABLE lsif_data_implementations IS 'Associates (document, range) pairs with the implementation monikers attached to the range.';
+COMMENT ON TABLE codeintel_scip_symbols IS 'A mapping from SCIP [Symbol names](https://sourcegraph.com/search?q=context:%40sourcegraph/all+repo:%5Egithub%5C.com/sourcegraph/scip%24+file:%5Escip%5C.proto+message+Symbol&patternType=standard) to path and ranges where that symbol occurs within a particular SCIP index.';
 
-COMMENT ON COLUMN lsif_data_implementations.dump_id IS 'The identifier of the associated dump in the lsif_uploads table (state=completed).';
+COMMENT ON COLUMN codeintel_scip_symbols.upload_id IS 'The identifier of the upload that provided this SCIP index.';
 
-COMMENT ON COLUMN lsif_data_implementations.scheme IS 'The moniker scheme.';
+COMMENT ON COLUMN codeintel_scip_symbols.document_lookup_id IS 'A reference to the `id` column of [`codeintel_scip_document_lookup`](#table-publiccodeintel_scip_document_lookup). Joining on this table yields the document path relative to the index root.';
 
-COMMENT ON COLUMN lsif_data_implementations.identifier IS 'The moniker identifier.';
+COMMENT ON COLUMN codeintel_scip_symbols.schema_version IS 'The schema version of this row - used to determine presence and encoding of denormalized data.';
 
-COMMENT ON COLUMN lsif_data_implementations.data IS 'A gob-encoded payload conforming to an array of [LocationData](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@3.26/-/blob/enterprise/lib/codeintel/semantic/types.go#L106:6) types.';
+COMMENT ON COLUMN codeintel_scip_symbols.definition_ranges IS 'An encoded set of ranges within the associated document that have a **definition** relationship to the associated symbol.';
 
-COMMENT ON COLUMN lsif_data_implementations.schema_version IS 'The schema version of this row - used to determine presence and encoding of data.';
+COMMENT ON COLUMN codeintel_scip_symbols.reference_ranges IS 'An encoded set of ranges within the associated document that have a **reference** relationship to the associated symbol.';
 
-COMMENT ON COLUMN lsif_data_implementations.num_locations IS 'The number of locations stored in the data field.';
+COMMENT ON COLUMN codeintel_scip_symbols.implementation_ranges IS 'An encoded set of ranges within the associated document that have a **implementation** relationship to the associated symbol.';
 
-CREATE TABLE lsif_data_implementations_schema_versions (
-    dump_id integer NOT NULL,
+COMMENT ON COLUMN codeintel_scip_symbols.type_definition_ranges IS 'An encoded set of ranges within the associated document that have a **type definition** relationship to the associated symbol.';
+
+COMMENT ON COLUMN codeintel_scip_symbols.symbol_id IS 'The identifier of the segment that terminates the name of this symbol. See the table [`codeintel_scip_symbol_names`](#table-publiccodeintel_scip_symbol_names) on how to reconstruct the full symbol name.';
+
+CREATE TABLE codeintel_scip_symbols_schema_versions (
+    upload_id integer NOT NULL,
     min_schema_version integer,
-    max_schema_version integer
+    max_schema_version integer,
+    tenant_id integer
 );
 
-COMMENT ON TABLE lsif_data_implementations_schema_versions IS 'Tracks the range of schema_versions for each upload in the lsif_data_implementations table.';
+COMMENT ON TABLE codeintel_scip_symbols_schema_versions IS 'Tracks the range of `schema_versions` for each index in the [`codeintel_scip_symbols`](#table-publiccodeintel_scip_symbols) table.';
 
-COMMENT ON COLUMN lsif_data_implementations_schema_versions.dump_id IS 'The identifier of the associated dump in the lsif_uploads table.';
+COMMENT ON COLUMN codeintel_scip_symbols_schema_versions.upload_id IS 'The identifier of the associated SCIP index.';
 
-COMMENT ON COLUMN lsif_data_implementations_schema_versions.min_schema_version IS 'A lower-bound on the `lsif_data_implementations.schema_version` where `lsif_data_implementations.dump_id = dump_id`.';
+COMMENT ON COLUMN codeintel_scip_symbols_schema_versions.min_schema_version IS 'A lower-bound on the `schema_version` values of the records in the table [`codeintel_scip_symbols`](#table-publiccodeintel_scip_symbols) where the `upload_id` column matches the associated SCIP index.';
 
-COMMENT ON COLUMN lsif_data_implementations_schema_versions.max_schema_version IS 'An upper-bound on the `lsif_data_implementations.schema_version` where `lsif_data_implementations.dump_id = dump_id`.';
-
-CREATE TABLE lsif_data_metadata (
-    dump_id integer NOT NULL,
-    num_result_chunks integer
-);
-
-COMMENT ON TABLE lsif_data_metadata IS 'Stores the number of result chunks associated with a dump.';
-
-COMMENT ON COLUMN lsif_data_metadata.dump_id IS 'The identifier of the associated dump in the lsif_uploads table (state=completed).';
-
-COMMENT ON COLUMN lsif_data_metadata.num_result_chunks IS 'A bound of populated indexes in the lsif_data_result_chunks table for the associated dump. This value is used to hash identifiers into the result chunk index to which they belong.';
-
-CREATE TABLE lsif_data_references (
-    dump_id integer NOT NULL,
-    scheme text NOT NULL,
-    identifier text NOT NULL,
-    data bytea,
-    schema_version integer NOT NULL,
-    num_locations integer NOT NULL
-);
-
-COMMENT ON TABLE lsif_data_references IS 'Associates (document, range) pairs with the export monikers attached to the range.';
-
-COMMENT ON COLUMN lsif_data_references.dump_id IS 'The identifier of the associated dump in the lsif_uploads table (state=completed).';
-
-COMMENT ON COLUMN lsif_data_references.scheme IS 'The moniker scheme.';
-
-COMMENT ON COLUMN lsif_data_references.identifier IS 'The moniker identifier.';
-
-COMMENT ON COLUMN lsif_data_references.data IS 'A gob-encoded payload conforming to an array of [LocationData](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@3.26/-/blob/enterprise/lib/codeintel/semantic/types.go#L106:6) types.';
-
-COMMENT ON COLUMN lsif_data_references.schema_version IS 'The schema version of this row - used to determine presence and encoding of data.';
-
-COMMENT ON COLUMN lsif_data_references.num_locations IS 'The number of locations stored in the data field.';
-
-CREATE TABLE lsif_data_references_schema_versions (
-    dump_id integer NOT NULL,
-    min_schema_version integer,
-    max_schema_version integer
-);
-
-COMMENT ON TABLE lsif_data_references_schema_versions IS 'Tracks the range of schema_versions for each upload in the lsif_data_references table.';
-
-COMMENT ON COLUMN lsif_data_references_schema_versions.dump_id IS 'The identifier of the associated dump in the lsif_uploads table.';
-
-COMMENT ON COLUMN lsif_data_references_schema_versions.min_schema_version IS 'A lower-bound on the `lsif_data_references.schema_version` where `lsif_data_references.dump_id = dump_id`.';
-
-COMMENT ON COLUMN lsif_data_references_schema_versions.max_schema_version IS 'An upper-bound on the `lsif_data_references.schema_version` where `lsif_data_references.dump_id = dump_id`.';
-
-CREATE TABLE lsif_data_result_chunks (
-    dump_id integer NOT NULL,
-    idx integer NOT NULL,
-    data bytea
-);
-
-COMMENT ON TABLE lsif_data_result_chunks IS 'Associates result set identifiers with the (document path, range identifier) pairs that compose the set.';
-
-COMMENT ON COLUMN lsif_data_result_chunks.dump_id IS 'The identifier of the associated dump in the lsif_uploads table (state=completed).';
-
-COMMENT ON COLUMN lsif_data_result_chunks.idx IS 'The unique result chunk index within the associated dump. Every result set identifier present should hash to this index (modulo lsif_data_metadata.num_result_chunks).';
-
-COMMENT ON COLUMN lsif_data_result_chunks.data IS 'A gob-encoded payload conforming to the [ResultChunkData](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@3.26/-/blob/enterprise/lib/codeintel/semantic/types.go#L76:6) type.';
+COMMENT ON COLUMN codeintel_scip_symbols_schema_versions.max_schema_version IS 'An upper-bound on the `schema_version` values of the records in the table [`codeintel_scip_symbols`](#table-publiccodeintel_scip_symbols) where the `upload_id` column matches the associated SCIP index.';
 
 CREATE TABLE rockskip_ancestry (
     id integer NOT NULL,
     repo_id integer NOT NULL,
     commit_id character varying(40) NOT NULL,
     height integer NOT NULL,
-    ancestor integer NOT NULL
+    ancestor integer NOT NULL,
+    tenant_id integer
 );
 
 CREATE SEQUENCE rockskip_ancestry_id_seq
@@ -788,7 +302,8 @@ ALTER SEQUENCE rockskip_ancestry_id_seq OWNED BY rockskip_ancestry.id;
 CREATE TABLE rockskip_repos (
     id integer NOT NULL,
     repo text NOT NULL,
-    last_accessed_at timestamp with time zone NOT NULL
+    last_accessed_at timestamp with time zone NOT NULL,
+    tenant_id integer
 );
 
 CREATE SEQUENCE rockskip_repos_id_seq
@@ -807,7 +322,8 @@ CREATE TABLE rockskip_symbols (
     deleted integer[] NOT NULL,
     repo_id integer NOT NULL,
     path text NOT NULL,
-    name text NOT NULL
+    name text NOT NULL,
+    tenant_id integer
 );
 
 CREATE SEQUENCE rockskip_symbols_id_seq
@@ -820,25 +336,28 @@ CREATE SEQUENCE rockskip_symbols_id_seq
 
 ALTER SEQUENCE rockskip_symbols_id_seq OWNED BY rockskip_symbols.id;
 
-ALTER TABLE ONLY lsif_data_docs_search_current_private ALTER COLUMN id SET DEFAULT nextval('lsif_data_docs_search_current_private_id_seq'::regclass);
+CREATE TABLE tenants (
+    id bigint NOT NULL,
+    name text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tenant_name_length CHECK (((char_length(name) <= 32) AND (char_length(name) >= 3))),
+    CONSTRAINT tenant_name_valid_chars CHECK ((name ~ '^[a-z](?:[a-z0-9\_-])*[a-z0-9]$'::text))
+);
 
-ALTER TABLE ONLY lsif_data_docs_search_current_public ALTER COLUMN id SET DEFAULT nextval('lsif_data_docs_search_current_public_id_seq'::regclass);
+COMMENT ON TABLE tenants IS 'The table that holds all tenants known to the instance. In enterprise instances, this table will only contain the "default" tenant.';
 
-ALTER TABLE ONLY lsif_data_docs_search_lang_names_private ALTER COLUMN id SET DEFAULT nextval('lsif_data_docs_search_lang_names_private_id_seq'::regclass);
+COMMENT ON COLUMN tenants.id IS 'The ID of the tenant. To keep tenants globally addressable, and be able to move them aronud instances more easily, the ID is NOT a serial and has to be specified explicitly. The creator of the tenant is responsible for choosing a unique ID, if it cares.';
 
-ALTER TABLE ONLY lsif_data_docs_search_lang_names_public ALTER COLUMN id SET DEFAULT nextval('lsif_data_docs_search_lang_names_public_id_seq'::regclass);
+COMMENT ON COLUMN tenants.name IS 'The name of the tenant. This may be displayed to the user and must be unique.';
 
-ALTER TABLE ONLY lsif_data_docs_search_private ALTER COLUMN id SET DEFAULT nextval('lsif_data_docs_search_private_id_seq'::regclass);
+ALTER TABLE ONLY codeintel_scip_document_lookup ALTER COLUMN id SET DEFAULT nextval('codeintel_scip_document_lookup_id_seq'::regclass);
 
-ALTER TABLE ONLY lsif_data_docs_search_public ALTER COLUMN id SET DEFAULT nextval('lsif_data_docs_search_public_id_seq'::regclass);
+ALTER TABLE ONLY codeintel_scip_documents ALTER COLUMN id SET DEFAULT nextval('codeintel_scip_documents_id_seq'::regclass);
 
-ALTER TABLE ONLY lsif_data_docs_search_repo_names_private ALTER COLUMN id SET DEFAULT nextval('lsif_data_docs_search_repo_names_private_id_seq'::regclass);
+ALTER TABLE ONLY codeintel_scip_documents_dereference_logs ALTER COLUMN id SET DEFAULT nextval('codeintel_scip_documents_dereference_logs_id_seq'::regclass);
 
-ALTER TABLE ONLY lsif_data_docs_search_repo_names_public ALTER COLUMN id SET DEFAULT nextval('lsif_data_docs_search_repo_names_public_id_seq'::regclass);
-
-ALTER TABLE ONLY lsif_data_docs_search_tags_private ALTER COLUMN id SET DEFAULT nextval('lsif_data_docs_search_tags_private_id_seq'::regclass);
-
-ALTER TABLE ONLY lsif_data_docs_search_tags_public ALTER COLUMN id SET DEFAULT nextval('lsif_data_docs_search_tags_public_id_seq'::regclass);
+ALTER TABLE ONLY codeintel_scip_metadata ALTER COLUMN id SET DEFAULT nextval('codeintel_scip_metadata_id_seq'::regclass);
 
 ALTER TABLE ONLY rockskip_ancestry ALTER COLUMN id SET DEFAULT nextval('rockskip_ancestry_id_seq'::regclass);
 
@@ -846,92 +365,38 @@ ALTER TABLE ONLY rockskip_repos ALTER COLUMN id SET DEFAULT nextval('rockskip_re
 
 ALTER TABLE ONLY rockskip_symbols ALTER COLUMN id SET DEFAULT nextval('rockskip_symbols_id_seq'::regclass);
 
-ALTER TABLE ONLY lsif_data_definitions
-    ADD CONSTRAINT lsif_data_definitions_pkey PRIMARY KEY (dump_id, scheme, identifier);
+ALTER TABLE ONLY codeintel_last_reconcile
+    ADD CONSTRAINT codeintel_last_reconcile_dump_id_key UNIQUE (dump_id);
 
-ALTER TABLE ONLY lsif_data_definitions_schema_versions
-    ADD CONSTRAINT lsif_data_definitions_schema_versions_pkey PRIMARY KEY (dump_id);
+ALTER TABLE ONLY codeintel_scip_document_lookup
+    ADD CONSTRAINT codeintel_scip_document_lookup_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY lsif_data_docs_search_current_private
-    ADD CONSTRAINT lsif_data_docs_search_current_private_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY codeintel_scip_document_lookup_schema_versions
+    ADD CONSTRAINT codeintel_scip_document_lookup_schema_versions_pkey PRIMARY KEY (upload_id);
 
-ALTER TABLE ONLY lsif_data_docs_search_current_public
-    ADD CONSTRAINT lsif_data_docs_search_current_public_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY codeintel_scip_document_lookup
+    ADD CONSTRAINT codeintel_scip_document_lookup_upload_id_document_path_key UNIQUE (upload_id, document_path);
 
-ALTER TABLE ONLY lsif_data_docs_search_lang_names_private
-    ADD CONSTRAINT lsif_data_docs_search_lang_names_private_lang_name_key UNIQUE (lang_name);
+ALTER TABLE ONLY codeintel_scip_documents_dereference_logs
+    ADD CONSTRAINT codeintel_scip_documents_dereference_logs_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY lsif_data_docs_search_lang_names_private
-    ADD CONSTRAINT lsif_data_docs_search_lang_names_private_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY codeintel_scip_documents
+    ADD CONSTRAINT codeintel_scip_documents_payload_hash_key UNIQUE (payload_hash);
 
-ALTER TABLE ONLY lsif_data_docs_search_lang_names_public
-    ADD CONSTRAINT lsif_data_docs_search_lang_names_public_lang_name_key UNIQUE (lang_name);
+ALTER TABLE ONLY codeintel_scip_documents
+    ADD CONSTRAINT codeintel_scip_documents_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY lsif_data_docs_search_lang_names_public
-    ADD CONSTRAINT lsif_data_docs_search_lang_names_public_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY codeintel_scip_metadata
+    ADD CONSTRAINT codeintel_scip_metadata_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY lsif_data_docs_search_private
-    ADD CONSTRAINT lsif_data_docs_search_private_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY codeintel_scip_symbol_names
+    ADD CONSTRAINT codeintel_scip_symbol_names_pkey PRIMARY KEY (upload_id, id);
 
-ALTER TABLE ONLY lsif_data_docs_search_public
-    ADD CONSTRAINT lsif_data_docs_search_public_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY codeintel_scip_symbols
+    ADD CONSTRAINT codeintel_scip_symbols_pkey PRIMARY KEY (upload_id, symbol_id, document_lookup_id);
 
-ALTER TABLE ONLY lsif_data_docs_search_repo_names_private
-    ADD CONSTRAINT lsif_data_docs_search_repo_names_private_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY lsif_data_docs_search_repo_names_private
-    ADD CONSTRAINT lsif_data_docs_search_repo_names_private_repo_name_key UNIQUE (repo_name);
-
-ALTER TABLE ONLY lsif_data_docs_search_repo_names_public
-    ADD CONSTRAINT lsif_data_docs_search_repo_names_public_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY lsif_data_docs_search_repo_names_public
-    ADD CONSTRAINT lsif_data_docs_search_repo_names_public_repo_name_key UNIQUE (repo_name);
-
-ALTER TABLE ONLY lsif_data_docs_search_tags_private
-    ADD CONSTRAINT lsif_data_docs_search_tags_private_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY lsif_data_docs_search_tags_private
-    ADD CONSTRAINT lsif_data_docs_search_tags_private_tags_key UNIQUE (tags);
-
-ALTER TABLE ONLY lsif_data_docs_search_tags_public
-    ADD CONSTRAINT lsif_data_docs_search_tags_public_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY lsif_data_docs_search_tags_public
-    ADD CONSTRAINT lsif_data_docs_search_tags_public_tags_key UNIQUE (tags);
-
-ALTER TABLE ONLY lsif_data_documentation_mappings
-    ADD CONSTRAINT lsif_data_documentation_mappings_pkey PRIMARY KEY (dump_id, path_id);
-
-ALTER TABLE ONLY lsif_data_documentation_pages
-    ADD CONSTRAINT lsif_data_documentation_pages_pkey PRIMARY KEY (dump_id, path_id);
-
-ALTER TABLE ONLY lsif_data_documentation_path_info
-    ADD CONSTRAINT lsif_data_documentation_path_info_pkey PRIMARY KEY (dump_id, path_id);
-
-ALTER TABLE ONLY lsif_data_documents
-    ADD CONSTRAINT lsif_data_documents_pkey PRIMARY KEY (dump_id, path);
-
-ALTER TABLE ONLY lsif_data_documents_schema_versions
-    ADD CONSTRAINT lsif_data_documents_schema_versions_pkey PRIMARY KEY (dump_id);
-
-ALTER TABLE ONLY lsif_data_implementations
-    ADD CONSTRAINT lsif_data_implementations_pkey PRIMARY KEY (dump_id, scheme, identifier);
-
-ALTER TABLE ONLY lsif_data_implementations_schema_versions
-    ADD CONSTRAINT lsif_data_implementations_schema_versions_pkey PRIMARY KEY (dump_id);
-
-ALTER TABLE ONLY lsif_data_metadata
-    ADD CONSTRAINT lsif_data_metadata_pkey PRIMARY KEY (dump_id);
-
-ALTER TABLE ONLY lsif_data_references
-    ADD CONSTRAINT lsif_data_references_pkey PRIMARY KEY (dump_id, scheme, identifier);
-
-ALTER TABLE ONLY lsif_data_references_schema_versions
-    ADD CONSTRAINT lsif_data_references_schema_versions_pkey PRIMARY KEY (dump_id);
-
-ALTER TABLE ONLY lsif_data_result_chunks
-    ADD CONSTRAINT lsif_data_result_chunks_pkey PRIMARY KEY (dump_id, idx);
+ALTER TABLE ONLY codeintel_scip_symbols_schema_versions
+    ADD CONSTRAINT codeintel_scip_symbols_schema_versions_pkey PRIMARY KEY (upload_id);
 
 ALTER TABLE ONLY rockskip_ancestry
     ADD CONSTRAINT rockskip_ancestry_pkey PRIMARY KEY (id);
@@ -948,77 +413,25 @@ ALTER TABLE ONLY rockskip_repos
 ALTER TABLE ONLY rockskip_symbols
     ADD CONSTRAINT rockskip_symbols_pkey PRIMARY KEY (id);
 
-CREATE INDEX lsif_data_definitions_dump_id_schema_version ON lsif_data_definitions USING btree (dump_id, schema_version);
+ALTER TABLE ONLY tenants
+    ADD CONSTRAINT tenants_name_key UNIQUE (name);
 
-CREATE INDEX lsif_data_definitions_schema_versions_dump_id_schema_version_bo ON lsif_data_definitions_schema_versions USING btree (dump_id, min_schema_version, max_schema_version);
+ALTER TABLE ONLY tenants
+    ADD CONSTRAINT tenants_pkey PRIMARY KEY (id);
 
-CREATE INDEX lsif_data_docs_search_current_private_last_cleanup_scan_at ON lsif_data_docs_search_current_private USING btree (last_cleanup_scan_at);
+CREATE INDEX codeintel_last_reconcile_last_reconcile_at_dump_id ON codeintel_last_reconcile USING btree (last_reconcile_at, dump_id);
 
-CREATE INDEX lsif_data_docs_search_current_private_lookup ON lsif_data_docs_search_current_private USING btree (repo_id, dump_root, lang_name_id, created_at) INCLUDE (dump_id);
+CREATE INDEX codeintel_scip_document_lookup_document_id ON codeintel_scip_document_lookup USING hash (document_id);
 
-CREATE INDEX lsif_data_docs_search_current_public_last_cleanup_scan_at ON lsif_data_docs_search_current_public USING btree (last_cleanup_scan_at);
+CREATE INDEX codeintel_scip_documents_dereference_logs_last_removal_time_des ON codeintel_scip_documents_dereference_logs USING btree (last_removal_time DESC, document_id);
 
-CREATE INDEX lsif_data_docs_search_current_public_lookup ON lsif_data_docs_search_current_public USING btree (repo_id, dump_root, lang_name_id, created_at) INCLUDE (dump_id);
+CREATE INDEX codeintel_scip_metadata_upload_id ON codeintel_scip_metadata USING btree (upload_id);
 
-CREATE INDEX lsif_data_docs_search_lang_names_private_tsv_idx ON lsif_data_docs_search_lang_names_private USING gin (tsv);
+CREATE INDEX codeintel_scip_symbol_names_upload_id_roots ON codeintel_scip_symbol_names USING btree (upload_id) WHERE (prefix_id IS NULL);
 
-CREATE INDEX lsif_data_docs_search_lang_names_public_tsv_idx ON lsif_data_docs_search_lang_names_public USING gin (tsv);
+CREATE INDEX codeintel_scip_symbols_document_lookup_id ON codeintel_scip_symbols USING btree (document_lookup_id);
 
-CREATE INDEX lsif_data_docs_search_private_dump_id_idx ON lsif_data_docs_search_private USING btree (dump_id);
-
-CREATE INDEX lsif_data_docs_search_private_dump_root_idx ON lsif_data_docs_search_private USING btree (dump_root);
-
-CREATE INDEX lsif_data_docs_search_private_label_reverse_tsv_idx ON lsif_data_docs_search_private USING gin (label_reverse_tsv);
-
-CREATE INDEX lsif_data_docs_search_private_label_tsv_idx ON lsif_data_docs_search_private USING gin (label_tsv);
-
-CREATE INDEX lsif_data_docs_search_private_repo_id_idx ON lsif_data_docs_search_private USING btree (repo_id);
-
-CREATE INDEX lsif_data_docs_search_private_search_key_reverse_tsv_idx ON lsif_data_docs_search_private USING gin (search_key_reverse_tsv);
-
-CREATE INDEX lsif_data_docs_search_private_search_key_tsv_idx ON lsif_data_docs_search_private USING gin (search_key_tsv);
-
-CREATE INDEX lsif_data_docs_search_public_dump_id_idx ON lsif_data_docs_search_public USING btree (dump_id);
-
-CREATE INDEX lsif_data_docs_search_public_dump_root_idx ON lsif_data_docs_search_public USING btree (dump_root);
-
-CREATE INDEX lsif_data_docs_search_public_label_reverse_tsv_idx ON lsif_data_docs_search_public USING gin (label_reverse_tsv);
-
-CREATE INDEX lsif_data_docs_search_public_label_tsv_idx ON lsif_data_docs_search_public USING gin (label_tsv);
-
-CREATE INDEX lsif_data_docs_search_public_repo_id_idx ON lsif_data_docs_search_public USING btree (repo_id);
-
-CREATE INDEX lsif_data_docs_search_public_search_key_reverse_tsv_idx ON lsif_data_docs_search_public USING gin (search_key_reverse_tsv);
-
-CREATE INDEX lsif_data_docs_search_public_search_key_tsv_idx ON lsif_data_docs_search_public USING gin (search_key_tsv);
-
-CREATE INDEX lsif_data_docs_search_repo_names_private_reverse_tsv_idx ON lsif_data_docs_search_repo_names_private USING gin (reverse_tsv);
-
-CREATE INDEX lsif_data_docs_search_repo_names_private_tsv_idx ON lsif_data_docs_search_repo_names_private USING gin (tsv);
-
-CREATE INDEX lsif_data_docs_search_repo_names_public_reverse_tsv_idx ON lsif_data_docs_search_repo_names_public USING gin (reverse_tsv);
-
-CREATE INDEX lsif_data_docs_search_repo_names_public_tsv_idx ON lsif_data_docs_search_repo_names_public USING gin (tsv);
-
-CREATE INDEX lsif_data_docs_search_tags_private_tsv_idx ON lsif_data_docs_search_tags_private USING gin (tsv);
-
-CREATE INDEX lsif_data_docs_search_tags_public_tsv_idx ON lsif_data_docs_search_tags_public USING gin (tsv);
-
-CREATE UNIQUE INDEX lsif_data_documentation_mappings_inverse_unique_idx ON lsif_data_documentation_mappings USING btree (dump_id, result_id);
-
-CREATE INDEX lsif_data_documentation_pages_dump_id_unindexed ON lsif_data_documentation_pages USING btree (dump_id) WHERE (NOT search_indexed);
-
-CREATE INDEX lsif_data_documents_dump_id_schema_version ON lsif_data_documents USING btree (dump_id, schema_version);
-
-CREATE INDEX lsif_data_documents_schema_versions_dump_id_schema_version_boun ON lsif_data_documents_schema_versions USING btree (dump_id, min_schema_version, max_schema_version);
-
-CREATE INDEX lsif_data_implementations_dump_id_schema_version ON lsif_data_implementations USING btree (dump_id, schema_version);
-
-CREATE INDEX lsif_data_implementations_schema_versions_dump_id_schema_versio ON lsif_data_implementations_schema_versions USING btree (dump_id, min_schema_version, max_schema_version);
-
-CREATE INDEX lsif_data_references_dump_id_schema_version ON lsif_data_references USING btree (dump_id, schema_version);
-
-CREATE INDEX lsif_data_references_schema_versions_dump_id_schema_version_bou ON lsif_data_references_schema_versions USING btree (dump_id, min_schema_version, max_schema_version);
+CREATE INDEX codeisdntel_scip_symbol_names_upload_id_children ON codeintel_scip_symbol_names USING btree (upload_id, prefix_id) WHERE (prefix_id IS NOT NULL);
 
 CREATE INDEX rockskip_ancestry_repo_commit_id ON rockskip_ancestry USING btree (repo_id, commit_id);
 
@@ -1030,48 +443,50 @@ CREATE INDEX rockskip_symbols_gin ON rockskip_symbols USING gin (singleton_integ
 
 CREATE INDEX rockskip_symbols_repo_id_path_name ON rockskip_symbols USING btree (repo_id, path, name);
 
-CREATE TRIGGER lsif_data_definitions_schema_versions_insert AFTER INSERT ON lsif_data_definitions REFERENCING NEW TABLE AS newtab FOR EACH STATEMENT EXECUTE FUNCTION update_lsif_data_definitions_schema_versions_insert();
+CREATE TRIGGER codeintel_scip_document_lookup_schema_versions_insert AFTER INSERT ON codeintel_scip_document_lookup REFERENCING NEW TABLE AS newtab FOR EACH STATEMENT EXECUTE FUNCTION update_codeintel_scip_document_lookup_schema_versions_insert();
 
-CREATE TRIGGER lsif_data_docs_search_private_delete AFTER DELETE ON lsif_data_docs_search_private REFERENCING OLD TABLE AS oldtbl FOR EACH STATEMENT EXECUTE FUNCTION lsif_data_docs_search_private_delete();
+CREATE TRIGGER codeintel_scip_documents_dereference_logs_insert AFTER DELETE ON codeintel_scip_document_lookup REFERENCING OLD TABLE AS oldtab FOR EACH STATEMENT EXECUTE FUNCTION update_codeintel_scip_documents_dereference_logs_delete();
 
-CREATE TRIGGER lsif_data_docs_search_private_insert AFTER INSERT ON lsif_data_docs_search_private REFERENCING NEW TABLE AS newtbl FOR EACH STATEMENT EXECUTE FUNCTION lsif_data_docs_search_private_insert();
+CREATE TRIGGER codeintel_scip_symbols_schema_versions_insert AFTER INSERT ON codeintel_scip_symbols REFERENCING NEW TABLE AS newtab FOR EACH STATEMENT EXECUTE FUNCTION update_codeintel_scip_symbols_schema_versions_insert();
 
-CREATE TRIGGER lsif_data_docs_search_public_delete AFTER DELETE ON lsif_data_docs_search_public REFERENCING OLD TABLE AS oldtbl FOR EACH STATEMENT EXECUTE FUNCTION lsif_data_docs_search_public_delete();
+ALTER TABLE ONLY codeintel_last_reconcile
+    ADD CONSTRAINT codeintel_last_reconcile_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
-CREATE TRIGGER lsif_data_docs_search_public_insert AFTER INSERT ON lsif_data_docs_search_public REFERENCING NEW TABLE AS newtbl FOR EACH STATEMENT EXECUTE FUNCTION lsif_data_docs_search_public_insert();
+ALTER TABLE ONLY codeintel_scip_document_lookup
+    ADD CONSTRAINT codeintel_scip_document_lookup_document_id_fk FOREIGN KEY (document_id) REFERENCES codeintel_scip_documents(id);
 
-CREATE TRIGGER lsif_data_documentation_pages_delete AFTER DELETE ON lsif_data_documentation_pages REFERENCING OLD TABLE AS oldtbl FOR EACH STATEMENT EXECUTE FUNCTION lsif_data_documentation_pages_delete();
+ALTER TABLE ONLY codeintel_scip_document_lookup_schema_versions
+    ADD CONSTRAINT codeintel_scip_document_lookup_schema_versions_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
-CREATE TRIGGER lsif_data_documentation_pages_insert AFTER INSERT ON lsif_data_documentation_pages REFERENCING NEW TABLE AS newtbl FOR EACH STATEMENT EXECUTE FUNCTION lsif_data_documentation_pages_insert();
+ALTER TABLE ONLY codeintel_scip_document_lookup
+    ADD CONSTRAINT codeintel_scip_document_lookup_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
-CREATE TRIGGER lsif_data_documentation_pages_update AFTER UPDATE ON lsif_data_documentation_pages REFERENCING OLD TABLE AS oldtbl NEW TABLE AS newtbl FOR EACH STATEMENT EXECUTE FUNCTION lsif_data_documentation_pages_update();
+ALTER TABLE ONLY codeintel_scip_documents_dereference_logs
+    ADD CONSTRAINT codeintel_scip_documents_dereference_logs_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
-CREATE TRIGGER lsif_data_documents_schema_versions_insert AFTER INSERT ON lsif_data_documents REFERENCING NEW TABLE AS newtab FOR EACH STATEMENT EXECUTE FUNCTION update_lsif_data_documents_schema_versions_insert();
+ALTER TABLE ONLY codeintel_scip_documents
+    ADD CONSTRAINT codeintel_scip_documents_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
-CREATE TRIGGER lsif_data_implementations_schema_versions_insert AFTER INSERT ON lsif_data_implementations REFERENCING NEW TABLE AS newtab FOR EACH STATEMENT EXECUTE FUNCTION update_lsif_data_implementations_schema_versions_insert();
+ALTER TABLE ONLY codeintel_scip_metadata
+    ADD CONSTRAINT codeintel_scip_metadata_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
-CREATE TRIGGER lsif_data_references_schema_versions_insert AFTER INSERT ON lsif_data_references REFERENCING NEW TABLE AS newtab FOR EACH STATEMENT EXECUTE FUNCTION update_lsif_data_references_schema_versions_insert();
+ALTER TABLE ONLY codeintel_scip_symbol_names
+    ADD CONSTRAINT codeintel_scip_symbol_names_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
-ALTER TABLE ONLY lsif_data_docs_search_private
-    ADD CONSTRAINT lsif_data_docs_search_private_lang_name_id_fk FOREIGN KEY (lang_name_id) REFERENCES lsif_data_docs_search_lang_names_private(id);
+ALTER TABLE ONLY codeintel_scip_symbols
+    ADD CONSTRAINT codeintel_scip_symbols_document_lookup_id_fk FOREIGN KEY (document_lookup_id) REFERENCES codeintel_scip_document_lookup(id) ON DELETE CASCADE;
 
-ALTER TABLE ONLY lsif_data_docs_search_private
-    ADD CONSTRAINT lsif_data_docs_search_private_repo_name_id_fk FOREIGN KEY (repo_name_id) REFERENCES lsif_data_docs_search_repo_names_private(id);
+ALTER TABLE ONLY codeintel_scip_symbols_schema_versions
+    ADD CONSTRAINT codeintel_scip_symbols_schema_versions_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
-ALTER TABLE ONLY lsif_data_docs_search_private
-    ADD CONSTRAINT lsif_data_docs_search_private_tags_id_fk FOREIGN KEY (tags_id) REFERENCES lsif_data_docs_search_tags_private(id);
+ALTER TABLE ONLY codeintel_scip_symbols
+    ADD CONSTRAINT codeintel_scip_symbols_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
-ALTER TABLE ONLY lsif_data_docs_search_public
-    ADD CONSTRAINT lsif_data_docs_search_public_lang_name_id_fk FOREIGN KEY (lang_name_id) REFERENCES lsif_data_docs_search_lang_names_public(id);
+ALTER TABLE ONLY rockskip_ancestry
+    ADD CONSTRAINT rockskip_ancestry_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
-ALTER TABLE ONLY lsif_data_docs_search_public
-    ADD CONSTRAINT lsif_data_docs_search_public_repo_name_id_fk FOREIGN KEY (repo_name_id) REFERENCES lsif_data_docs_search_repo_names_public(id);
+ALTER TABLE ONLY rockskip_repos
+    ADD CONSTRAINT rockskip_repos_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
-ALTER TABLE ONLY lsif_data_docs_search_public
-    ADD CONSTRAINT lsif_data_docs_search_public_tags_id_fk FOREIGN KEY (tags_id) REFERENCES lsif_data_docs_search_tags_public(id);
-
-INSERT INTO lsif_data_apidocs_num_dumps VALUES (0);
-INSERT INTO lsif_data_apidocs_num_dumps_indexed VALUES (0);
-INSERT INTO lsif_data_apidocs_num_pages VALUES (0);
-INSERT INTO lsif_data_apidocs_num_search_results_private VALUES (0);
-INSERT INTO lsif_data_apidocs_num_search_results_public VALUES (0);
+ALTER TABLE ONLY rockskip_symbols
+    ADD CONSTRAINT rockskip_symbols_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE CASCADE;

@@ -1,11 +1,10 @@
-import { cleanup, fireEvent, render, RenderResult } from '@testing-library/react'
-import { createMemoryHistory } from 'history'
-import { Router } from 'react-router'
-import { CompatRouter } from 'react-router-dom-v5-compat'
+import { cleanup, fireEvent, render, type RenderResult } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { DiffHunkLineType, FileDiffHunkFields } from '../../graphql-operations'
+import { DiffHunkLineType, type FileDiffHunkFields } from '../../graphql-operations'
 
-import { DiffHunkProps, DiffSplitHunk } from './DiffSplitHunk'
+import { type DiffHunkProps, DiffSplitHunk } from './DiffSplitHunk'
 
 import lineStyles from './Lines.module.scss'
 
@@ -24,7 +23,7 @@ describe('DiffSplitHunk', () => {
                 },
                 {
                     kind: DiffHunkLineType.UNCHANGED,
-                    html: '        const decorationType = sourcegraph.app.createDecorationType()',
+                    html: '        const foo = sourcegraph.app.foo()',
                 },
                 {
                     kind: DiffHunkLineType.UNCHANGED,
@@ -44,8 +43,7 @@ describe('DiffSplitHunk', () => {
                 },
                 {
                     kind: DiffHunkLineType.UNCHANGED,
-                    html:
-                        '                connection.observeNotification(LogMessageNotification.type).subscribe(({ type, message }) =\u003E {',
+                    html: '                connection.observeNotification(LogMessageNotification.type).subscribe(({ type, message }) =\u003E {',
                 },
                 {
                     kind: DiffHunkLineType.DELETED,
@@ -55,19 +53,16 @@ describe('DiffSplitHunk', () => {
         },
     }
 
-    const history = createMemoryHistory()
     let queries: RenderResult
     const renderWithProps = (props: DiffHunkProps): RenderResult =>
         render(
-            <Router history={history}>
-                <CompatRouter>
-                    <table>
-                        <tbody>
-                            <DiffSplitHunk {...props} />
-                        </tbody>
-                    </table>
-                </CompatRouter>
-            </Router>
+            <MemoryRouter>
+                <table>
+                    <tbody>
+                        <DiffSplitHunk {...props} />
+                    </tbody>
+                </table>
+            </MemoryRouter>
         )
 
     afterEach(cleanup)
@@ -76,9 +71,7 @@ describe('DiffSplitHunk', () => {
         beforeEach(() => {
             queries = renderWithProps({
                 hunk,
-                decorations: { head: new Map(), base: new Map() },
                 lineNumbers: true,
-                isLightTheme: true,
                 fileDiffAnchor: 'anchor_',
             })
         })

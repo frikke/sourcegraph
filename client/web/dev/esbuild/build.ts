@@ -1,95 +1,44 @@
-import path from 'path'
+import { writeFileSync } from 'fs'
 
 import * as esbuild from 'esbuild'
-import ElmPlugin from 'esbuild-plugin-elm'
-
-import {
-    MONACO_LANGUAGES_AND_FEATURES,
-    ROOT_PATH,
-    STATIC_ASSETS_PATH,
-    stylePlugin,
-    packageResolutionPlugin,
-    workerPlugin,
-    monacoPlugin,
-    RXJS_RESOLUTIONS,
-    buildMonaco,
-    experimentalNoticePlugin,
-    buildTimerPlugin,
-} from '@sourcegraph/build-config'
 
 import { ENVIRONMENT_CONFIG } from '../utils'
 
-import { manifestPlugin } from './manifestPlugin'
+import { esbuildBuildOptions } from './config'
 
-const isEnterpriseBuild = ENVIRONMENT_CONFIG.ENTERPRISE
+export async function build(): Promise<void> {
+    const buildOptions = esbuildBuildOptions(ENVIRONMENT_CONFIG)
 
-export const BUILD_OPTIONS: esbuild.BuildOptions = {
-    entryPoints: {
-        // Enterprise vs. OSS builds use different entrypoints. The enterprise entrypoint imports a
-        // strict superset of the OSS entrypoint.
-        'scripts/app': isEnterpriseBuild
-            ? path.join(ROOT_PATH, 'client/web/src/enterprise/main.tsx')
-            : path.join(ROOT_PATH, 'client/web/src/main.tsx'),
-    },
-    bundle: true,
-    format: 'esm',
-    logLevel: 'error',
-    jsx: 'automatic',
-    jsxDev: true, // we're only using esbuild for dev server right now
-    splitting: true,
-    chunkNames: 'chunks/chunk-[name]-[hash]',
-    outdir: STATIC_ASSETS_PATH,
-    plugins: [
-        stylePlugin,
-        workerPlugin,
-        manifestPlugin,
-        packageResolutionPlugin({
-            path: require.resolve('path-browserify'),
-            ...RXJS_RESOLUTIONS,
-        }),
-        monacoPlugin(MONACO_LANGUAGES_AND_FEATURES),
-        buildTimerPlugin,
-        experimentalNoticePlugin,
-        ElmPlugin({
-            cwd: path.join(ROOT_PATH, 'client/web/src/search/results/components/compute'),
-            pathToElm: path.join(ROOT_PATH, 'node_modules/.bin/elm'),
-        }),
-    ],
-    define: {
-        ...Object.fromEntries(
-            Object.entries({ ...ENVIRONMENT_CONFIG, SOURCEGRAPH_API_URL: undefined }).map(([key, value]) => [
-                `process.env.${key}`,
-                JSON.stringify(value),
-            ])
-        ),
-        global: 'window',
-    },
-    loader: {
-        '.yaml': 'text',
-        '.ttf': 'file',
-        '.png': 'file',
-    },
-    target: 'es2021',
-    sourcemap: true,
+    if (!buildOptions.outdir) {
+        throw new Error('no outdir')
+    }
 
-    // TODO(sqs): When https://github.com/evanw/esbuild/pull/1458 is merged (or the issue is
-    // otherwise fixed), we can return to using tree shaking. Right now, esbuild's tree shaking has
-    // a bug where the NavBar CSS is not loaded because the @sourcegraph/wildcard uses `export *
-    // from` and has `"sideEffects": false` in its package.json.
-    ignoreAnnotations: true,
-    treeShaking: false,
-}
-
-export const build = async (): Promise<void> => {
-    await esbuild.build({
-        ...BUILD_OPTIONS,
-        outdir: STATIC_ASSETS_PATH,
-    })
-    await buildMonaco(STATIC_ASSETS_PATH)
+    const metafile = process.env.ESBUILD_METAFILE
+    const options: esbuild.BuildOptions = {
+        ...buildOptions,
+        metafile: Boolean(metafile),
+    }
+    const result = await esbuild.build(options)
+    if (metafile) {
+        writeFileSync(metafile, JSON.stringify(result.metafile), 'utf-8')
+    }
+    if (process.env.WATCH) {
+        const ctx = await esbuild.context(options)
+        await ctx.watch()
+        await new Promise(() => {}) // wait forever
+    }
 }
 
 if (require.main === module) {
-    build()
-        .catch(error => console.error('Error:', error))
-        .finally(() => process.exit(0))
+    async function main(args: string[]): Promise<void> {
+        if (args.length !== 0) {
+            throw new Error('Usage: (no options)')
+        }
+        await build()
+    }
+    // eslint-disable-next-line unicorn/prefer-top-level-await
+    main(process.argv.slice(2)).catch(error => {
+        console.error(error)
+        process.exit(1)
+    })
 }

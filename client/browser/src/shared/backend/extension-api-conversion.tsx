@@ -1,11 +1,16 @@
-import { TextDocumentPositionParameters } from '@sourcegraph/client-api'
-import { AbsoluteRepoFilePosition, toURIWithPath } from '@sourcegraph/shared/src/util/url'
+import type { TextDocumentPositionParameters } from '@sourcegraph/client-api'
+import { type AbsoluteRepoFilePosition, makeRepoGitURI } from '@sourcegraph/shared/src/util/url'
 
 export const toTextDocumentPositionParameters = (
     position: AbsoluteRepoFilePosition
 ): TextDocumentPositionParameters => ({
     textDocument: {
-        uri: toURIWithPath(position),
+        uri: makeRepoGitURI({
+            repoName: position.repoName,
+            filePath: position.filePath,
+            commitID: position.commitID,
+            revision: position.revision,
+        }),
     },
     position: {
         character: position.position.character - 1,

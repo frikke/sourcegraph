@@ -1,11 +1,14 @@
 /**
  * Disabled due to violation of the VS Code's UX guidelines for notifications
- * To be revaluated in the future
+ * To be revaluated in the future: https://code.visualstudio.com/api/ux-guidelines/notifications
+ * This functions add Sourcegraph to workspace recommendations if haven't already
+ * eg: recommendSourcegraph(localStorageService).catch(() => {})
  */
 
 import * as vscode from 'vscode'
 
-import { DISMISS_WORKSPACERECS_CTA_KEY, LocalStorageService } from './LocalStorageService'
+import { DISMISS_WORKSPACERECS_CTA_KEY, type LocalStorageService } from './LocalStorageService'
+
 /**
  * Ask if user wants to add Sourcegraph to their Workspace Recommendations list by displaying built-in popup
  * It will not show popup if the user already has Sourcegraph added to their recommendations list
@@ -35,7 +38,7 @@ export async function recommendSourcegraph(localStorageService: LocalStorageServ
     await vscode.window
         .showInformationMessage('Add Sourcegraph to your workspace recommendations', '👍 Yes', "Don't show again")
         .then(async answer => {
-            if (answer === 'Yes') {
+            if (answer === '👍 Yes') {
                 await vscode.commands.executeCommand(
                     'workbench.extensions.action.addExtensionToWorkspaceRecommendations',
                     'sourcegraph.sourcegraph'

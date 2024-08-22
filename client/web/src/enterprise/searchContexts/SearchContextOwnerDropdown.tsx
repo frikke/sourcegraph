@@ -2,10 +2,10 @@ import React, { useMemo } from 'react'
 
 import { mdiMenuDown } from '@mdi/js'
 
-import { Namespace } from '@sourcegraph/shared/src/schema'
+import type { SearchContextFields } from '@sourcegraph/shared/src/graphql-operations'
 import { Menu, MenuButton, MenuDivider, MenuItem, MenuList, Icon, Tooltip } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../auth'
+import type { AuthenticatedUser } from '../../auth'
 
 import styles from './SearchContextOwnerDropdown.module.scss'
 
@@ -17,7 +17,7 @@ export interface SelectedNamespace {
     name: string
 }
 
-export function getSelectedNamespace(namespace: Namespace | null): SelectedNamespace {
+export function getSelectedNamespace(namespace: SearchContextFields['namespace']): SelectedNamespace {
     if (!namespace) {
         return { id: null, type: 'global-owner', name: '' }
     }

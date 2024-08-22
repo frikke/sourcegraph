@@ -1,3 +1,4 @@
+version: 2
 name: monorepo-dynamic
 description: |
   Create one changeset per workspace in the sourcegraph frontend monorepo
@@ -26,7 +27,7 @@ changesetTemplate:
   body: |
     Run in each workspace of a monorepo
 # Each branch needs to be unique, so we're using templating to define them
-# https://docs.sourcegraph.com/batch_changes/references/batch_spec_templating
+# https://sourcegraph.com/docs/batch_changes/references/batch_spec_templating
   branch: batch-changes/monorepo/${{ replace steps.path "/" "-" }}
   commit:
     message: opening several changesets in a monorepo

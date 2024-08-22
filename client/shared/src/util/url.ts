@@ -1,20 +1,14 @@
-import {
-    addLineRangeQueryParameter,
-    encodeURIPathComponent,
-    escapeRevspecForURL,
-    findLineKeyInSearchParameters,
-    formatSearchParameters,
-    LineOrPositionOrRange,
-    toPositionOrRangeQueryParameter,
-    toViewStateHash,
-} from '@sourcegraph/common'
-import { Position } from '@sourcegraph/extension-api-types'
+import { parseURL } from 'whatwg-url'
 
-import { WorkspaceRootWithMetadata } from '../api/extension/extensionHostApi'
-import { SearchPatternType } from '../graphql-operations'
+import { encodeURIPathComponent, escapeRevspecForURL, SourcegraphURL } from '@sourcegraph/common'
+import type { Position, Range } from '@sourcegraph/extension-api-types'
+
+import type { WorkspaceRootWithMetadata } from '../api/extension/extensionHostApi'
+import type { SearchPatternType } from '../graphql-operations'
 import { discreteValueAliases } from '../search/query/filters'
 import { findFilter, FilterKind } from '../search/query/query'
 import { appendContextFilter, omitFilter } from '../search/query/transformer'
+import { SearchMode } from '../search/types'
 
 export interface RepoSpec {
     /**
@@ -110,7 +104,7 @@ export interface ModeSpec {
 }
 
 // `panelID` is intended for substitution (e.g. `sub(panel.url, 'panelID', 'implementations')`)
-type BlobViewState = 'def' | 'references' | 'panelID'
+export type BlobViewState = 'def' | 'references' | 'panelID'
 
 export interface ViewStateSpec {
     /**
@@ -173,18 +167,25 @@ const parsePosition = (string: string): Position => {
  * These URIs were used when communicating with language servers over LSP and with extensions. They are being
  * phased out in favor of URLs to resources in the Sourcegraph raw API, which do not require out-of-band
  * information to fetch the contents of.
- *
  * @deprecated Migrate to using URLs to the Sourcegraph raw API (or other concrete URLs) instead.
  */
-export function parseRepoURI(uri: RepoURI): ParsedRepoURI {
-    const parsed = new URL(uri)
-    const repoName = parsed.hostname + decodeURIComponent(parsed.pathname)
-    const revision = decodeURIComponent(parsed.search.slice('?'.length)) || undefined
+export function parseRepoGitURI(uri: RepoURI): ParsedRepoURI {
+    // We are not using the environments URL constructor because Chrome and Firefox do
+    // not correctly parse out the hostname for URLs . We have a polyfill for the main web app
+    // (see client/shared/src/polyfills/configure-core-js.ts) but that might not be used in all apps.
+    const parsed = parseURL(uri)
+    if (!parsed?.host) {
+        throw new Error('Unable to parse repo URI: ' + uri)
+    }
+    const pathname =
+        typeof parsed.path === 'string' ? parsed.path : parsed.path.length === 0 ? '' : '/' + parsed.path.join('/')
+    const repoName = String(parsed.host) + decodeURIComponent(pathname)
+    const revision = parsed.query ? decodeURIComponent(parsed.query) : undefined
     let commitID: string | undefined
     if (revision?.match(/[\dA-f]{40}/)) {
         commitID = revision
     }
-    const fragmentSplit = parsed.hash.slice('#'.length).split(':').map(decodeURIComponent)
+    const fragmentSplit = parsed.fragment ? parsed.fragment.split(':').map(decodeURIComponent) : []
     let filePath: string | undefined
     let position: UIPosition | undefined
     let range: UIRange | undefined
@@ -207,10 +208,25 @@ export function parseRepoURI(uri: RepoURI): ParsedRepoURI {
         }
     }
     if (fragmentSplit.length > 2) {
-        throw new Error('unexpected fragment: ' + parsed.hash)
+        throw new Error('unexpected fragment: ' + parsed.fragment)
     }
 
     return { repoName, revision, commitID, filePath: filePath || undefined, position, range }
+}
+
+/**
+ * The inverse of parseRepoGitURI, this generates a string from parsed values.
+ * Example output: `git://github.com/gorilla/mux?SHA#mux.go:3,5-4,9`
+ */
+export function makeRepoGitURI(parsed: ParsedRepoURI): RepoURI {
+    const revision = parsed.commitID || parsed.revision
+    let uri = `git://${encodeURIPathComponent(parsed.repoName)}`
+    uri += revision ? '?' + encodeURIPathComponent(revision) : ''
+    uri += parsed.filePath ? '#' + encodeURIPathComponent(parsed.filePath) : ''
+    uri += parsed.position || parsed.range ? ':' : ''
+    uri += parsed.position ? positionString(parsed.position) : ''
+    uri += parsed.range ? positionString(parsed.range.start) + '-' + positionString(parsed.range.end) : ''
+    return uri
 }
 
 /**
@@ -227,14 +243,6 @@ export interface RepoRevision extends RepoSpec, RevisionSpec {}
  * A repo resolved to an exact commit
  */
 export interface AbsoluteRepo extends RepoSpec, RevisionSpec, ResolvedRevisionSpec {}
-
-/**
- * A documentation page in a repo
- */
-export interface DocumentationPathID {
-    pathID: string
-}
-export interface RepoDocumentation extends RepoSpec, RevisionSpec, Partial<ResolvedRevisionSpec>, DocumentationPathID {}
 
 /**
  * A file in a repo
@@ -258,167 +266,6 @@ export interface AbsoluteRepoFilePosition
         Partial<ViewStateSpec>,
         Partial<RenderModeSpec> {}
 
-/**
- * Tells if the given fragment component is a legacy blob hash component or not.
- *
- * @param hash The URL fragment.
- */
-export function isLegacyFragment(hash: string): boolean {
-    if (hash.startsWith('#')) {
-        hash = hash.slice('#'.length)
-    }
-    return (
-        hash !== '' &&
-        !hash.includes('=') &&
-        (hash.includes('$info') ||
-            hash.includes('$def') ||
-            hash.includes('$references') ||
-            hash.includes('$impl') ||
-            hash.includes('$history'))
-    )
-}
-
-/**
- * Parses the URL search (query) portion and looks for a parameter which matches a line, position, or range in the file. If not found, it
- * falls back to parsing the hash for backwards compatibility.
- *
- * @template V The type that describes the view state (typically a union of string constants). There is no runtime check that the return value satisfies V.
- */
-export function parseQueryAndHash<V extends string>(
-    query: string,
-    hash: string
-): LineOrPositionOrRange & { viewState?: V } {
-    const lpr = findLineInSearchParameters(new URLSearchParams(query))
-    const parsedHash = parseHash<V>(hash)
-    if (!lpr) {
-        return parsedHash
-    }
-    return { ...lpr, viewState: parsedHash.viewState }
-}
-
-/**
- * Parses the URL fragment (hash) portion, which consists of a line, position, or range in the file, plus an
- * optional "viewState" parameter (that encodes other view state, such as for the panel).
- *
- * For example, in the URL fragment "#L17:19-21:23$foo:bar", the "viewState" is "foo:bar".
- *
- * @template V The type that describes the view state (typically a union of string constants). There is no runtime check that the return value satisfies V.
- */
-export function parseHash<V extends string>(hash: string): LineOrPositionOrRange & { viewState?: V } {
-    if (hash.startsWith('#')) {
-        hash = hash.slice('#'.length)
-    }
-
-    if (!isLegacyFragment(hash)) {
-        // Modern hash parsing logic (e.g. for hashes like `"#L17:19-21:23&tab=foo:bar"`:
-        const searchParameters = new URLSearchParams(hash)
-        const lpr = (findLineInSearchParameters(searchParameters) || {}) as LineOrPositionOrRange & {
-            viewState?: V
-        }
-        if (searchParameters.get('tab')) {
-            lpr.viewState = searchParameters.get('tab') as V
-        }
-        return lpr
-    }
-
-    // Legacy hash parsing logic (e.g. for hashes like "#L17:19-21:23$foo:bar" where the "viewState" is "foo:bar"):
-    if (!/^(L\d+(:\d+)?(-\d+(:\d+)?)?)?(\$.*)?$/.test(hash)) {
-        // invalid or empty hash
-        return {}
-    }
-    const lineCharModalInfo = hash.split('$', 2) // e.g. "L17:19-21:23$references"
-    const lpr = parseLineOrPositionOrRange(lineCharModalInfo[0]) as LineOrPositionOrRange & { viewState?: V }
-    if (lineCharModalInfo[1]) {
-        lpr.viewState = lineCharModalInfo[1] as V
-    }
-    return lpr
-}
-
-/**
- * Parses a string like "L1-2:3", a range from a line to a position.
- */
-function parseLineOrPositionOrRange(lineChar: string): LineOrPositionOrRange {
-    if (!/^(L\d+(:\d+)?(-L?\d+(:\d+)?)?)?$/.test(lineChar)) {
-        return {} // invalid
-    }
-
-    // Parse the line or position range, ensuring we don't get an inconsistent result
-    // (such as L1-2:3, a range from a line to a position).
-    let line: number | undefined // 17
-    let character: number | undefined // 19
-    let endLine: number | undefined // 21
-    let endCharacter: number | undefined // 23
-    if (lineChar.startsWith('L')) {
-        const positionOrRangeString = lineChar.slice(1)
-        const [startString, endString] = positionOrRangeString.split('-', 2)
-        if (startString) {
-            const parsed = parseLineOrPosition(startString)
-            line = parsed.line
-            character = parsed.character
-        }
-        if (endString) {
-            const parsed = parseLineOrPosition(endString)
-            endLine = parsed.line
-            endCharacter = parsed.character
-        }
-    }
-    let lpr = { line, character, endLine, endCharacter } as LineOrPositionOrRange
-    if (typeof line === 'undefined' || (typeof endLine !== 'undefined' && typeof character !== typeof endCharacter)) {
-        lpr = {}
-    } else if (typeof character === 'undefined') {
-        lpr = typeof endLine === 'undefined' ? { line } : { line, endLine }
-    } else if (typeof endLine === 'undefined' || typeof endCharacter === 'undefined') {
-        lpr = { line, character }
-    } else {
-        lpr = { line, character, endLine, endCharacter }
-    }
-    return lpr
-}
-
-function addRenderModeQueryParameter(
-    searchParameters: URLSearchParams,
-    context: Partial<RenderModeSpec>
-): URLSearchParams {
-    if (context.renderMode === 'code') {
-        searchParameters.set('view', 'code')
-    }
-    return searchParameters
-}
-
-/**
- * Finds the URL search parameter which has a key like "L1-2:3" without any
- * value.
- *
- * @param searchParameters The URLSearchParams to look for the line in.
- */
-function findLineInSearchParameters(searchParameters: URLSearchParams): LineOrPositionOrRange | undefined {
-    const key = findLineKeyInSearchParameters(searchParameters)
-    return key ? parseLineOrPositionOrRange(key) : undefined
-}
-
-function parseLineOrPosition(
-    string: string
-): { line: undefined; character: undefined } | { line: number; character?: number } {
-    if (string.startsWith('L')) {
-        string = string.slice(1)
-    }
-    const parts = string.split(':', 2)
-    let line: number | undefined
-    let character: number | undefined
-    if (parts.length >= 1) {
-        line = parseInt(parts[0], 10)
-    }
-    if (parts.length === 2) {
-        character = parseInt(parts[1], 10)
-    }
-    line = typeof line === 'number' && isNaN(line) ? undefined : line
-    character = typeof character === 'number' && isNaN(character) ? undefined : character
-    if (typeof line === 'undefined') {
-        return { line: undefined, character: undefined }
-    }
-    return { line, character }
-}
-
 /** Encodes a repository at a revspec for use in a URL. */
 export function encodeRepoRevision({ repoName, revision }: RepoSpec & Partial<RevisionSpec>): string {
     return revision ? `${encodeURIPathComponent(repoName)}@${escapeRevspecForURL(revision)}` : repoName
@@ -434,15 +281,27 @@ export function toPrettyBlobURL(
         Partial<UIRangeSpec> &
         Partial<RenderModeSpec>
 ): string {
-    const searchParameters = addLineRangeQueryParameter(
-        addRenderModeQueryParameter(new URLSearchParams(), target),
-        toPositionOrRangeQueryParameter(target)
-    )
-    const searchQuery = [...searchParameters].length > 0 ? `?${formatSearchParameters(searchParameters)}` : ''
-    return `/${encodeRepoRevision({
-        repoName: target.repoName,
-        revision: target.revision,
-    })}/-/blob/${encodeURIPathComponent(target.filePath)}${searchQuery}${toViewStateHash(target.viewState)}`
+    const url = SourcegraphURL.from({
+        pathname: `${toRepoURL(target)}/-/blob/${encodeURIPathComponent(target.filePath)}`,
+    })
+        .setLineRange(
+            target.range
+                ? {
+                      line: target.range.start.line,
+                      character: target.range.start.character,
+                      endLine: target.range.end.line,
+                      endCharacter: target.range.end.character,
+                  }
+                : target.position
+                ? { line: target.position.line, character: target.position.character }
+                : null
+        )
+        .setViewState(target.viewState)
+
+    if (target.renderMode === 'code') {
+        url.setSearchParameter('view', 'code')
+    }
+    return url.toString()
 }
 
 /**
@@ -473,27 +332,6 @@ const positionString = (position: Position): string =>
     position.line.toString() + (position.character ? `,${position.character}` : '')
 
 /**
- * The inverse of parseRepoURI, this generates a string from parsed values.
- */
-export function makeRepoURI(parsed: ParsedRepoURI): RepoURI {
-    const revision = parsed.commitID || parsed.revision
-    let uri = `git://${encodeURIPathComponent(parsed.repoName)}`
-    uri += revision ? '?' + encodeURIPathComponent(revision) : ''
-    uri += parsed.filePath ? '#' + encodeURIPathComponent(parsed.filePath) : ''
-    uri += parsed.position || parsed.range ? ':' : ''
-    uri += parsed.position ? positionString(parsed.position) : ''
-    uri += parsed.range ? positionString(parsed.range.start) + '-' + positionString(parsed.range.end) : ''
-    return uri
-}
-
-export const toRootURI = ({ repoName, commitID }: RepoSpec & ResolvedRevisionSpec): string =>
-    `git://${encodeURIPathComponent(repoName)}?${commitID}`
-
-export function toURIWithPath({ repoName, filePath, commitID }: RepoSpec & ResolvedRevisionSpec & FileSpec): string {
-    return `git://${encodeURIPathComponent(repoName)}?${commitID}#${encodeURIPathComponent(filePath)}`
-}
-
-/**
  * Translate a URI to use the input revision (e.g., branch names) instead of the Git commit SHA if the URI is
  * inside of a workspace root. This helper is used to translate URLs (from actions such as go-to-definition) to
  * avoid navigating the user from (e.g.) a URL with a nice Git branch name to a URL with a full Git commit SHA.
@@ -506,7 +344,7 @@ export function withWorkspaceRootInputRevision(
     uri: ParsedRepoURI
 ): ParsedRepoURI {
     const inWorkspaceRoot = workspaceRoots.find(root => {
-        const rootURI = parseRepoURI(root.uri)
+        const rootURI = parseRepoGitURI(root.uri)
         return rootURI.repoName === uri.repoName && rootURI.revision === uri.revision
     })
     if (inWorkspaceRoot?.inputRevision !== undefined) {
@@ -517,18 +355,17 @@ export function withWorkspaceRootInputRevision(
 
 /**
  * Builds a URL query for the given query (without leading `?`).
- *
  * @param query the search query
  * @param patternType the pattern type this query should be interpreted in.
  * Having a `patternType:` filter in the query overrides this argument.
- *
  */
 export function buildSearchURLQuery(
     query: string,
     patternType: SearchPatternType,
     caseSensitive: boolean,
+
     searchContextSpec?: string,
-    searchParametersList?: { key: string; value: string }[]
+    searchMode?: SearchMode
 ): string {
     const searchParameters = new URLSearchParams()
     let queryParameter = query
@@ -560,28 +397,9 @@ export function buildSearchURLQuery(
         searchParameters.set('case', caseParameter)
     }
 
-    if (searchParametersList) {
-        for (const queryParameter of searchParametersList) {
-            searchParameters.set(queryParameter.key, queryParameter.value)
-        }
-    }
+    searchParameters.set('sm', (searchMode || SearchMode.Precise).toString())
 
-    return searchParameters.toString().replace(/%2F/g, '/').replace(/%3A/g, ':')
-}
-
-export function buildGetStartedURL(source: string, returnTo?: string, forDotcom?: boolean): string {
-    // Still support directing to dotcom signup links when needed
-    const path = forDotcom ? 'https://sourcegraph.com/sign-up' : 'https://signup.sourcegraph.com'
-    const url = new URL(path)
-    url.searchParams.set('utm_medium', 'inproduct')
-    url.searchParams.set('utm_source', source)
-    url.searchParams.set('utm_campaign', 'inproduct-cta')
-
-    if (returnTo !== undefined) {
-        url.searchParams.set('returnTo', returnTo)
-    }
-
-    return url.toString()
+    return searchParameters.toString().replaceAll('%2F', '/').replaceAll('%3A', ':')
 }
 
 /** The results of parsing a repo-revision string like "my/repo@my/revision". */
@@ -611,4 +429,93 @@ export function parseRepoRevision(repoRevision: string): ParsedRepoRevision {
         revision: revision && decodeURIComponent(revision),
         rawRevision: revision,
     }
+}
+
+/**
+ * Replaces the revision in the given URL, or adds one if there is not already
+ * one.
+ *
+ * @param href The URL whose revision should be replaced.
+ */
+export function replaceRevisionInURL(href: string, newRevision: string): string {
+    const parsed = parseBrowserRepoURL(href)
+    const repoRevision = `/${encodeRepoRevision(parsed)}`
+
+    const url = new URL(href, window.location.href)
+    url.pathname = `/${encodeRepoRevision({ ...parsed, revision: newRevision })}${url.pathname.slice(
+        repoRevision.length
+    )}`
+    return `${url.pathname}${url.search}${url.hash}`
+}
+
+export function parseBrowserRepoURL(href: string): ParsedRepoURI & Pick<ParsedRepoRevision, 'rawRevision'> {
+    const url = SourcegraphURL.from(href)
+    let pathname = url.pathname.slice(1) // trim leading '/'
+    if (pathname.endsWith('/')) {
+        pathname = pathname.slice(0, -1) // trim trailing '/'
+    }
+
+    const indexOfSeparator = pathname.indexOf('/-/')
+
+    // examples:
+    // - 'github.com/gorilla/mux'
+    // - 'github.com/gorilla/mux@revision'
+    // - 'foo/bar' (from 'sourcegraph.mycompany.com/foo/bar')
+    // - 'foo/bar@revision' (from 'sourcegraph.mycompany.com/foo/bar@revision')
+    // - 'foobar' (from 'sourcegraph.mycompany.com/foobar')
+    // - 'foobar@revision' (from 'sourcegraph.mycompany.com/foobar@revision')
+    let repoRevision: string
+    if (indexOfSeparator === -1) {
+        repoRevision = pathname // the whole string
+    } else {
+        repoRevision = pathname.slice(0, indexOfSeparator) // the whole string leading up to the separator (allows revision to be multiple path parts)
+    }
+    const { repoName, revision, rawRevision } = parseRepoRevision(repoRevision)
+    if (!repoName) {
+        throw new Error('unexpected repo url: ' + href)
+    }
+    const commitID = revision && /^[\da-f]{40}$/i.test(revision) ? revision : undefined
+
+    let filePath: string | undefined
+    let commitRange: string | undefined
+    const treeSeparator = pathname.indexOf('/-/tree/')
+    const blobSeparator = pathname.indexOf('/-/blob/')
+    const comparisonSeparator = pathname.indexOf('/-/compare/')
+    const commitsSeparator = pathname.indexOf('/-/commits/')
+    const changelistsSeparator = pathname.indexOf('/-/changelists/')
+    if (treeSeparator !== -1) {
+        filePath = decodeURIComponent(pathname.slice(treeSeparator + '/-/tree/'.length))
+    }
+    if (blobSeparator !== -1) {
+        filePath = decodeURIComponent(pathname.slice(blobSeparator + '/-/blob/'.length))
+    }
+    if (comparisonSeparator !== -1) {
+        commitRange = pathname.slice(comparisonSeparator + '/-/compare/'.length)
+    }
+    if (commitsSeparator !== -1) {
+        filePath = decodeURIComponent(pathname.slice(commitsSeparator + '/-/commits/'.length))
+    }
+    if (changelistsSeparator !== -1) {
+        filePath = decodeURIComponent(pathname.slice(changelistsSeparator + '/-/changelists/'.length))
+    }
+    let position: Position | undefined
+    let range: Range | undefined
+
+    const lineRange = url.lineRange
+    if (lineRange.line) {
+        position = {
+            line: lineRange.line,
+            character: lineRange.character || 0,
+        }
+        if (lineRange.endLine) {
+            range = {
+                start: position,
+                end: {
+                    line: lineRange.endLine,
+                    character: lineRange.endCharacter || 0,
+                },
+            }
+        }
+    }
+    return { repoName, revision, rawRevision, commitID, filePath, commitRange, position, range }
 }

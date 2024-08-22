@@ -1,24 +1,22 @@
 import * as Sentry from '@sentry/browser'
 import classNames from 'classnames'
-import { fromEvent } from 'rxjs'
-import { filter, map, mapTo, tap } from 'rxjs/operators'
-import { Omit } from 'utility-types'
+import { fromEvent, lastValueFrom } from 'rxjs'
+import { filter, map, tap } from 'rxjs/operators'
+import type { Omit } from 'utility-types'
 
-import { LineOrPositionOrRange, subtypeOf } from '@sourcegraph/common'
+import { fetchCache, type LineOrPositionOrRange, subtypeOf } from '@sourcegraph/common'
 import { gql, dataOrThrowErrors } from '@sourcegraph/http-client'
-import { NotificationType } from '@sourcegraph/shared/src/api/extension/extensionHostApi'
 import { toAbsoluteBlobURL } from '@sourcegraph/shared/src/util/url'
 
 import { background } from '../../../browser-extension/web-extension-api/runtime'
-import { ResolveRepoNameResult, ResolveRepoNameVariables } from '../../../graphql-operations'
-import { CodeHost } from '../shared/codeHost'
-import { CodeView } from '../shared/codeViews'
-import { createNotificationClassNameGetter } from '../shared/getNotificationClassName'
+import type { ResolveRepoNameResult, ResolveRepoNameVariables } from '../../../graphql-operations'
+import { isInPage } from '../../context'
+import type { CodeHost } from '../shared/codeHost'
+import type { CodeView } from '../shared/codeViews'
 import { getSelectionsFromHash, observeSelectionsFromHash } from '../shared/util/selections'
-import { queryWithSelector, ViewResolver } from '../shared/views'
+import { queryWithSelector, type ViewResolver } from '../shared/views'
 
 import { diffDOMFunctions, singleFileDOMFunctions } from './domFunctions'
-import { getCommandPaletteMount } from './extensions'
 import { resolveCommitFileInfo, resolveDiffFileInfo, resolveFileInfo } from './fileInfo'
 import {
     getPageInfo,
@@ -120,27 +118,36 @@ const codeViewResolver: ViewResolver<CodeView> = {
     resolveView,
 }
 
-const notificationClassNames = {
-    [NotificationType.Log]: 'alert alert-secondary',
-    [NotificationType.Success]: 'alert alert-success',
-    [NotificationType.Info]: 'alert alert-info',
-    [NotificationType.Warning]: 'alert alert-warning',
-    [NotificationType.Error]: 'alert alert-danger',
-}
-
 /**
  * Checks whether repository is private or not using Gitlab API
  *
  * @description see https://docs.gitlab.com/ee/api/projects.html#get-single-project
  * @description see rate limit https://docs.gitlab.com/ee/user/admin_area/settings/user_and_ip_rate_limits.html#response-headers
  */
-export const isPrivateRepository = (repoName: string, fetchCache = background.fetchCache): Promise<boolean> => {
-    if (window.location.hostname !== 'gitlab.com' || !repoName) {
+export const isPrivateRepository = (
+    repoName: string,
+    _fetchCache: null | typeof fetchCache = null
+): Promise<boolean> => {
+    if ((windowLocation__testingOnly.value ?? window.location).hostname !== 'gitlab.com' || !repoName) {
         return Promise.resolve(true)
     }
-    return fetchCache({
+
+    const fetchCacheImpl: typeof fetchCache =
+        _fetchCache !== null
+            ? // When a fetchCache argument is supplied, it takes precedence. This is
+              // useful for test code.
+              _fetchCache
+            : isInPage
+            ? // When the script is run via the native integration, we can make
+              // the request from tha main thread.
+              fetchCache
+            : // When the script is run via the browser extension, make the
+              // request via the background thread.
+              background.fetchCache
+
+    return fetchCacheImpl({
         url: `https://gitlab.com/api/v4/projects/${encodeURIComponent(repoName)}`,
-        credentials: 'omit', // it returns different response based on auth state
+        credentials: 'omit', // Make the request as if the user is not logged-in.
         cacheMaxAge: 60 * 60 * 1000, // 1 hour
     })
         .then(response => {
@@ -179,12 +186,19 @@ export const parseHash = (hash: string): LineOrPositionOrRange => {
     return lpr
 }
 
+/**
+ * For testing only, used to set the window.location value.
+ * @internal
+ */
+export const windowLocation__testingOnly: { value: URL | null } = {
+    value: null,
+}
+
 export const gitlabCodeHost = subtypeOf<CodeHost>()({
     type: 'gitlab',
     name: 'GitLab',
     check: checkIsGitlab,
     codeViewResolvers: [codeViewResolver],
-    getCommandPaletteMount,
     getContext: async () => {
         const { repoName, ...pageInfo } = getPageInfo()
         return {
@@ -196,7 +210,10 @@ export const gitlabCodeHost = subtypeOf<CodeHost>()({
         // A view state means that a panel must be shown, and panels are currently only supported on
         // Sourcegraph (not code hosts).
         // Make sure the location is also on this Gitlab instance, return an absolute URL otherwise.
-        if (target.viewState || !target.rawRepoName.startsWith(window.location.hostname)) {
+        if (
+            target.viewState ||
+            !target.rawRepoName.startsWith((windowLocation__testingOnly.value ?? window.location).hostname)
+        ) {
             return toAbsoluteBlobURL(sourcegraphURL, target)
         }
 
@@ -211,7 +228,7 @@ export const gitlabCodeHost = subtypeOf<CodeHost>()({
                     continue
                 }
                 if (!target.position) {
-                    const url = new URL(window.location.href)
+                    const url = new URL((windowLocation__testingOnly.value ?? window.location).href)
                     url.hash = codeView.id
                     return url.href
                 }
@@ -219,10 +236,14 @@ export const gitlabCodeHost = subtypeOf<CodeHost>()({
                 const link = codeView.querySelector<HTMLAnchorElement>(
                     `${partSelector} a[data-linenumber="${target.position.line}"]`
                 )
-                if (!link) {
+
+                // Use link.getAttribute('href') because link.href silently resolves against the the
+                // jsdom current URL (https://localhost:3000) in testing.
+                const href = link?.getAttribute('href')
+                if (!href) {
                     break
                 }
-                return new URL(link.href).href
+                return new URL(href, windowLocation__testingOnly.value ?? window.location.href).href
             }
         }
 
@@ -233,16 +254,6 @@ export const gitlabCodeHost = subtypeOf<CodeHost>()({
             url.hash = `#L${line}`
         }
         return url.href
-    },
-    notificationClassNames,
-    commandPaletteClassProps: {
-        popoverClassName: classNames('dropdown-menu', styles.commandListPopover),
-        formClassName: 'dropdown-input',
-        inputClassName: 'dropdown-input-field',
-        resultsContainerClassName: 'dropdown-content',
-        selectedActionItemClassName: 'is-focused',
-        noResultsClassName: 'px-3',
-        iconClassName: 's16 align-bottom',
     },
     codeViewToolbarClassProps: {
         className: 'pl-0',
@@ -256,7 +267,6 @@ export const gitlabCodeHost = subtypeOf<CodeHost>()({
         actionItemPressedClassName: 'active',
         closeButtonClassName: 'btn btn-transparent p-0 btn-icon--gitlab',
         iconClassName: 'square s16',
-        getAlertClassName: createNotificationClassNameGetter(notificationClassNames),
     },
     codeViewsRequireTokenization: true,
     getHoverOverlayMountLocation: (): string | null => {
@@ -272,29 +282,29 @@ export const gitlabCodeHost = subtypeOf<CodeHost>()({
     // despite the URL hash is updated.
     observeLineSelection: fromEvent(document, 'click').pipe(
         filter(event => (event.target as HTMLElement).matches('a[data-line-number]')),
-        map(() => parseHash(window.location.hash))
+        map(() => parseHash((windowLocation__testingOnly.value ?? window.location).hash))
     ),
 
     prepareCodeHost: async requestGraphQL =>
-        requestGraphQL<ResolveRepoNameResult, ResolveRepoNameVariables>({
-            request: gql`
-                query ResolveRepoName($cloneURL: String!) {
-                    repository(cloneURL: $cloneURL) {
-                        name
+        lastValueFrom(
+            requestGraphQL<ResolveRepoNameResult, ResolveRepoNameVariables>({
+                request: gql`
+                    query ResolveRepoName($cloneURL: String!) {
+                        repository(cloneURL: $cloneURL) {
+                            name
+                        }
                     }
-                }
-            `,
-            variables: {
-                cloneURL: getGitlabRepoURL(),
-            },
-            mightContainPrivateInfo: true,
-        })
-            .pipe(
+                `,
+                variables: {
+                    cloneURL: getGitlabRepoURL(),
+                },
+                mightContainPrivateInfo: true,
+            }).pipe(
                 map(dataOrThrowErrors),
                 tap(({ repository }) => {
                     repoNameOnSourcegraph.next(repository?.name ?? '')
                 }),
-                mapTo(true)
+                map(() => true)
             )
-            .toPromise(),
+        ),
 })

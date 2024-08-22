@@ -1,52 +1,25 @@
 package graphqlbackend
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
-	"flag"
 	"fmt"
-	"io"
-	"log"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"os"
 	"reflect"
-	"strings"
 	"testing"
 
-	gqlerrors "github.com/graph-gophers/graphql-go/errors"
-	"github.com/inconshreveable/log15"
-	sglog "github.com/sourcegraph/log"
+	"github.com/grafana/regexp"
+	"github.com/graph-gophers/graphql-go"
 	"github.com/sourcegraph/log/logtest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
-	"github.com/sourcegraph/sourcegraph/internal/actor"
-	"github.com/sourcegraph/sourcegraph/internal/conf"
-	"github.com/sourcegraph/sourcegraph/internal/conf/conftypes"
-	"github.com/sourcegraph/sourcegraph/internal/database"
-	"github.com/sourcegraph/sourcegraph/internal/extsvc"
-	"github.com/sourcegraph/sourcegraph/internal/gitserver/protocol"
-	"github.com/sourcegraph/sourcegraph/internal/httpcli"
-	"github.com/sourcegraph/sourcegraph/internal/rcache"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/backend"
+	"github.com/sourcegraph/sourcegraph/internal/api"
+	"github.com/sourcegraph/sourcegraph/internal/database/dbmocks"
+	"github.com/sourcegraph/sourcegraph/internal/gitserver"
 	"github.com/sourcegraph/sourcegraph/internal/types"
-	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
-
-func TestMain(m *testing.M) {
-	flag.Parse()
-	if !testing.Verbose() {
-		log15.Root().SetHandler(log15.DiscardHandler())
-		log.SetOutput(io.Discard)
-		logtest.InitWithLevel(m, sglog.LevelNone)
-	} else {
-		logtest.Init(m)
-	}
-	os.Exit(m.Run())
-}
 
 func BenchmarkPrometheusFieldName(b *testing.B) {
 	tests := [][3]string{
@@ -58,7 +31,7 @@ func BenchmarkPrometheusFieldName(b *testing.B) {
 	for i, t := range tests {
 		typeName, fieldName, want := t[0], t[1], t[2]
 		b.Run(fmt.Sprintf("test-%v", i), func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				got := prometheusFieldName(typeName, fieldName)
 				if got != want {
 					b.Fatalf("got %q want %q", got, want)
@@ -69,8 +42,8 @@ func BenchmarkPrometheusFieldName(b *testing.B) {
 }
 
 func TestRepository(t *testing.T) {
-	db := database.NewMockDB()
-	repos := database.NewMockRepoStore()
+	db := dbmocks.NewMockDB()
+	repos := dbmocks.NewMockRepoStore()
 	repos.GetByNameFunc.SetDefaultReturn(&types.Repo{ID: 2, Name: "github.com/gorilla/mux"}, nil)
 	db.ReposFunc.SetDefaultReturn(repos)
 	RunTests(t, []*Test{
@@ -97,79 +70,54 @@ func TestRepository(t *testing.T) {
 func TestRecloneRepository(t *testing.T) {
 	resetMocks()
 
-	gitserverCalled := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		resp := protocol.RepoUpdateResponse{}
-		gitserverCalled = true
-		json.NewEncoder(w).Encode(&resp)
-	}))
-	defer srv.Close()
-
-	serverURL, err := url.Parse(srv.URL)
-	assert.Nil(t, err)
-	conf.Mock(&conf.Unified{
-		ServiceConnectionConfig: conftypes.ServiceConnections{
-			GitServers: []string{serverURL.Host},
-		},
-	})
-	defer conf.Mock(nil)
-
-	repos := database.NewMockRepoStore()
+	repos := dbmocks.NewMockRepoStore()
 	repos.GetFunc.SetDefaultReturn(&types.Repo{ID: 1, Name: "github.com/gorilla/mux"}, nil)
 
-	users := database.NewMockUserStore()
+	users := dbmocks.NewMockUserStore()
 	users.GetByCurrentAuthUserFunc.SetDefaultReturn(&types.User{ID: 1, SiteAdmin: true}, nil)
 
-	gitserverRepos := database.NewMockGitserverRepoStore()
+	gitserverRepos := dbmocks.NewMockGitserverRepoStore()
 	gitserverRepos.GetByIDFunc.SetDefaultReturn(&types.GitserverRepo{RepoID: 1, CloneStatus: "cloned"}, nil)
 
-	db := database.NewMockDB()
+	db := dbmocks.NewMockDB()
 	db.ReposFunc.SetDefaultReturn(repos)
 	db.UsersFunc.SetDefaultReturn(users)
 	db.GitserverReposFunc.SetDefaultReturn(gitserverRepos)
 
-	called := backend.Mocks.Repos.MockDeleteRepositoryFromDisk(t, 1)
+	repoID := MarshalRepositoryID(1)
 
-	repoID := base64.StdEncoding.EncodeToString([]byte("Repository:1"))
-
-	RunTests(t, []*Test{
-		{
-			Schema: mustParseGraphQLSchema(t, db),
-			Query: fmt.Sprintf(`
-                mutation {
-                    recloneRepository(repo: "%s") {
-                        alwaysNil
-                    }
-                }
-            `, repoID),
-			ExpectedResult: `
-                {
-                    "recloneRepository": {
-                        "alwaysNil": null
-                    }
-                }
-            `,
-		},
+	called := false
+	backend.Mocks.Repos.RecloneRepository = func(ctx context.Context, repoID api.RepoID) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() {
+		backend.Mocks = backend.MockServices{}
 	})
+	r := newSchemaResolver(db, gitserver.NewStrictMockClient(), nil)
 
-	assert.True(t, *called)
-	assert.True(t, gitserverCalled)
+	_, err := r.RecloneRepository(context.Background(), &struct{ Repo graphql.ID }{Repo: repoID})
+	require.NoError(t, err)
+
+	assert.True(t, called)
 }
 
 func TestDeleteRepositoryFromDisk(t *testing.T) {
 	resetMocks()
 
-	repos := database.NewMockRepoStore()
+	repos := dbmocks.NewMockRepoStore()
 
-	users := database.NewMockUserStore()
+	users := dbmocks.NewMockUserStore()
 	users.GetByCurrentAuthUserFunc.SetDefaultReturn(&types.User{ID: 1, SiteAdmin: true}, nil)
-	called := backend.Mocks.Repos.MockDeleteRepositoryFromDisk(t, 1)
+	called := backend.Mocks.Repos.MockRecloneRepository(t, 1)
+	t.Cleanup(func() {
+		backend.Mocks = backend.MockServices{}
+	})
 
-	gitserverRepos := database.NewMockGitserverRepoStore()
+	gitserverRepos := dbmocks.NewMockGitserverRepoStore()
 	gitserverRepos.GetByIDFunc.SetDefaultReturn(&types.GitserverRepo{RepoID: 1, CloneStatus: "cloned"}, nil)
 
-	db := database.NewMockDB()
+	db := dbmocks.NewMockDB()
 	db.ReposFunc.SetDefaultReturn(repos)
 	db.UsersFunc.SetDefaultReturn(users)
 	db.GitserverReposFunc.SetDefaultReturn(gitserverRepos)
@@ -199,11 +147,11 @@ func TestDeleteRepositoryFromDisk(t *testing.T) {
 }
 
 func TestResolverTo(t *testing.T) {
-	db := database.NewMockDB()
+	db := dbmocks.NewMockDB()
 	// This test exists purely to remove some non determinism in our tests
 	// run. The To* resolvers are stored in a map in our graphql
 	// implementation => the order we call them is non deterministic =>
-	// codecov coverage reports are noisy.
+	// code coverage reports are noisy.
 	resolvers := []any{
 		&FileMatchResolver{db: db},
 		&NamespaceResolver{},
@@ -211,14 +159,17 @@ func TestResolverTo(t *testing.T) {
 		&RepositoryResolver{db: db, logger: logtest.Scoped(t)},
 		&CommitSearchResultResolver{},
 		&gitRevSpec{},
-		&settingsSubject{},
+		&settingsSubjectResolver{},
 		&statusMessageResolver{db: db},
 	}
+
+	re := regexp.MustCompile("To[A-Z]")
+
 	for _, r := range resolvers {
 		typ := reflect.TypeOf(r)
 		t.Run(typ.Name(), func(t *testing.T) {
-			for i := 0; i < typ.NumMethod(); i++ {
-				if name := typ.Method(i).Name; strings.HasPrefix(name, "To") {
+			for i := range typ.NumMethod() {
+				if name := typ.Method(i).Name; re.MatchString(name) {
 					reflect.ValueOf(r).MethodByName(name).Call(nil)
 				}
 			}
@@ -250,339 +201,4 @@ func TestResolverTo(t *testing.T) {
 			t.Errorf("expected treeEntry to be tree")
 		}
 	})
-}
-
-func TestAffiliatedRepositories(t *testing.T) {
-	resetMocks()
-	rcache.SetupForTest(t)
-	users := database.NewMockUserStore()
-	users.TagsFunc.SetDefaultReturn(map[string]bool{}, nil)
-	users.GetByIDFunc.SetDefaultHook(func(_ context.Context, userID int32) (*types.User, error) {
-		return &types.User{ID: userID, SiteAdmin: userID == 2}, nil
-	})
-	users.GetByCurrentAuthUserFunc.SetDefaultReturn(&types.User{ID: 1, SiteAdmin: true}, nil)
-
-	externalServices := database.NewMockExternalServiceStore()
-	externalServices.ListFunc.SetDefaultReturn(
-		[]*types.ExternalService{
-			{
-				ID:          1,
-				Kind:        extsvc.KindGitHub,
-				DisplayName: "github",
-				Config:      extsvc.NewEmptyConfig(),
-			},
-			{
-				ID:          2,
-				Kind:        extsvc.KindGitLab,
-				DisplayName: "gitlab",
-				Config:      extsvc.NewEmptyConfig(),
-			},
-			{
-				ID:     3,
-				Kind:   extsvc.KindBitbucketCloud, // unsupported, should be ignored
-				Config: extsvc.NewEmptyConfig(),
-			},
-		},
-		nil,
-	)
-	externalServices.GetByIDFunc.SetDefaultHook(func(_ context.Context, id int64) (*types.ExternalService, error) {
-		switch id {
-		case 1:
-			return &types.ExternalService{
-				ID:          1,
-				Kind:        extsvc.KindGitHub,
-				DisplayName: "github",
-				Config:      extsvc.NewEmptyConfig(),
-			}, nil
-		case 2:
-			return &types.ExternalService{
-				ID:          2,
-				Kind:        extsvc.KindGitLab,
-				DisplayName: "gitlab",
-				Config:      extsvc.NewEmptyConfig(),
-			}, nil
-		}
-		return nil, nil
-	})
-
-	db := database.NewMockDB()
-	db.UsersFunc.SetDefaultReturn(users)
-	db.ExternalServicesFunc.SetDefaultReturn(externalServices)
-
-	// Map from path rou
-	httpResponder := map[string]roundTripFunc{
-		// github
-		"/api/v3/user/repos": func(r *http.Request) (*http.Response, error) {
-			buf := &bytes.Buffer{}
-			enc := json.NewEncoder(buf)
-			page := r.URL.Query().Get("page")
-			if page == "1" {
-				if err := enc.Encode([]githubRepository{
-					{
-						FullName: "test-user/test",
-						Private:  false,
-					},
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			// Stop on the second page
-			if page == "2" {
-				if err := enc.Encode([]githubRepository{}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			return &http.Response{
-				Body:       io.NopCloser(buf),
-				StatusCode: http.StatusOK,
-			}, nil
-		},
-
-		// gitlab
-		"/api/v4/projects": func(r *http.Request) (*http.Response, error) {
-			buf := &bytes.Buffer{}
-			enc := json.NewEncoder(buf)
-			if err := enc.Encode([]gitlabRepository{
-				{
-					PathWithNamespace: "test-user2/test2",
-					Visibility:        "public",
-				},
-			}); err != nil {
-				t.Fatal(err)
-			}
-			return &http.Response{
-				Body:       io.NopCloser(buf),
-				StatusCode: http.StatusOK,
-			}, nil
-		},
-	}
-
-	cf = httpcli.NewFactory(
-		nil,
-		func(c *http.Client) error {
-			c.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				fn := httpResponder[r.URL.Path]
-				if fn == nil {
-					t.Fatalf("unexpected path: %s", r.URL.Path)
-				}
-				return fn(r)
-			})
-			return nil
-		},
-	)
-
-	ctx := context.Background()
-	ctx = actor.WithActor(ctx, &actor.Actor{
-		UID: 1,
-	})
-
-	RunTests(t, []*Test{
-		{
-			Context: ctx,
-			Schema:  mustParseGraphQLSchema(t, db),
-			Query: `
-			{
-				affiliatedRepositories(
-					namespace: "VXNlcjox"
-				) {
-					nodes {
-						name,
-						private,
-						codeHost {
-							displayName
-						}
-					}
-				}
-			}
-			`,
-			ExpectedResult: `
-				{
-					"affiliatedRepositories": {
-						"nodes": [
-							{
-								"name": "test-user/test",
-								"private": false,
-								"codeHost": {
-									"displayName": "github"
-								}
-							},
-							{
-								"name": "test-user2/test2",
-								"private": false,
-								"codeHost": {
-									"displayName": "gitlab"
-								}
-							}
-						]
-					}
-				}
-			`,
-		},
-	})
-
-	// Confirm that a site admin cannot list someone else's repos
-	ctx = actor.WithActor(ctx, &actor.Actor{
-		UID: 2,
-	})
-
-	RunTests(t, []*Test{
-		{
-			Context: ctx,
-			Schema:  mustParseGraphQLSchema(t, db),
-			Query: `
-			{
-				affiliatedRepositories(
-					namespace: "VXNlcjox"
-				) {
-					nodes {
-						name,
-						private,
-						codeHost {
-							displayName
-						}
-					}
-				}
-			}
-			`,
-			ExpectedResult: `null`,
-			ExpectedErrors: []*gqlerrors.QueryError{
-				{
-					Path:          []any{"affiliatedRepositories"},
-					Message:       "must be authenticated as user with id 1",
-					ResolverError: &backend.InsufficientAuthorizationError{Message: fmt.Sprintf("must be authenticated as user with id %d", 1)},
-				},
-			},
-		},
-	})
-
-	// One code host failing should not break everything
-	ctx = actor.WithActor(ctx, &actor.Actor{
-		UID: 1,
-	})
-
-	// Make gitlab break
-	httpResponder["/api/v4/projects"] = func(request *http.Request) (*http.Response, error) {
-		buf := &bytes.Buffer{}
-		enc := json.NewEncoder(buf)
-		if err := enc.Encode([]gitlabRepository{
-			{
-				PathWithNamespace: "test-user2/test2",
-				Visibility:        "public",
-			},
-		}); err != nil {
-			t.Fatal(err)
-		}
-		return &http.Response{
-			Body:       nil,
-			StatusCode: http.StatusUnauthorized,
-		}, nil
-	}
-
-	// When one code host fails, return its errors and also the nodes from the other code host.
-	RunTests(t, []*Test{
-		{
-			Context: ctx,
-			Schema:  mustParseGraphQLSchema(t, db),
-			Query: `
-			{
-				affiliatedRepositories(
-					namespace: "VXNlcjox"
-				) {
-					codeHostErrors
-					nodes {
-						name,
-						private,
-						codeHost {
-							displayName
-						}
-					}
-				}
-			}
-			`,
-			ExpectedResult: `
-				{
-					"affiliatedRepositories": {
-						"codeHostErrors": ["Error from gitlab: unexpected response from GitLab API (/api/v4/projects?archived=no&membership=true&per_page=40): HTTP error status 401"],
-						"nodes": [
-							{
-								"name": "test-user/test",
-								"private": false,
-								"codeHost": {
-									"displayName": "github"
-								}
-							}
-						]
-					}
-				}
-			`,
-		},
-	})
-
-	// Both code hosts failing is an error
-	// Make github break too
-	httpResponder["/api/v3/user/repos"] = func(request *http.Request) (*http.Response, error) {
-		buf := &bytes.Buffer{}
-		enc := json.NewEncoder(buf)
-		if err := enc.Encode([]gitlabRepository{
-			{
-				PathWithNamespace: "test-user2/test2",
-				Visibility:        "public",
-			},
-		}); err != nil {
-			t.Fatal(err)
-		}
-		return &http.Response{
-			Body:       nil,
-			StatusCode: http.StatusUnauthorized,
-		}, nil
-	}
-
-	RunTests(t, []*Test{
-		{
-			Context: ctx,
-			Schema:  mustParseGraphQLSchema(t, db),
-			Query: `
-			{
-				affiliatedRepositories(
-					namespace: "VXNlcjox"
-				) {
-					codeHostErrors
-					nodes {
-						name,
-						private,
-						codeHost {
-							displayName
-						}
-					}
-				}
-			}
-			`,
-			ExpectedResult: `null`,
-			ExpectedErrors: []*gqlerrors.QueryError{
-				{
-					Path:          []any{"affiliatedRepositories", "codeHostErrors"},
-					Message:       "failed to fetch from any code host",
-					ResolverError: errors.New("failed to fetch from any code host"),
-				},
-			},
-		},
-	})
-}
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
-	return f(r)
-}
-
-// copied from the github client, just the fields we need
-type githubRepository struct {
-	FullName string `json:"full_name"`
-	Private  bool   `json:"private"`
-}
-
-type gitlabRepository struct {
-	Visibility        string `json:"visibility"`
-	ID                int    `json:"id"`
-	PathWithNamespace string `json:"path_with_namespace"`
 }

@@ -1,18 +1,21 @@
 import delay from 'delay'
 import expect from 'expect'
-import { test } from 'mocha'
+import { afterEach, beforeEach, describe, test } from 'mocha'
 
-import { SearchAggregationMode, SearchGraphQlOperations } from '@sourcegraph/search'
-import { SharedGraphQlOperations } from '@sourcegraph/shared/src/graphql-operations'
-import { SearchEvent } from '@sourcegraph/shared/src/search/stream'
-import { createDriverForTest, Driver } from '@sourcegraph/shared/src/testing/driver'
+import type { SharedGraphQlOperations } from '@sourcegraph/shared/src/graphql-operations'
+import type { SearchEvent } from '@sourcegraph/shared/src/search/stream'
+import { createDriverForTest, type Driver } from '@sourcegraph/shared/src/testing/driver'
 import { afterEachSaveScreenshotIfFailed } from '@sourcegraph/shared/src/testing/screenshotReporter'
 
-import { GetSearchAggregationResult, WebGraphQlOperations } from '../graphql-operations'
+import {
+    type GetSearchAggregationResult,
+    type WebGraphQlOperations,
+    SearchAggregationMode,
+} from '../graphql-operations'
 
-import { createWebIntegrationTestContext, WebIntegrationTestContext } from './context'
+import { createWebIntegrationTestContext, type WebIntegrationTestContext } from './context'
 import { commonWebGraphQlResults } from './graphQlResults'
-import { createEditorAPI } from './utils'
+import { createEditorAPI, removeContextFromQuery } from './utils'
 
 const aggregationDefaultMock = (mode: SearchAggregationMode): GetSearchAggregationResult => ({
     searchQueryAggregate: {
@@ -86,29 +89,29 @@ const mockDefaultStreamEvents: SearchEvent[] = [
     {
         type: 'filters',
         data: [
-            { label: 'archived:yes', value: 'archived:yes', count: 5, kind: 'utility', limitHit: true },
-            { label: 'fork:yes', value: 'fork:yes', count: 46, kind: 'utility', limitHit: true },
+            { label: 'archived:yes', value: 'archived:yes', count: 5, kind: 'utility', exhaustive: false },
+            { label: 'fork:yes', value: 'fork:yes', count: 46, kind: 'utility', exhaustive: false },
             // Two repo filters to trigger the repository sidebar section
             {
                 label: 'github.com/Algorilla/manta-ray',
                 value: 'repo:^github\\.com/Algorilla/manta-ray$',
                 count: 1,
                 kind: 'repo',
-                limitHit: true,
+                exhaustive: false,
             },
             {
                 label: 'github.com/Algorilla/manta-ray2',
                 value: 'repo:^github\\.com/Algorilla/manta-ray2$',
                 count: 1,
                 kind: 'repo',
-                limitHit: true,
+                exhaustive: false,
             },
         ],
     },
     { type: 'done', data: {} },
 ]
 
-const commonSearchGraphQLResults: Partial<WebGraphQlOperations & SharedGraphQlOperations & SearchGraphQlOperations> = {
+const commonSearchGraphQLResults: Partial<WebGraphQlOperations & SharedGraphQlOperations> = {
     ...commonWebGraphQlResults,
     IsSearchContextAvailable: () => ({ isSearchContextAvailable: true }),
     UserAreaUserProfile: () => ({
@@ -122,12 +125,16 @@ const commonSearchGraphQLResults: Partial<WebGraphQlOperations & SharedGraphQlOp
             avatarURL: '',
             viewerCanAdminister: true,
             builtinAuth: true,
-            tags: [],
+            createdAt: '2020-03-02T11:52:15Z',
+            roles: {
+                __typename: 'RoleConnection',
+                nodes: [],
+            },
         },
     }),
 }
 
-const QUERY_INPUT_SELECTOR = '[data-testid="searchbox"] .test-query-input'
+const QUERY_INPUT_SELECTOR = '.test-query-input'
 
 describe('Search aggregation', () => {
     let driver: Driver
@@ -153,19 +160,8 @@ describe('Search aggregation', () => {
     afterEach(() => testContext?.dispose())
     afterEachSaveScreenshotIfFailed(() => driver.page)
 
-    test('should be hidden if feature flag is off', async () => {
-        await driver.page.goto(
-            `${driver.sourcegraphBaseUrl}/search?q=${encodeURIComponent('context:global foo')}&patternType=literal`
-        )
-
-        await driver.page.waitForSelector('[data-testid="filter-link"]')
-        const aggregationSidebar = await driver.page.$x("//button[contains(., 'Grouped by')]")
-
-        expect(aggregationSidebar).toStrictEqual([])
-    })
-
     describe('with aggregation feature flag on', () => {
-        beforeEach(() =>
+        beforeEach(() => {
             testContext.overrideGraphQL({
                 ...commonSearchGraphQLResults,
                 ViewerSettings: () => ({
@@ -180,7 +176,11 @@ describe('Search aggregation', () => {
                                 latestSettings: {
                                     id: 0,
                                     contents: JSON.stringify({
-                                        experimentalFeatures: { searchResultsAggregations: true },
+                                        experimentalFeatures: {
+                                            newSearchResultFiltersPanel: false,
+                                            searchResultsAggregations: true,
+                                            searchQueryInput: 'v1',
+                                        },
                                     }),
                                 },
                             },
@@ -189,7 +189,7 @@ describe('Search aggregation', () => {
                     },
                 }),
             })
-        )
+        })
 
         test('should sync aggregation settings across different UI via URL', async () => {
             const origQuery = 'context:global insights('
@@ -197,6 +197,10 @@ describe('Search aggregation', () => {
             await driver.page.goto(
                 `${driver.sourcegraphBaseUrl}/search?q=${encodeURIComponent(origQuery)}&patternType=literal`
             )
+
+            await driver.page.evaluate(() => {
+                localStorage.setItem('search.sidebar.collapsed', 'false')
+            })
 
             await driver.page.waitForSelector('[aria-label="Aggregation mode picker"]')
 
@@ -240,6 +244,10 @@ describe('Search aggregation', () => {
             await driver.page.goto(
                 `${driver.sourcegraphBaseUrl}/search?q=${encodeURIComponent(origQuery)}&patternType=literal`
             )
+
+            await driver.page.evaluate(() => {
+                localStorage.setItem('search.sidebar.collapsed', 'false')
+            })
 
             await driver.page.waitForSelector('[aria-label="Aggregation mode picker"]')
 
@@ -299,27 +307,46 @@ describe('Search aggregation', () => {
             const origQuery = 'context:global insights('
 
             await driver.page.goto(
-                `${driver.sourcegraphBaseUrl}/search?q=${encodeURIComponent(origQuery)}&patternType=literal`
+                `${driver.sourcegraphBaseUrl}/search?q=${encodeURIComponent(origQuery)}&patternType=keyword`
             )
+
+            await driver.page.evaluate(() => {
+                localStorage.setItem('search.sidebar.collapsed', 'false')
+            })
 
             const editor = await createEditorAPI(driver, QUERY_INPUT_SELECTOR)
             await editor.waitForIt()
 
             await driver.page.waitForSelector('[aria-label="Bar chart content"] a')
+
+            // waitForSelector checks for dom element, but it doesn't track visual representation of the element
+            // Wait until chart is visually rendered and only then click the element, otherwise it may be possible
+            // to encounter a puppeter bug https://github.com/puppeteer/puppeteer/issues/8627
+            await delay(200)
             await driver.page.click('[aria-label="Sidebar search aggregation chart"] a')
 
-            expect(await editor.getValue()).toStrictEqual('insights repo:sourcegraph/sourcegraph')
+            expect(removeContextFromQuery((await editor.getValue()) ?? '')).toStrictEqual(
+                'insights repo:sourcegraph/sourcegraph'
+            )
 
             await driver.page.waitForSelector('[data-testid="expand-aggregation-ui"]')
             await driver.page.click('[data-testid="expand-aggregation-ui"]')
             await driver.page.waitForSelector(
                 '[aria-label="Expanded search aggregation chart"] [aria-label="Bar chart content"] g:nth-child(2) a'
             )
+
+            // waitForSelector checks for dom element, but it doesn't track visual representation of the element
+            // Wait until chart is visually rendered and only then click the element, otherwise it may be possible
+            // to encounter a puppeter bug https://github.com/puppeteer/puppeteer/issues/8627
+            await delay(200)
+
             await driver.page.click(
                 '[aria-label="Expanded search aggregation chart"] [aria-label="Bar chart content"] g:nth-child(2) a'
             )
 
-            expect(await editor.getValue()).toStrictEqual('insights repo:sourecegraph/about')
+            expect(removeContextFromQuery((await editor.getValue()) ?? '')).toStrictEqual(
+                'insights repo:sourecegraph/about'
+            )
         })
 
         test('should preserve case sensitive filter in a query', async () => {
@@ -328,6 +355,10 @@ describe('Search aggregation', () => {
             await driver.page.goto(
                 `${driver.sourcegraphBaseUrl}/search?q=${encodeURIComponent(origQuery)}&patternType=literal&case=yes`
             )
+
+            await driver.page.evaluate(() => {
+                localStorage.setItem('search.sidebar.collapsed', 'false')
+            })
 
             const variables = await testContext.waitForGraphQLRequest(() => {}, 'GetSearchAggregation')
 

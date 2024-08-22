@@ -1,4 +1,4 @@
-import { SearchPatternType } from '../graphql-operations'
+import type { SearchPatternType } from '../graphql-operations'
 
 export interface ExampleQuery {
     title: string
@@ -6,6 +6,17 @@ export interface ExampleQuery {
     query: string
     patternType: SearchPatternType
 }
+
+export type CommunitySearchContextSpecs =
+    | 'backstage'
+    | 'chakraui'
+    | 'cncf'
+    | 'temporalio'
+    | 'o3de'
+    | 'stackstorm'
+    | 'kubernetes'
+    | 'stanford'
+    | 'julia'
 
 export interface CommunitySearchContextMetadata {
     /**
@@ -15,7 +26,7 @@ export interface CommunitySearchContextMetadata {
     /**
      * The name of the community search context, must match the community search context name as configured in settings. E.g. python2-to-3.
      */
-    spec: string
+    spec: CommunitySearchContextSpecs
     /**
      * The URL pathname for the community search context page.
      */

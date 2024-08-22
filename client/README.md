@@ -12,7 +12,6 @@
 - **branded**: Contains React components and implements the visual design language we use across our web app and e.g. in the options menu of the browser extension. Over time, components from `shared` and `branded` packages should be moved into the `wildcard` package.
 - **wildcard**: Package that encapsulates storybook configuration and contains our Wildcard design system components. If we're using a component in two or more different areas (e.g. `web-app` and `browser-extension`) then it should live in the `wildcard` package. Otherwise the components should be better colocated with the code where they're actually used.
 - **search**: Search-related code that may be shared between all clients, both branded (e.g. web, VS Code extension) and unbranded (e.g. browser extension)
-- **search-ui**: Search UI components with branded styling that are shared between clients. For example, the `<SearchBox>` component that is used in both the web application and VS Code extension.
 - **storybook**: Storybook configuration.
 
 ## Further migration plan
@@ -28,5 +27,3 @@
 5. **shared** contains utility functions, types, polyfills, etc which is not a part of the Wildcard component library. These modules should be moved into **utils** package and other new packages: e.g. **api** for GraphQL client and type generators, etc.
 
 6. Packages should use package name (e.g. `@sourcegraph/wildcard`) for imports instead of the relative paths (e.g. `../../../../wildcard/src/components/Markdown`) to avoid long relative-paths and make dependency graph between packages clear. (Typescript will warn if packages have circular dependencies). It's easy to refactor such isolated packages, extract functionality into new ones, or even into new repositories.
-
-7. **build** or **config** package should be added later to encapsulate all the configurations reused between packages which will allow removing `jest.config`, `babel.config` from the root of the repo.

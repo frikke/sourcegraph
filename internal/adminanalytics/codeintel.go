@@ -4,14 +4,16 @@ import (
 	"context"
 
 	"github.com/keegancsmith/sqlf"
+
 	"github.com/sourcegraph/sourcegraph/internal/database"
 )
 
 type CodeIntel struct {
+	Ctx       context.Context
 	DateRange string
 	Grouping  string
 	DB        database.DB
-	Cache     bool
+	Cache     KeyValue
 }
 
 func (s *CodeIntel) ReferenceClicks() (*AnalyticsFetcher, error) {

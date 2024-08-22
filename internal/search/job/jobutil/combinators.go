@@ -5,13 +5,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/opentracing/opentracing-go/log"
+	"github.com/sourcegraph/conc/pool"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/sourcegraph/sourcegraph/internal/search"
 	"github.com/sourcegraph/sourcegraph/internal/search/job"
 	"github.com/sourcegraph/sourcegraph/internal/search/result"
 	"github.com/sourcegraph/sourcegraph/internal/search/streaming"
-	"github.com/sourcegraph/sourcegraph/internal/trace"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
@@ -42,13 +42,13 @@ func (s *SequentialJob) Name() string {
 	return "SequentialJob"
 }
 
-func (s *SequentialJob) Fields(v job.Verbosity) (res []log.Field) {
+func (s *SequentialJob) Attributes(v job.Verbosity) (res []attribute.KeyValue) {
 	switch v {
 	case job.VerbosityMax:
 		fallthrough
 	case job.VerbosityBasic:
 		res = append(res,
-			log.Bool("ensureUnique", s.ensureUnique),
+			attribute.Bool("ensureUnique", s.ensureUnique),
 		)
 	}
 	return res
@@ -134,7 +134,7 @@ func (p *ParallelJob) Name() string {
 	return "ParallelJob"
 }
 
-func (p *ParallelJob) Fields(job.Verbosity) []log.Field { return nil }
+func (p *ParallelJob) Attributes(job.Verbosity) []attribute.KeyValue { return nil }
 func (p *ParallelJob) Children() []job.Describer {
 	res := make([]job.Describer, len(p.children))
 	for i := range p.children {
@@ -156,18 +156,18 @@ func (p *ParallelJob) Run(ctx context.Context, clients job.RuntimeClients, s str
 	defer func() { finish(alert, err) }()
 
 	var (
-		g          errors.Group
+		pl         = pool.New().WithContext(ctx)
 		maxAlerter search.MaxAlerter
 	)
 	for _, child := range p.children {
 		child := child
-		g.Go(func() error {
+		pl.Go(func(ctx context.Context) error {
 			alert, err := child.Run(ctx, clients, s)
 			maxAlerter.Add(alert)
 			return err
 		})
 	}
-	return maxAlerter.Alert, g.Wait()
+	return maxAlerter.Alert, pl.Wait()
 }
 
 // NewTimeoutJob creates a new job that is canceled after the
@@ -201,13 +201,13 @@ func (t *TimeoutJob) Name() string {
 	return "TimeoutJob"
 }
 
-func (t *TimeoutJob) Fields(v job.Verbosity) (res []log.Field) {
+func (t *TimeoutJob) Attributes(v job.Verbosity) (res []attribute.KeyValue) {
 	switch v {
 	case job.VerbosityMax:
 		fallthrough
 	case job.VerbosityBasic:
 		res = append(res,
-			trace.Stringer("timeout", t.timeout),
+			attribute.Stringer("timeout", t.timeout),
 		)
 	}
 	return res
@@ -233,7 +233,7 @@ func (e *NoopJob) Run(context.Context, job.RuntimeClients, streaming.Sender) (*s
 	return nil, nil
 }
 
-func (e *NoopJob) Name() string                     { return "NoopJob" }
-func (e *NoopJob) Fields(job.Verbosity) []log.Field { return nil }
-func (e *NoopJob) Children() []job.Describer        { return nil }
-func (e *NoopJob) MapChildren(job.MapFunc) job.Job  { return e }
+func (e *NoopJob) Name() string                                  { return "NoopJob" }
+func (e *NoopJob) Attributes(job.Verbosity) []attribute.KeyValue { return nil }
+func (e *NoopJob) Children() []job.Describer                     { return nil }
+func (e *NoopJob) MapChildren(job.MapFunc) job.Job               { return e }

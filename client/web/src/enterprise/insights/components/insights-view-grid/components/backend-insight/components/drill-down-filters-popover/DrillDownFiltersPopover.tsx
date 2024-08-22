@@ -1,16 +1,26 @@
-import React, { DOMAttributes, useRef, useState } from 'react'
+import { type FC, type RefObject, useRef, useState } from 'react'
 
 import { mdiFilterOutline } from '@mdi/js'
 import classNames from 'classnames'
 
-import { Button, createRectangle, Popover, PopoverContent, PopoverTrigger, Position, Icon } from '@sourcegraph/wildcard'
-
-import { InsightFilters } from '../../../../../../core'
-import { FormChangeEvent, SubmissionResult } from '../../../../../form/hooks/useForm'
 import {
+    Button,
+    Icon,
+    Popover,
+    PopoverContent,
+    PopoverTrigger,
+    PopoverTail,
+    Position,
+    createRectangle,
+    type FormChangeEvent,
+    type SubmissionResult,
+} from '@sourcegraph/wildcard'
+
+import type { InsightFilters } from '../../../../../../core'
+import {
+    type DrillDownFiltersFormValues,
     DrillDownInsightCreationForm,
-    DrillDownInsightCreationFormValues,
-    DrillDownFiltersFormValues,
+    type DrillDownInsightCreationFormValues,
     DrillDownInsightFilters,
     FilterSectionVisualMode,
     hasActiveFilters,
@@ -18,21 +28,20 @@ import {
 
 import styles from './DrillDownFiltersPopover.module.scss'
 
-const POPOVER_PADDING = createRectangle(0, 0, 5, 5)
+const POPOVER_TARGET_PADDING = createRectangle(0, 0, 4, 4)
+const POPOVER_CONTAINER_PADDING = { top: 58 }
+
 interface DrillDownFiltersPopoverProps {
     isOpen: boolean
     initialFiltersValue: InsightFilters
     originalFiltersValue: InsightFilters
-    anchor: React.RefObject<HTMLElement>
+    isNumSamplesFilterAvailable: boolean
+    anchor: RefObject<HTMLElement>
     onFilterChange: (filters: InsightFilters) => void
     onFilterSave: (filters: InsightFilters) => void
     onInsightCreate: (values: DrillDownInsightCreationFormValues) => SubmissionResult
     onVisibilityChange: (open: boolean) => void
 }
-
-// To prevent grid layout position change animation. Attempts to drag
-// the filter panel should not trigger react-grid-layout events.
-const handleMouseDown: DOMAttributes<HTMLElement>['onMouseDown'] = event => event.stopPropagation()
 
 export enum DrillDownFiltersStep {
     Filters = 'filters',
@@ -44,14 +53,13 @@ const STEP_STYLES = {
     [DrillDownFiltersStep.ViewCreation]: styles.popoverWithViewCreation,
 }
 
-export const DrillDownFiltersPopover: React.FunctionComponent<
-    React.PropsWithChildren<DrillDownFiltersPopoverProps>
-> = props => {
+export const DrillDownFiltersPopover: FC<DrillDownFiltersPopoverProps> = props => {
     const {
         isOpen,
         anchor,
         initialFiltersValue,
         originalFiltersValue,
+        isNumSamplesFilterAvailable,
         onVisibilityChange,
         onFilterChange,
         onFilterSave,
@@ -99,17 +107,19 @@ export const DrillDownFiltersPopover: React.FunctionComponent<
             </PopoverTrigger>
 
             <PopoverContent
-                targetPadding={POPOVER_PADDING}
-                constrainToScrollParents={true}
                 position={Position.rightStart}
+                constrainToScrollParents={true}
+                targetPadding={POPOVER_TARGET_PADDING}
+                constraintPadding={POPOVER_CONTAINER_PADDING}
                 aria-label="Drill-down filters panel"
-                onMouseDown={handleMouseDown}
                 className={classNames(styles.popover, STEP_STYLES[step])}
+                onKeyDown={event => event.stopPropagation()}
             >
                 {step === DrillDownFiltersStep.Filters && (
                     <DrillDownInsightFilters
                         initialValues={initialFiltersValue}
                         originalValues={originalFiltersValue}
+                        isNumSamplesFilterAvailable={isNumSamplesFilterAvailable}
                         visualMode={FilterSectionVisualMode.CollapseSections}
                         onFiltersChange={handleFilterChange}
                         onFilterSave={onFilterSave}
@@ -124,6 +134,8 @@ export const DrillDownFiltersPopover: React.FunctionComponent<
                     />
                 )}
             </PopoverContent>
+
+            <PopoverTail size="sm" />
         </Popover>
     )
 }

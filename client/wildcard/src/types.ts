@@ -1,4 +1,4 @@
-import * as React from 'react'
+import type * as React from 'react'
 
 type Merge<P1 = {}, P2 = {}> = Omit<P1, keyof P2> & P2
 
@@ -7,7 +7,6 @@ export type ForwardReferenceExoticComponent<E, OwnProps> = React.ForwardRefExoti
 >
 
 type PropsWithChildren<P> = P &
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ({ children?: React.ReactNode | undefined } | { children: (...args: any[]) => React.ReactNode })
 
 export interface ForwardReferenceComponent<

@@ -1,17 +1,20 @@
-import React, { useMemo } from 'react'
+import { type FC, useMemo, useEffect } from 'react'
 
-import * as H from 'history'
+import VisuallyHidden from '@reach/visually-hidden'
 
+import { pluralize } from '@sourcegraph/common'
 import { displayRepoName } from '@sourcegraph/shared/src/components/RepoLink'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
-import { PageHeader, H2, useObservable, Text } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { PageHeader, H2, useObservable, Text, H4 } from '@sourcegraph/wildcard'
 
+import type { AuthenticatedUser } from '../../../auth'
 import { BatchChangesIcon } from '../../../batches/icons'
+import { canWriteBatchChanges, NO_ACCESS_BATCH_CHANGES_WRITE, NO_ACCESS_SOURCEGRAPH_COM } from '../../../batches/utils'
 import { DiffStat } from '../../../components/diff/DiffStat'
 import { Page } from '../../../components/Page'
 import { PageTitle } from '../../../components/PageTitle'
-import { RepositoryFields, RepoBatchChangeStats } from '../../../graphql-operations'
-import { queryExternalChangesetWithFileDiffs as _queryExternalChangesetWithFileDiffs } from '../detail/backend'
+import type { RepositoryFields, RepoBatchChangeStats } from '../../../graphql-operations'
+import type { queryExternalChangesetWithFileDiffs as _queryExternalChangesetWithFileDiffs } from '../detail/backend'
 import { BatchChangeStatsTotalAction } from '../detail/BatchChangeStatsCard'
 import {
     ChangesetStatusUnpublished,
@@ -22,15 +25,15 @@ import {
 import { NewBatchChangeButton } from '../list/NewBatchChangeButton'
 
 import {
-    queryRepoBatchChanges as _queryRepoBatchChanges,
+    type queryRepoBatchChanges as _queryRepoBatchChanges,
     queryRepoBatchChangeStats as _queryRepoBatchChangeStats,
 } from './backend'
 import { RepoBatchChanges } from './RepoBatchChanges'
 
-interface BatchChangeRepoPageProps extends ThemeProps {
-    history: H.History
-    location: H.Location
+interface BatchChangeRepoPageProps extends TelemetryV2Props {
     repo: RepositoryFields
+    authenticatedUser: AuthenticatedUser | null
+    isSourcegraphDotCom: boolean
     /** For testing only. */
     queryRepoBatchChangeStats?: typeof _queryRepoBatchChangeStats
     /** For testing only. */
@@ -39,10 +42,12 @@ interface BatchChangeRepoPageProps extends ThemeProps {
     queryExternalChangesetWithFileDiffs?: typeof _queryExternalChangesetWithFileDiffs
 }
 
-export const BatchChangeRepoPage: React.FunctionComponent<React.PropsWithChildren<BatchChangeRepoPageProps>> = ({
+export const BatchChangeRepoPage: FC<BatchChangeRepoPageProps> = ({
     repo,
+    isSourcegraphDotCom,
+    authenticatedUser,
     queryRepoBatchChangeStats = _queryRepoBatchChangeStats,
-    ...context
+    ...props
 }) => {
     const repoDisplayName = displayRepoName(repo.name)
 
@@ -51,13 +56,31 @@ export const BatchChangeRepoPage: React.FunctionComponent<React.PropsWithChildre
     )
     const hasChangesets = stats?.changesetsStats.total
 
+    const canCreate: true | string = useMemo(() => {
+        if (isSourcegraphDotCom) {
+            return NO_ACCESS_SOURCEGRAPH_COM
+        }
+        if (!canWriteBatchChanges(authenticatedUser)) {
+            return NO_ACCESS_BATCH_CHANGES_WRITE
+        }
+        return true
+    }, [isSourcegraphDotCom, authenticatedUser])
+
+    useEffect(() => props.telemetryRecorder.recordEvent('repo.batchChanges', 'view'), [props.telemetryRecorder])
+
     return (
         <Page>
             <PageTitle title="Batch Changes" />
             <PageHeader
                 path={[{ icon: BatchChangesIcon, text: 'Batch Changes' }]}
                 headingElement="h1"
-                actions={hasChangesets ? undefined : <NewBatchChangeButton to="/batch-changes/create" />}
+                actions={
+                    <NewBatchChangeButton
+                        to="/batch-changes/create"
+                        canCreate={canCreate}
+                        telemetryRecorder={props.telemetryRecorder}
+                    />
+                }
                 description={
                     hasChangesets
                         ? undefined
@@ -78,7 +101,13 @@ export const BatchChangeRepoPage: React.FunctionComponent<React.PropsWithChildre
             ) : (
                 <div className="mb-3" />
             )}
-            <RepoBatchChanges viewerCanAdminister={true} repo={repo} {...context} />
+            <RepoBatchChanges
+                isSourcegraphDotCom={isSourcegraphDotCom}
+                viewerCanAdminister={true}
+                repo={repo}
+                canCreate={canCreate}
+                {...props}
+            />
         </Page>
     )
 }
@@ -94,9 +123,37 @@ const StatsBar: React.FunctionComponent<React.PropsWithChildren<StatsBarProps>> 
 }) => (
     <div className="d-flex flex-wrap align-items-center">
         <BatchChangeStatsTotalAction count={total} />
-        <ChangesetStatusOpen className={ACTION_CLASSNAMES} label={`${(draft + open).toString()} Open`} />
-        <ChangesetStatusUnpublished className={ACTION_CLASSNAMES} label={`${unpublished} Unpublished`} />
-        <ChangesetStatusClosed className={ACTION_CLASSNAMES} label={`${closed} Closed`} />
-        <ChangesetStatusMerged className={ACTION_CLASSNAMES} label={`${merged} Merged`} />
+        <ChangesetStatusOpen
+            className={ACTION_CLASSNAMES}
+            label={
+                <H4 className="font-weight-normal text-muted m-0">
+                    {draft + open} <VisuallyHidden>{pluralize('changeset', draft + open)}</VisuallyHidden> open
+                </H4>
+            }
+        />
+        <ChangesetStatusUnpublished
+            className={ACTION_CLASSNAMES}
+            label={
+                <H4 className="font-weight-normal text-muted m-0">
+                    {unpublished} <VisuallyHidden>{pluralize('changeset', unpublished)}</VisuallyHidden> unpublished
+                </H4>
+            }
+        />
+        <ChangesetStatusClosed
+            className={ACTION_CLASSNAMES}
+            label={
+                <H4 className="font-weight-normal text-muted m-0">
+                    {closed} <VisuallyHidden>{pluralize('changeset', closed)}</VisuallyHidden> closed
+                </H4>
+            }
+        />
+        <ChangesetStatusMerged
+            className={ACTION_CLASSNAMES}
+            label={
+                <H4 className="font-weight-normal text-muted m-0">
+                    {merged} <VisuallyHidden>{pluralize('changeset', merged)}</VisuallyHidden> merged
+                </H4>
+            }
+        />
     </div>
 )

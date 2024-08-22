@@ -11,15 +11,15 @@ import (
 	"time"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
-	secretmanagerpb "google.golang.org/genproto/googleapis/cloud/secretmanager/v1"
-
-	"github.com/sourcegraph/run"
+	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"github.com/googleapis/gax-go/v2"
 
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 const (
-	DefaultFile = "sg.secrets.json"
+	DefaultFile     = "sg.secrets.json"
+	LocalDevProject = "sourcegraph-local-dev"
 )
 
 var (
@@ -30,17 +30,64 @@ var (
 	externalSecretTTL = 24 * time.Hour
 )
 
+type FallbackFunc func(context.Context) (string, error)
+
+type secretManagerClient interface {
+	AccessSecretVersion(ctx context.Context, req *secretmanagerpb.AccessSecretVersionRequest, opts ...gax.CallOption) (*secretmanagerpb.AccessSecretVersionResponse, error)
+}
+
 // Store holds secrets regardless on their form, as long as they are marshallable in JSON.
 type Store struct {
 	filepath string
-	m        map[string]json.RawMessage
+	// persistedData holds secrets that should be persisted to filepath.
+	persistedData map[string]json.RawMessage
+
+	// externalData holds secrets that are fetched from external sources. This
+	// is NOT persisted to disk, as it should be fetched from the external source
+	// on every use for security.
+	externalData map[string]externalSecretValue
 
 	secretmanagerOnce sync.Once
-	secretmanager     *secretmanager.Client
+	secretmanager     secretManagerClient
 	secretmanagerErr  error
 }
 
 type storeKey struct{}
+
+// SecretErr is the error that occurs when we fail to get a secret. It contains the original
+// error as well as the secret key that failed to fetch.
+type SecretErr struct {
+	// Err is the original error
+	Err error
+	// Key is the secret key that failed to fetch
+	Key string
+}
+
+func (se SecretErr) Error() string {
+	return fmt.Sprintf("failed to get secret %q: %v", se.Key, se.Err)
+}
+
+// GoogleSecretErr is an error that occurs when we fail to fetch a secret from Google Secret Manger in a particular GCP Project.
+// It contains the key that failed to fetch, the original error and the GCP project name.
+type GoogleSecretErr struct {
+	SecretErr
+	// Project is the GCP project where we failed to fetch the secret
+	Project string
+}
+
+func (gse GoogleSecretErr) Error() string {
+	return fmt.Sprintf("google(%s): %s", gse.Project, gse.SecretErr.Error())
+}
+
+// CommandErr is an error that occurs when we fail to get a secret by executing some CLI Command.
+// It contains the original error as well as the secret key that failed to fetch.
+type CommandErr struct {
+	SecretErr
+}
+
+func (ce CommandErr) Error() string {
+	return fmt.Sprintf("command error: %v", ce.SecretErr.Error())
+}
 
 // FromContext fetches a store from context. In sg, a store is set in the command context
 // when sg starts - if the load fails, an error is printed and a store is not set.
@@ -58,7 +105,11 @@ func WithContext(ctx context.Context, store *Store) context.Context {
 
 // newStore returns an empty store that if saved, will be written at filepath.
 func newStore(filepath string) *Store {
-	return &Store{filepath: filepath, m: map[string]json.RawMessage{}}
+	return &Store{
+		filepath:      filepath,
+		persistedData: map[string]json.RawMessage{},
+		externalData:  map[string]externalSecretValue{},
+	}
 }
 
 // LoadFromFile deserialize from a file into a Store, returning an error if
@@ -74,13 +125,37 @@ func LoadFromFile(filepath string) (*Store, error) {
 	}
 	defer f.Close()
 	dec := json.NewDecoder(f)
-	return s, dec.Decode(&s.m)
+	if err := dec.Decode(&s.persistedData); err != nil {
+		// Ignore EOF which is returned when the file is empty, we just pretend the file isn't there.
+		// Note that invalid JSON might still return "unexpected EOF" and
+		// we let that one get through.
+		if !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+	}
+	var deletedExpired bool
+	for k := range s.persistedData {
+		// Migration: external secrets that were persisted before we stopped
+		// persisting external secrets
+		var value externalSecretValue
+		if err := s.Get(k, &value); err != nil {
+			continue
+		}
+		if !value.Fetched.IsZero() && value.Value != "" {
+			deletedExpired = true
+			delete(s.persistedData, k)
+		}
+	}
+	if deletedExpired {
+		return s, s.SaveFile()
+	}
+	return s, nil
 }
 
 // Write serializes the store content in the given writer.
 func (s *Store) Write(w io.Writer) error {
 	enc := json.NewEncoder(w)
-	return enc.Encode(s.m)
+	return enc.Encode(s.persistedData)
 }
 
 // SaveFile persists in a file the content of the store.
@@ -99,7 +174,7 @@ func (s *Store) Put(key string, data any) error {
 	if err != nil {
 		return err
 	}
-	s.m[key] = b
+	s.persistedData[key] = b
 	return nil
 }
 
@@ -114,13 +189,21 @@ func (s *Store) PutAndSave(key string, data any) error {
 
 // Get fetches a value from memory and uses the given target to deserialize it.
 func (s *Store) Get(key string, target any) error {
-	if v, ok := s.m[key]; ok {
+	if v, ok := s.persistedData[key]; ok {
 		return json.Unmarshal(v, target)
+	}
+	if v, ok := s.externalData[key]; ok {
+		// Must be an *externalSecretValue
+		if tv, ok := target.(*externalSecretValue); ok {
+			*tv = v
+			return nil
+		}
+		return errors.Newf("target must be *externalSecretValue, got %T", target)
 	}
 	return errors.Newf("%w: %s not found", ErrSecretNotFound, key)
 }
 
-func (s *Store) GetExternal(ctx context.Context, secret ExternalSecret) (string, error) {
+func (s *Store) GetExternal(ctx context.Context, secret ExternalSecret, fallbacks ...FallbackFunc) (string, error) {
 	var value externalSecretValue
 
 	// Check if we already have this secret
@@ -129,58 +212,64 @@ func (s *Store) GetExternal(ctx context.Context, secret ExternalSecret) (string,
 			return value.Value, nil
 		}
 
-		// If expired, remove the secret and fetch a new one.
-		_ = s.Remove(secret.id())
+		// If expired, fetch a new one. We don't need to remove anything because
+		// external secrets are only stored in-memory.
 		value = externalSecretValue{}
 	}
 
 	// Get secret from provider
-	var err error
-	switch secret.Provider {
+	client, err := s.getSecretmanagerClient(ctx)
+	if err != nil {
+		return "", err
+	}
+	var result *secretmanagerpb.AccessSecretVersionResponse
+	result, err = client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
+		Name: fmt.Sprintf("projects/%s/secrets/%s/versions/latest", secret.Project, secret.Name),
+	})
+	if err == nil {
+		value.Value = string(result.Payload.Data)
+	}
 
-	case ExternalProviderGCloud:
-		client, err := s.getSecretmanagerClient(ctx)
-		if err != nil {
-			return "", err
+	// Failed to get the secret normally, so lets try getting it with the fallback if it exists
+	if err != nil && len(fallbacks) > 0 {
+		for _, fallback := range fallbacks {
+			val, fallbackErr := fallback(ctx)
+
+			if fallbackErr != nil {
+				err = errors.Wrap(err, fallbackErr.Error())
+			} else {
+				value.Value = val
+				// Since we were able to get a secret using the fallback, we set the error to nil
+				// this also ensures that the fallback value is also saved to the store
+				err = nil
+				break
+			}
 		}
-		var result *secretmanagerpb.AccessSecretVersionResponse
-		result, err = client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
-			Name: fmt.Sprintf("projects/%s/secrets/%s/versions/latest", secret.Project, secret.Name),
-		})
-		if err == nil {
-			value.Value = string(result.Payload.Data)
-		}
-
-	case ExternalProvider1Pass:
-		value.Value, err = run.Cmd(ctx, "op read",
-			run.Arg(fmt.Sprintf("op://%s/%s/%s", secret.Project, secret.Name, secret.Field)),
-			`--account="team-sourcegraph.1password.com"`).
-			Run().String()
-
-	default:
-		return "", errors.Newf("Unknown secrets provider %q", secret.Provider)
 	}
 
 	if err != nil {
-		errMessaage := fmt.Sprintf("%s: failed to access secret %q from %q",
-			secret.Provider, secret.Name, secret.Project)
+		secretErr := SecretErr{Err: err, Key: secret.Name}
 		// Some secret providers use their respective CLI, if not found the user might not
 		// have run 'sg setup' to set up the relevant tool.
 		if strings.Contains(err.Error(), "command not found") {
-			errMessaage += "- you may need to run 'sg setup' again"
+			return "", CommandErr{SecretErr: secretErr}
 		}
-		return "", errors.Wrap(err, errMessaage)
+		return "", GoogleSecretErr{
+			SecretErr: secretErr,
+			Project:   secret.Project,
+		}
 	}
 
 	// Return and persist the fetched secret
 	value.Fetched = time.Now()
-	return value.Value, s.PutAndSave(secret.id(), &value)
+	s.externalData[secret.id()] = value
+	return value.Value, nil
 }
 
 // Remove deletes a value from memory.
 func (s *Store) Remove(key string) error {
-	if _, exists := s.m[key]; exists {
-		delete(s.m, key)
+	if _, exists := s.persistedData[key]; exists {
+		delete(s.persistedData, key)
 		return nil
 	}
 	return errors.Newf("%w: %s not found", ErrSecretNotFound, key)
@@ -188,15 +277,15 @@ func (s *Store) Remove(key string) error {
 
 // Keys returns out all keys
 func (s *Store) Keys() []string {
-	keys := make([]string, 0, len(s.m))
-	for key := range s.m {
+	keys := make([]string, 0, len(s.persistedData))
+	for key := range s.persistedData {
 		keys = append(keys, key)
 	}
 	return keys
 }
 
 // getSecretmanagerClient instantiates a Google Secrets Manager client once and returns it.
-func (s *Store) getSecretmanagerClient(ctx context.Context) (*secretmanager.Client, error) {
+func (s *Store) getSecretmanagerClient(ctx context.Context) (secretManagerClient, error) {
 	s.secretmanagerOnce.Do(func() {
 		var err error
 		s.secretmanager, err = secretmanager.NewClient(ctx)

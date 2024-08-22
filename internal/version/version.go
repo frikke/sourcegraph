@@ -19,7 +19,22 @@ var devTimestamp = strconv.FormatInt(time.Now().Unix(), 10) // build timestamp f
 // The version may not be semver-compatible, e.g. `insiders` or `65769_2020-06-05_9bd91a3`.
 var version = devVersion
 
+var LastMinorVersionInMajorRelease = map[int]int{
+	3: 43, // 3.43.0 -> 4.0.0
+	4: 5,  // 4.5 -> 5.0.0,
+}
+
 func init() {
+	versionFromFile, err := os.ReadFile("/version.txt")
+	if err == nil {
+		version = string(versionFromFile)
+	}
+
+	timestampFromFile, err := os.ReadFile("/timestamp.txt")
+	if err == nil && len(timestampFromFile) > 0 {
+		timestamp = string(timestampFromFile)
+	}
+
 	exportedVersion := expvar.NewString("sourcegraph.version")
 	exportedVersion.Set(version)
 }
@@ -39,14 +54,14 @@ func Mock(mockVersion string) {
 	version = mockVersion
 }
 
-// MockTimeStamp is used by tests to mock the current build timestamp
-func MockTimestamp(mockTimestamp string) {
-	timestamp = mockTimestamp
-}
-
 // timestamp is the build timestamp configured at build time via ldflags like this:
 // -ldflags "-X github.com/sourcegraph/sourcegraph/internal/version.timestamp=$UNIX_SECONDS"
 var timestamp = devTimestamp
+
+// mockTimeStamp is used by tests to mock the current build timestamp
+func mockTimestamp(mockTimestamp string) {
+	timestamp = mockTimestamp
+}
 
 // HowLongOutOfDate returns a time in months since this build of Sourcegraph was created. It is
 // based on a constant baked into the Go binary at build time.

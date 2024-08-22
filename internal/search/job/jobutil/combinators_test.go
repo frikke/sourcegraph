@@ -3,6 +3,7 @@ package jobutil
 import (
 	"context"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,7 +21,7 @@ func TestLimitJob(t *testing.T) {
 	t.Run("only send limit", func(t *testing.T) {
 		mockJob := mockjob.NewMockJob()
 		mockJob.RunFunc.SetDefaultHook(func(_ context.Context, _ job.RuntimeClients, s streaming.Sender) (*search.Alert, error) {
-			for i := 0; i < 10; i++ {
+			for range 10 {
 				s.Send(streaming.SearchEvent{
 					Results: []result.Match{&result.FileMatch{}},
 				})
@@ -45,7 +46,7 @@ func TestLimitJob(t *testing.T) {
 	t.Run("send partial event", func(t *testing.T) {
 		mockJob := mockjob.NewMockJob()
 		mockJob.RunFunc.SetDefaultHook(func(ctx context.Context, _ job.RuntimeClients, s streaming.Sender) (*search.Alert, error) {
-			for i := 0; i < 10; i++ {
+			for range 10 {
 				s.Send(streaming.SearchEvent{
 					Results: []result.Match{
 						&result.FileMatch{},
@@ -73,7 +74,7 @@ func TestLimitJob(t *testing.T) {
 	t.Run("cancel after limit", func(t *testing.T) {
 		mockJob := mockjob.NewMockJob()
 		mockJob.RunFunc.SetDefaultHook(func(ctx context.Context, _ job.RuntimeClients, s streaming.Sender) (*search.Alert, error) {
-			for i := 0; i < 10; i++ {
+			for range 10 {
 				select {
 				case <-ctx.Done():
 					return nil, nil
@@ -101,8 +102,8 @@ func TestLimitJob(t *testing.T) {
 	})
 
 	t.Run("NewLimitJob propagates noop", func(t *testing.T) {
-		job := NewLimitJob(10, NewNoopJob())
-		require.Equal(t, NewNoopJob(), job)
+		j := NewLimitJob(10, NewNoopJob())
+		require.Equal(t, NewNoopJob(), j)
 	})
 }
 
@@ -119,23 +120,26 @@ func TestTimeoutJob(t *testing.T) {
 	})
 
 	t.Run("NewTimeoutJob propagates noop", func(t *testing.T) {
-		job := NewTimeoutJob(10*time.Second, NewNoopJob())
-		require.Equal(t, NewNoopJob(), job)
+		j := NewTimeoutJob(10*time.Second, NewNoopJob())
+		require.Equal(t, NewNoopJob(), j)
 	})
 }
 
 func TestParallelJob(t *testing.T) {
 	t.Run("jobs run in parallel", func(t *testing.T) {
 		waiter := mockjob.NewMockJob()
+		// Weird pattern, but wait until we have three things blocking.
+		// This tests that all three jobs are, in fact, running concurrently.
+		var wg sync.WaitGroup
+		wg.Add(3)
 		waiter.RunFunc.SetDefaultHook(func(ctx context.Context, _ job.RuntimeClients, _ streaming.Sender) (*search.Alert, error) {
-			time.Sleep(10 * time.Millisecond)
+			wg.Done()
+			wg.Wait()
 			return nil, nil
 		})
 		parallelJob := NewParallelJob(waiter, waiter, waiter)
-		start := time.Now()
 		_, err := parallelJob.Run(context.Background(), job.RuntimeClients{}, nil)
 		require.NoError(t, err)
-		require.WithinDuration(t, time.Now(), start.Add(20*time.Millisecond), 10*time.Millisecond)
 	})
 
 	t.Run("errors are aggregated", func(t *testing.T) {
@@ -180,7 +184,7 @@ func TestSequentialJob(t *testing.T) {
 	// Setup: A child job that sends up to 10 results.
 	mockJob := mockjob.NewMockJob()
 	mockJob.RunFunc.SetDefaultHook(func(ctx context.Context, _ job.RuntimeClients, s streaming.Sender) (*search.Alert, error) {
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()

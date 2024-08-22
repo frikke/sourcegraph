@@ -2,16 +2,17 @@ import React, { useCallback, useMemo, useEffect } from 'react'
 
 import classNames from 'classnames'
 
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import { Modal, Button, Checkbox, H3 } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../auth'
+import type { AuthenticatedUser } from '../../auth'
 
-import { NotebookShareOptionsDropdown, ShareOption } from './NotebookShareOptionsDropdown'
+import { NotebookShareOptionsDropdown, type ShareOption } from './NotebookShareOptionsDropdown'
 
 import styles from './ShareNotebookModal.module.scss'
 
-interface ShareNotebookModalProps extends TelemetryProps {
+interface ShareNotebookModalProps extends TelemetryProps, TelemetryV2Props {
     isSourcegraphDotCom: boolean
     selectedShareOption: ShareOption
     setSelectedShareOption: (option: ShareOption) => void
@@ -23,7 +24,7 @@ interface ShareNotebookModalProps extends TelemetryProps {
 
 function getSelectedShareOptionDescription(shareOption: ShareOption, isSourcegraphDotCom: boolean): string {
     if (shareOption.namespaceType === 'User') {
-        const withAccess = isSourcegraphDotCom ? 'on Sourcegraph Cloud' : 'with access to the Sourcegraph instance'
+        const withAccess = isSourcegraphDotCom ? 'on Sourcegraph.com' : 'with access to the Sourcegraph instance'
         return shareOption.isPublic
             ? `Everyone ${withAccess} can view the notebook, but only you can edit it`
             : 'Only you can view and edit the notebook'
@@ -40,19 +41,21 @@ export const ShareNotebookModal: React.FunctionComponent<React.PropsWithChildren
     authenticatedUser,
     telemetryService,
     onUpdateVisibility,
+    telemetryRecorder,
 }) => {
     useEffect(() => {
         if (isOpen) {
             telemetryService.log('SearchNotebookShareModalOpened')
+            telemetryRecorder.recordEvent('notebook.shareModal', 'open')
         }
-    }, [isOpen, telemetryService])
+    }, [isOpen, telemetryService, telemetryRecorder])
 
     const shareLabelId = 'shareNotebookId'
 
-    const description = useMemo(() => getSelectedShareOptionDescription(selectedShareOption, isSourcegraphDotCom), [
-        selectedShareOption,
-        isSourcegraphDotCom,
-    ])
+    const description = useMemo(
+        () => getSelectedShareOptionDescription(selectedShareOption, isSourcegraphDotCom),
+        [selectedShareOption, isSourcegraphDotCom]
+    )
 
     const onDoneClick = useCallback((): void => {
         onUpdateVisibility(selectedShareOption.isPublic, selectedShareOption.namespaceId)
@@ -66,6 +69,7 @@ export const ShareNotebookModal: React.FunctionComponent<React.PropsWithChildren
                 <NotebookShareOptionsDropdown
                     isSourcegraphDotCom={isSourcegraphDotCom}
                     telemetryService={telemetryService}
+                    telemetryRecorder={telemetryRecorder}
                     authenticatedUser={authenticatedUser}
                     selectedShareOption={selectedShareOption}
                     onSelectShareOption={setSelectedShareOption}
@@ -85,7 +89,7 @@ export const ShareNotebookModal: React.FunctionComponent<React.PropsWithChildren
                             })
                         }
                         label={`Everyone ${
-                            isSourcegraphDotCom ? 'on Sourcegraph Cloud' : 'with access to the Sourcegraph instance'
+                            isSourcegraphDotCom ? 'on Sourcegraph.com' : 'with access to the Sourcegraph instance'
                         } can view the notebook`}
                     />
                 )}

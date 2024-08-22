@@ -1,9 +1,7 @@
-import { Meta, Story } from '@storybook/react'
+import type { Meta, StoryFn } from '@storybook/react'
 import { noop } from 'lodash'
 
-import { BrandedStory } from '@sourcegraph/branded/src/components/BrandedStory'
-import webStyles from '@sourcegraph/web/src/SourcegraphWebApp.scss'
-
+import { BrandedStory } from '../../stories/BrandedStory'
 import { Link } from '../Link'
 
 import { Menu, MenuButton, MenuDivider, MenuHeader, MenuItem, MenuLink, MenuList } from '.'
@@ -11,24 +9,16 @@ import { Menu, MenuButton, MenuDivider, MenuHeader, MenuItem, MenuLink, MenuList
 const config: Meta = {
     title: 'wildcard/Menu',
 
-    decorators: [
-        story => (
-            <BrandedStory styles={webStyles}>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>
-        ),
-    ],
+    decorators: [story => <BrandedStory>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>],
 
     parameters: {
         component: Menu,
-        chromatic: {
-            enableDarkMode: true,
-            disableSnapshot: false,
-        },
     },
 }
 
 export default config
 
-export const MenuExample: Story = () => (
+export const MenuExample: StoryFn = () => (
     <Menu>
         <MenuButton variant="primary" outline={true}>
             Actions <span aria-hidden={true}>▾</span>

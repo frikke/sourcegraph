@@ -5,13 +5,13 @@ import { VSCodeProgressRing } from '@vscode/webview-ui-toolkit/react'
 import classNames from 'classnames'
 import { catchError } from 'rxjs/operators'
 
-import { QueryState } from '@sourcegraph/search'
 import { fetchTreeEntries } from '@sourcegraph/shared/src/backend/repo'
 import { displayRepoName } from '@sourcegraph/shared/src/components/RepoLink'
-import { RepositoryMatch } from '@sourcegraph/shared/src/search/stream'
+import type { QueryState } from '@sourcegraph/shared/src/search'
+import type { RepositoryMatch } from '@sourcegraph/shared/src/search/stream'
 import { Icon, PageHeader, useObservable, H4, Text, Button } from '@sourcegraph/wildcard'
 
-import { WebviewPageProps } from '../platform/context'
+import type { WebviewPageProps } from '../platform/context'
 
 import styles from './RepoView.module.scss'
 
@@ -41,7 +41,7 @@ export const RepoView: React.FunctionComponent<React.PropsWithChildren<RepoViewP
                     repoName: repositoryMatch.repository,
                     commitID: '',
                     revision: repositoryMatch.branches?.[0] ?? 'HEAD',
-                    filePath: directoryStack.length > 0 ? directoryStack[directoryStack.length - 1] : '',
+                    filePath: directoryStack.length > 0 ? directoryStack.at(-1)! : '',
                     requestGraphQL: platformContext.requestGraphQL,
                 }).pipe(
                     catchError(error => {
@@ -58,7 +58,7 @@ export const RepoView: React.FunctionComponent<React.PropsWithChildren<RepoViewP
         const newDirectoryStack = directoryStack.slice(0, -1)
         setQueryState({
             query: `repo:^${repositoryMatch.repository}$ ${
-                newDirectoryStack.length > 0 ? `file:^${newDirectoryStack[newDirectoryStack.length - 1]}` : ''
+                newDirectoryStack.length > 0 ? `file:^${newDirectoryStack.at(-1)}` : ''
             }`,
         })
         setDirectoryStack(newDirectoryStack)

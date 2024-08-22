@@ -1,6 +1,7 @@
 import { render } from 'react-dom'
+import { RouterProvider, createMemoryRouter } from 'react-router-dom'
 
-import { AuthenticatedUser } from '@sourcegraph/shared/src/auth'
+import type { AuthenticatedUser } from '@sourcegraph/shared/src/auth'
 import polyfillEventSource from '@sourcegraph/shared/src/polyfills/vendor/eventSource'
 import { AnchorLink, setLinkComponent } from '@sourcegraph/wildcard'
 
@@ -25,8 +26,8 @@ setLinkComponent(AnchorLink)
 
 let isDarkTheme = false
 let instanceURL = 'https://sourcegraph.com/'
-let isGlobbingEnabled = false
 let accessToken: string | null = null
+let customRequestHeaders: Record<string, string> | null = {}
 let anonymousUserId: string
 let pluginVersion: string
 let initialSearch: Search | null = null
@@ -64,35 +65,67 @@ window.callJS = handleRequest
 
 export function renderReactApp(): void {
     const node = document.querySelector('#main') as HTMLDivElement
-    render(
-        <App
-            // Make sure we recreate the React app when the instance URL or access token changes to
-            // avoid showing stale data.
-            key={`${instanceURL}-${accessToken}-${errorRetryIndex}`}
-            isDarkTheme={isDarkTheme}
-            instanceURL={instanceURL}
-            isGlobbingEnabled={isGlobbingEnabled}
-            accessToken={accessToken}
-            initialSearch={initialSearch}
-            onOpen={onOpen}
-            onPreviewChange={onPreviewChange}
-            onPreviewClear={onPreviewClear}
-            onSearchError={onSearchError}
-            backendVersion={backendVersion}
-            authenticatedUser={authenticatedUser}
-            telemetryService={telemetryService}
-        />,
-        node
-    )
+    const routes = [
+        {
+            path: '/*',
+            element: (
+                <App
+                    // Make sure we recreate the React app when the instance URL or access token changes to
+                    // avoid showing stale data.
+                    key={`${instanceURL}-${accessToken}-${errorRetryIndex}`}
+                    isDarkTheme={isDarkTheme}
+                    instanceURL={instanceURL}
+                    accessToken={accessToken}
+                    customRequestHeaders={customRequestHeaders}
+                    initialSearch={initialSearch}
+                    onOpen={onOpen}
+                    onPreviewChange={onPreviewChange}
+                    onPreviewClear={onPreviewClear}
+                    onSearchError={onSearchError}
+                    backendVersion={backendVersion}
+                    authenticatedUser={authenticatedUser}
+                    telemetryService={telemetryService}
+                />
+            ),
+        },
+    ]
+    const router = createMemoryRouter(routes, {
+        initialEntries: ['/'],
+    })
+
+    render(<RouterProvider router={router} />, node)
 }
 
 export function applyConfig(config: PluginConfig): void {
     instanceURL = config.instanceURL
-    isGlobbingEnabled = config.isGlobbingEnabled || false
     accessToken = config.accessToken || null
+    customRequestHeaders = parseCustomRequestHeadersString(config.customRequestHeadersAsString)
     anonymousUserId = config.anonymousUserId || 'no-user-id'
     pluginVersion = config.pluginVersion
-    polyfillEventSource(accessToken ? { Authorization: `token ${accessToken}` } : {})
+    polyfillEventSource(
+        { ...(accessToken ? { Authorization: `token ${accessToken}` } : {}), ...customRequestHeaders },
+        undefined
+    )
+}
+
+function parseCustomRequestHeadersString(headersString: string | null): Record<string, string> | null {
+    const result: Record<string, string> = {}
+    if (!headersString) {
+        return null
+    }
+    const headersArray = headersString.split(',')
+    if (headersArray.length % 2 !== 0) {
+        return null
+    }
+    for (let index = 0; index < headersArray.length; index += 2) {
+        const name = headersArray[index].trim()
+        const value = headersArray[index + 1].trim()
+        // Skip invalid keys
+        if (name.match(/^[\w-]+$/)) {
+            result[name] = value
+        }
+    }
+    return result
 }
 
 export function applyTheme(theme: Theme, rootElement: Element = document.documentElement): void {
@@ -140,7 +173,11 @@ export function applyTheme(theme: Theme, rootElement: Element = document.documen
 
 export async function updateVersionAndAuthDataFromServer(): Promise<void> {
     try {
-        const { site, currentUser } = await getSiteVersionAndAuthenticatedUser(instanceURL, accessToken)
+        const { site, currentUser } = await getSiteVersionAndAuthenticatedUser(
+            instanceURL,
+            accessToken,
+            customRequestHeaders
+        )
         authenticatedUser = currentUser
         backendVersion = site?.productVersion || null
         isServerAccessSuccessful = true
@@ -168,6 +205,10 @@ export function getAccessToken(): string | null {
 
 export function getInstanceURL(): string {
     return instanceURL
+}
+
+export function getCustomRequestHeaders(): Record<string, string> | null {
+    return customRequestHeaders
 }
 
 export function wasServerAccessSuccessful(): boolean | null {

@@ -75,21 +75,27 @@ export type AlphabetKey =
 
 export type NumericKey = '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9'
 
-export type ModifierKey =
-    | 'Alt'
-    | 'AltGraph'
-    | 'CapsLock'
-    | 'Control'
-    | 'Fn'
-    | 'FnLock'
-    | 'Hyper'
-    | 'Meta'
-    | 'NumLock'
-    | 'ScrollLock'
-    | 'Shift'
-    | 'Super'
-    | 'Symbol'
-    | 'SymbolLock'
+export const MODIFIER_KEYS = [
+    'Alt',
+    'AltGraph',
+    'CapsLock',
+    'Control',
+    'Fn',
+    'FnLock',
+    'Hyper',
+    'Meta',
+    'Shift',
+    'Super',
+    'Symbol',
+    // We are explicitly excluding these keys because they usually should not impact
+    // they keys used for keyboard shortcuts. We've gotten reports that single letter
+    // keyboard shortcuts are not working as expected when e.g. num lock is on.
+    // 'SymbolLock',
+    // 'NumLock',
+    // 'ScrollLock',
+] as const
+
+export type ModifierKey = typeof MODIFIER_KEYS[number]
 
 export type SymbolKey =
     | '~'

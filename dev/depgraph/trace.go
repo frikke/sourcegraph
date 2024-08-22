@@ -8,14 +8,16 @@ import (
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
-	"github.com/sourcegraph/sourcegraph/dev/depgraph/internal/graph"
+	depgraph "github.com/sourcegraph/sourcegraph/dev/depgraph/internal/graph"
 	"github.com/sourcegraph/sourcegraph/dev/depgraph/internal/visualization"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
-var traceFlagSet = flag.NewFlagSet("depgraph trace", flag.ExitOnError)
-var dependencyMaxDepthFlag = traceFlagSet.Int("dependency-max-depth", 1, "Show transitive dependencies up to this depth (default 1)")
-var dependentMaxDepthFlag = traceFlagSet.Int("dependent-max-depth", 1, "Show transitive dependents up to this depth (default 1)")
+var (
+	traceFlagSet           = flag.NewFlagSet("depgraph trace", flag.ExitOnError)
+	dependencyMaxDepthFlag = traceFlagSet.Int("dependency-max-depth", 1, "Show transitive dependencies up to this depth (default 1)")
+	dependentMaxDepthFlag  = traceFlagSet.Int("dependent-max-depth", 1, "Show transitive dependents up to this depth (default 1)")
+)
 
 var traceCommand = &ffcli.Command{
 	Name:       "trace",
@@ -36,7 +38,7 @@ func trace(ctx context.Context, args []string) error {
 		return err
 	}
 
-	graph, err := graph.Load(root)
+	graph, err := depgraph.Load(root)
 	if err != nil {
 		return err
 	}
@@ -52,7 +54,7 @@ func trace(ctx context.Context, args []string) error {
 // traceWalkGraph traverses the given dependency graph in both directions and returns a
 // set of packages and edges (separated by traversal direction) forming the dependency
 // graph around the given blessed package.
-func traceWalkGraph(graph *graph.DependencyGraph, pkg string, dependencyMaxDepth, dependentMaxDepth int) (packages []string, dependencyEdges, dependentEdges map[string][]string) {
+func traceWalkGraph(graph *depgraph.DependencyGraph, pkg string, dependencyMaxDepth, dependentMaxDepth int) (packages []string, dependencyEdges, dependentEdges map[string][]string) {
 	dependencyPackages, dependencyEdges := traceTraverse(pkg, graph.Dependencies, dependencyMaxDepth)
 	dependentPackages, dependentEdges := traceTraverse(pkg, graph.Dependents, dependentMaxDepth)
 	return append(dependencyPackages, dependentPackages...), dependencyEdges, dependentEdges

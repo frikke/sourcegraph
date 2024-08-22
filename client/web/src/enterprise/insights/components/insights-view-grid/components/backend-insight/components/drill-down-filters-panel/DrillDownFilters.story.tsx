@@ -1,10 +1,10 @@
 import { useRef } from 'react'
 
-import { Meta, Story } from '@storybook/react'
+import type { Meta, StoryFn } from '@storybook/react'
 
 import { WebStory } from '../../../../../../../../components/WebStory'
 import { SeriesSortDirection, SeriesSortMode } from '../../../../../../../../graphql-operations'
-import { InsightFilters } from '../../../../../../core'
+import type { InsightFilters } from '../../../../../../core'
 import { DrillDownFiltersPopover } from '../drill-down-filters-popover/DrillDownFiltersPopover'
 
 const defaultStory: Meta = {
@@ -14,14 +14,15 @@ const defaultStory: Meta = {
 
 export default defaultStory
 
-export const DrillDownPopover: Story = () => {
+export const DrillDownPopover: StoryFn = () => {
     const exampleReference = useRef(null)
     const initialFiltersValue: InsightFilters = {
         excludeRepoRegexp: 'EXCLUDE',
         includeRepoRegexp: '',
         context: '',
         seriesDisplayOptions: {
-            limit: '20',
+            limit: 20,
+            numSamples: null,
             sortOptions: {
                 direction: SeriesSortDirection.DESC,
                 mode: SeriesSortMode.RESULT_COUNT,
@@ -35,6 +36,7 @@ export const DrillDownPopover: Story = () => {
             anchor={exampleReference}
             initialFiltersValue={initialFiltersValue}
             originalFiltersValue={initialFiltersValue}
+            isNumSamplesFilterAvailable={true}
             onFilterChange={log('onFilterChange')}
             onFilterSave={log('onFilterSave')}
             onInsightCreate={log('onInsightCreate')}

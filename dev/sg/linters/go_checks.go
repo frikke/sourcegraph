@@ -1,37 +1,15 @@
 package linters
 
 import (
-	"bytes"
 	"context"
-	"io"
 	"strings"
-
-	"github.com/sourcegraph/run"
 
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/repo"
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/std"
-	"github.com/sourcegraph/sourcegraph/dev/sg/root"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
-var (
-	goFmt          = runScript("Go format", "dev/check/gofmt.sh")
-	goDBConnImport = runScript("Go pkg/database/dbconn", "dev/check/go-dbconn-import.sh")
-)
-
-func goLint() *linter {
-	return runCheck("Go lint", func(ctx context.Context, out *std.Output, args *repo.State) error {
-		return root.Run(run.Bash(ctx, "dev/check/go-lint.sh")).
-			Map(func(ctx context.Context, line []byte, dst io.Writer) (int, error) {
-				// Ignore go mod download stuff
-				if bytes.HasPrefix(line, []byte("go: downloading ")) {
-					return 0, nil
-				}
-				return dst.Write(line)
-			}).
-			StreamLines(out.Write)
-	})
-}
+var goDBConnImport = runScript("Go pkg/database/dbconn", "dev/check/go-dbconn-import.sh")
 
 func lintSGExit() *linter {
 	return runCheck("Lint dev/sg exit signals", func(ctx context.Context, out *std.Output, s *repo.State) error {
@@ -82,24 +60,29 @@ func lintLoggingLibraries() *linter {
 		},
 		AllowedFiles: []string{
 			// Let everything in dev use whatever they want
-			"dev", "enterprise/dev",
+			"dev",
 			// Banned imports will match on the linter here
 			"dev/sg/linters",
 			// We allow one usage of a direct zap import here
 			"internal/observation/fields.go",
+			// Inits old loggers
+			"internal/logging/main.go",
 			// Dependencies require direct usage of zap
 			"cmd/frontend/internal/app/otlpadapter",
-			// Not worth fixing the deprecated package
-			"cmd/frontend/internal/usagestatsdeprecated",
+			// Legacy and special case handling of panics in background routines
+			"lib/background/goroutine.go",
+			// Need to make a logger shim for the OpenFGA server
+			"lib/managedservicesplatform/iam/openfga_server.go",
 		},
 		ErrorFunc: func(bannedImport string) error {
 			return errors.Newf(`banned usage of '%s': use "github.com/sourcegraph/log" instead`,
 				bannedImport)
 		},
-		HelpText: "Learn more about logging and why some libraries are banned: https://docs.sourcegraph.com/dev/how-to/add_logging",
+		HelpText: "Learn more about logging and why some libraries are banned: https://docs-legacy.sourcegraph.com/dev/how-to/add_logging",
 	})
 }
 
+// keep up to date with dev/linters/tracinglibraries/tracinglibraries.go
 func lintTracingLibraries() *linter {
 	return newUsageLinter("Tracing libraries linter", usageLinterOptions{
 		Target: "**/*.go",

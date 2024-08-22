@@ -1,16 +1,16 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 
-import { Redirect } from 'react-router'
+import { Navigate } from 'react-router-dom'
 
 import { logger } from '@sourcegraph/common'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
-import { CardBody, Card, H2, Text } from '@sourcegraph/wildcard'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { Text, Container } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../auth'
-import { SignUpArguments, SignUpForm } from '../../auth/SignUpForm'
-import { BrandLogo } from '../../components/branding/BrandLogo'
-import { SourcegraphContext } from '../../jscontext'
-import { submitTrialRequest } from '../../marketing/backend'
+import type { AuthenticatedUser } from '../../auth'
+import { AuthPageWrapper } from '../../auth/AuthPageWrapper'
+import { type SignUpArguments, SignUpForm } from '../../auth/SignUpForm'
+import { PageTitle } from '../../components/PageTitle'
+import type { SourcegraphContext } from '../../jscontext'
 import { PageRoutes } from '../../routes.constants'
 
 import styles from './SiteInitPage.module.scss'
@@ -41,13 +41,10 @@ const initSite = async (args: SignUpArguments): Promise<void> => {
         const text = await response.text()
         throw new Error(text)
     }
-    if (args.requestedTrial) {
-        submitTrialRequest(args.email)
-    }
     window.location.replace('/site-admin')
 }
 
-interface Props extends ThemeProps {
+interface Props extends TelemetryV2Props {
     authenticatedUser: Pick<AuthenticatedUser, 'username'> | null
 
     /**
@@ -55,10 +52,7 @@ interface Props extends ThemeProps {
      * `window.context.needsSiteInit` is used.
      */
     needsSiteInit?: typeof window.context.needsSiteInit
-    context: Pick<
-        SourcegraphContext,
-        'sourcegraphDotComMode' | 'authProviders' | 'experimentalFeatures' | 'authMinPasswordLength'
-    >
+    context: Pick<SourcegraphContext, 'authPasswordPolicy' | 'authMinPasswordLength'>
 }
 
 /**
@@ -67,41 +61,57 @@ interface Props extends ThemeProps {
  */
 export const SiteInitPage: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
     authenticatedUser,
-    isLightTheme,
     needsSiteInit = window.context.needsSiteInit,
     context,
+    telemetryRecorder,
 }) => {
+    // This page is never shown on dotcom, to keep the API surface
+    // of this component clean, we don't expose this option.
+    const sourcegraphDotComMode = false
+
+    useEffect(() => {
+        if (needsSiteInit) {
+            telemetryRecorder.recordEvent('admin.siteInit', 'view')
+        }
+    }, [telemetryRecorder, needsSiteInit])
+
     if (!needsSiteInit) {
-        return <Redirect to={PageRoutes.Search} />
+        return <Navigate to={PageRoutes.Search} replace={true} />
     }
 
     return (
-        <div className={styles.siteInitPage}>
-            <Card className={styles.content}>
-                <CardBody className="p-4">
-                    <BrandLogo className="w-100 mb-3" isLightTheme={isLightTheme} variant="logo" />
-                    {authenticatedUser ? (
-                        // If there's already a user but the site is not initialized, then the we're in an
-                        // unexpected state, likely because of a previous bug or because someone manually modified
-                        // the site_config DB table.
-                        <Text>
+        <>
+            <PageTitle title="Site initialization" />
+            <AuthPageWrapper
+                title="Welcome to Sourcegraph"
+                description="Create an admin account to get started"
+                sourcegraphDotComMode={sourcegraphDotComMode}
+                className={styles.wrapper}
+            >
+                {authenticatedUser ? (
+                    // If there's already a user but the site is not initialized, then the we're in an
+                    // unexpected state, likely because of a previous bug or because someone manually modified
+                    // the site_config DB table.
+                    <Container>
+                        <Text className="mb-0">
                             You're signed in as <strong>{authenticatedUser.username}</strong>. A site admin must
                             initialize Sourcegraph before you can continue.
                         </Text>
-                    ) : (
-                        <>
-                            <H2 className="site-init-page__header">Welcome</H2>
-                            <Text>Create an admin account to start using Sourcegraph.</Text>
-                            <SignUpForm
-                                className="w-100"
-                                buttonLabel="Create admin account & continue"
-                                onSignUp={initSite}
-                                context={context}
-                            />
-                        </>
-                    )}
-                </CardBody>
-            </Card>
-        </div>
+                    </Container>
+                ) : (
+                    <Container>
+                        <SignUpForm
+                            className="w-100"
+                            buttonLabel="Create admin account and continue"
+                            onSignUp={initSite}
+                            // This page is never shown on dotcom, to keep the API surface
+                            // of this component clean, we don't expose this option.
+                            context={{ ...context, sourcegraphDotComMode, authProviders: [] }}
+                            telemetryRecorder={telemetryRecorder}
+                        />
+                    </Container>
+                )}
+            </AuthPageWrapper>
+        </>
     )
 }

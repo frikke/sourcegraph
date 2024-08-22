@@ -3,6 +3,7 @@ package bk
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -16,12 +17,8 @@ import (
 	"github.com/sourcegraph/sourcegraph/lib/output"
 )
 
-// https://buildkite.com/sourcegraph
+// BuildkiteOrg is a Sourcegraph org in Buildkite. See: is https://buildkite.com/sourcegraph
 const BuildkiteOrg = "sourcegraph"
-
-type buildkiteSecrets struct {
-	Token string `json:"token"`
-}
 
 type Build struct {
 	buildkite.Build
@@ -44,26 +41,22 @@ func retrieveToken(ctx context.Context, out *std.Output) (string, error) {
 		return tok, nil
 	}
 
-	sec, err := secrets.FromContext(ctx)
+	store, err := secrets.FromContext(ctx)
 	if err != nil {
 		return "", err
 	}
-	bkSecrets := buildkiteSecrets{}
-	err = sec.Get("buildkite", &bkSecrets)
-	if errors.Is(err, secrets.ErrSecretNotFound) {
-		str, err := getTokenFromUser(out)
-		if err != nil {
-			return "", nil
-		}
-		if err := sec.PutAndSave("buildkite", buildkiteSecrets{Token: str}); err != nil {
-			return "", err
-		}
-		return str, nil
-	}
+
+	token, err := store.GetExternal(ctx, secrets.ExternalSecret{
+		Project: secrets.LocalDevProject,
+		Name:    "SG_BUILDKITE_TOKEN",
+	}, func(_ context.Context) (string, error) {
+		return getTokenFromUser(out)
+	})
+
 	if err != nil {
 		return "", err
 	}
-	return bkSecrets.Token, nil
+	return token, nil
 }
 
 // getTokenFromUser prompts the user for a slack OAuth token.
@@ -94,6 +87,7 @@ func NewClient(ctx context.Context, out *std.Output) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	config, err := buildkite.NewTokenConfig(token, false)
 	if err != nil {
 		return nil, errors.Newf("failed to init buildkite config: %w", err)
@@ -105,7 +99,7 @@ func NewClient(ctx context.Context, out *std.Output) (*Client, error) {
 // If no builds are found, an error will be returned.
 func (c *Client) GetMostRecentBuild(ctx context.Context, pipeline, branch string) (*buildkite.Build, error) {
 	builds, _, err := c.bk.Builds.ListByPipeline(BuildkiteOrg, pipeline, &buildkite.BuildsListOptions{
-		Branch: branch,
+		Branch: []string{branch},
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "404 Not Found") {
@@ -127,7 +121,7 @@ func (c *Client) GetBuildByNumber(ctx context.Context, pipeline string, number s
 	b, _, err := c.bk.Builds.Get(BuildkiteOrg, pipeline, number, nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "404 Not Found") {
-			return nil, errors.New("no build found")
+			return nil, errors.Newf("build %s not found on pipeline %q", number, pipeline)
 		}
 		return nil, err
 	}
@@ -155,9 +149,6 @@ func (c *Client) GetBuildByCommit(ctx context.Context, pipeline string, commit s
 func (c *Client) ListArtifactsByBuildNumber(ctx context.Context, pipeline string, number string) ([]buildkite.Artifact, error) {
 	artifacts, _, err := c.bk.Artifacts.ListByBuild(BuildkiteOrg, pipeline, number, nil)
 	if err != nil {
-		return nil, err
-	}
-	if err != nil {
 		if strings.Contains(err.Error(), "404 Not Found") {
 			return nil, errors.New("no artifacts because no build found")
 		}
@@ -165,6 +156,44 @@ func (c *Client) ListArtifactsByBuildNumber(ctx context.Context, pipeline string
 	}
 
 	return artifacts, nil
+}
+
+// ListArtifactsByJob queries the Buildkite API and retrieves all the artifacts for a particular job
+func (c *Client) ListArtifactsByJob(ctx context.Context, pipeline string, buildNumber string, jobID string) ([]buildkite.Artifact, error) {
+	artifacts, _, err := c.bk.Artifacts.ListByJob(BuildkiteOrg, pipeline, buildNumber, jobID, nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "404 Not Found") {
+			return nil, errors.New("no artifacts because no build or job found")
+		}
+		return nil, err
+	}
+
+	return artifacts, nil
+}
+
+// ListBuilds returns a list of all the builds for a given pipeline and a given status
+func (c *Client) ListBuilds(ctx context.Context, pipeline string, status string) ([]buildkite.Build, error) {
+	builds, _, err := c.bk.Builds.ListByPipeline(BuildkiteOrg, pipeline, &buildkite.BuildsListOptions{
+		State: []string{status},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return builds, nil
+}
+
+// DownloadArtifact downloads the Buildkite artifact into the provider io.Writer
+func (c *Client) DownloadArtifact(artifact buildkite.Artifact, w io.Writer) error {
+	url := artifact.DownloadURL
+	if url == nil {
+		return errors.New("unable to download artifact, nil download url")
+	}
+	_, err := c.bk.Artifacts.DownloadArtifactByURL(*url, w)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // GetJobAnnotationByBuildNumber retrieves all annotations that are present on a build and maps them to the job ID that the
@@ -176,7 +205,7 @@ func (c *Client) GetJobAnnotationsByBuildNumber(ctx context.Context, pipeline st
 		return nil, err
 	}
 
-	var result JobAnnotations = make(JobAnnotations, 0)
+	result := make(JobAnnotations, 0)
 	for _, a := range artifacts {
 		if strings.Contains(*a.Dirname, "annotations") && strings.HasSuffix(*a.Filename, "-annotation.md") {
 			var buf bytes.Buffer
@@ -195,18 +224,29 @@ func (c *Client) GetJobAnnotationsByBuildNumber(ctx context.Context, pipeline st
 	return result, nil
 }
 
+func (c *Client) CancelBuild(ctx context.Context, org, pipeline, number string) (*buildkite.Build, error) {
+	return c.bk.Builds.Cancel(org, pipeline, number)
+}
+
 // TriggerBuild request a build on Buildkite API and returns that build.
-func (c *Client) TriggerBuild(ctx context.Context, pipeline, branch, commit string) (*buildkite.Build, error) {
-	build, _, err := c.bk.Builds.Create(BuildkiteOrg, pipeline, &buildkite.CreateBuild{
-		Commit: commit,
+func (c *Client) TriggerBuild(ctx context.Context, pipeline, branch, commit string, opts ...CreateBuildOpt) (*buildkite.Build, error) {
+	newBuild := &buildkite.CreateBuild{
 		Branch: branch,
-	})
+		Commit: commit,
+	}
+
+	for _, opt := range opts {
+		opt(newBuild)
+	}
+	build, _, err := c.bk.Builds.Create(BuildkiteOrg, pipeline, newBuild)
+
 	return build, err
 }
 
 type ExportLogsOpts struct {
-	JobQuery string
-	State    string
+	JobStepKey string
+	JobQuery   string
+	State      string
 }
 
 type JobLogs struct {
@@ -271,6 +311,28 @@ func (c *Client) ExportLogs(ctx context.Context, pipeline string, build int, opt
 	buildDetails, _, err := c.bk.Builds.Get(BuildkiteOrg, pipeline, buildID, nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if opts.JobStepKey != "" {
+		var job *buildkite.Job
+		for _, j := range buildDetails.Jobs {
+			if j.StepKey != nil && *j.StepKey == opts.JobStepKey {
+				job = j
+				break
+			}
+		}
+		if job == nil {
+			return nil, errors.Newf("no job matching stepkey %q found in build %d", opts.JobStepKey, build)
+		}
+
+		l, _, err := c.bk.Jobs.GetJobLog(BuildkiteOrg, pipeline, buildID, *job.ID)
+		if err != nil {
+			return nil, err
+		}
+		return []*JobLogs{{
+			JobMeta: newJobMeta(build, job),
+			Content: l.Content,
+		}}, nil
 	}
 
 	if opts.JobQuery != "" {

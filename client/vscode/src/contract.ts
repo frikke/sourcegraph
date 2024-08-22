@@ -1,15 +1,14 @@
-import { GraphQLResult } from '@sourcegraph/http-client'
-import { FlatExtensionHostAPI } from '@sourcegraph/shared/src/api/contract'
-import { ProxySubscribable } from '@sourcegraph/shared/src/api/extension/api/common'
-import { ViewerData, ViewerId } from '@sourcegraph/shared/src/api/viewerTypes'
-import { AuthenticatedUser } from '@sourcegraph/shared/src/auth'
-import { EventSource } from '@sourcegraph/shared/src/graphql-operations'
-import { SearchMatch, StreamSearchOptions } from '@sourcegraph/shared/src/search/stream'
-import { SettingsCascadeOrError } from '@sourcegraph/shared/src/settings/settings'
-// eslint-disable-next-line no-restricted-imports
-import { Event } from '@sourcegraph/web/src/graphql-operations'
+import type { GraphQLResult } from '@sourcegraph/http-client'
+import type { FlatExtensionHostAPI } from '@sourcegraph/shared/src/api/contract'
+import type { ProxySubscribable } from '@sourcegraph/shared/src/api/extension/api/common'
+import type { ViewerData, ViewerId } from '@sourcegraph/shared/src/api/viewerTypes'
+import type { AuthenticatedUser } from '@sourcegraph/shared/src/auth'
+import type { EventSource } from '@sourcegraph/shared/src/graphql-operations'
+import type { SearchMatch, StreamSearchOptions } from '@sourcegraph/shared/src/search/stream'
+import type { SettingsCascadeOrError } from '@sourcegraph/shared/src/settings/settings'
 
-import { VSCEQueryState, VSCEState, VSCEStateMachine } from './state'
+import type { Event } from './graphql-operations'
+import type { VSCEQueryState, VSCEState, VSCEStateMachine } from './state'
 
 export interface ExtensionCoreAPI {
     /** For search panel webview to signal that it is ready for messages. */
@@ -25,9 +24,9 @@ export interface ExtensionCoreAPI {
     getAuthenticatedUser: () => ProxySubscribable<AuthenticatedUser | null>
     /** Endpoint settings */
     getInstanceURL: () => ProxySubscribable<string>
-    getAccessToken: string | undefined
-    setAccessToken: (accessToken: string) => void
-    setEndpointUri: (uri: string, accessToken?: string) => void
+    getAccessToken: Promise<string | undefined>
+    removeAccessToken: () => Promise<void>
+    setEndpointUri: (accessToken: string, uri: string) => Promise<void>
     /**
      * Observe search box query state.
      * Used to send current query from panel to sidebar.
@@ -42,9 +41,9 @@ export interface ExtensionCoreAPI {
     observeState: () => ProxySubscribable<VSCEState>
     emit: VSCEStateMachine['emit']
     /** Opens a remote file given a serialized SourcegraphUri */
-    openSourcegraphFile: (uri: string) => void
-    openLink: (uri: string) => void
-    copyLink: (uri: string) => void
+    openSourcegraphFile: (uri: string) => Promise<void>
+    openLink: (uri: string) => Promise<void>
+    copyLink: (uri: string) => Promise<void>
     reloadWindow: () => void
     focusSearchPanel: () => void
     /** Cancels previous search when called. */

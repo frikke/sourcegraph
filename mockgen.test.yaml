@@ -1,3 +1,32 @@
+- filename: internal/authz/providers/gerrit/mocks_test.go
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/internal/extsvc/gerrit
+      interfaces:
+        - Client
+      prefix: Gerrit
+- filename: internal/batches/sources/mocks_test.go
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/internal/batches/sources
+      interfaces:
+        - ChangesetSource
+        - ForkableChangesetSource
+        - SourcerStore
+    - path: github.com/sourcegraph/sourcegraph/internal/extsvc/bitbucketcloud
+      interfaces:
+        - Client
+      prefix: BitbucketCloud
+    - path: github.com/sourcegraph/sourcegraph/internal/extsvc/azuredevops
+      interfaces:
+        - Client
+      prefix: AzureDevOps
+    - path: github.com/sourcegraph/sourcegraph/internal/extsvc/gerrit
+      interfaces:
+        - Client
+      prefix: Gerrit
+    - path: github.com/sourcegraph/sourcegraph/internal/gitserver
+      interfaces:
+        - Client
+      prefix: Gitserver
 - filename: cmd/frontend/internal/httpapi/mocks_test.go
   path: github.com/sourcegraph/sourcegraph/internal/httpcli
   interfaces:
@@ -6,33 +35,110 @@
   path: github.com/sourcegraph/sourcegraph/cmd/frontend/internal/httpapi/releasecache
   interfaces:
     - ReleaseCache
-- filename: cmd/symbols/fetcher/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/cmd/symbols/gitserver
+- filename: cmd/gitserver/internal/vcssyncer/mock.go
+  path: github.com/sourcegraph/sourcegraph/cmd/gitserver/internal/vcssyncer
+  interfaces:
+    - VCSSyncer
+- filename: cmd/symbols/internal/fetcher/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/cmd/symbols/internal/gitserver
   interfaces:
     - GitServerClient
 - filename: cmd/symbols/internal/api/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/cmd/symbols/gitserver
+  path: github.com/sourcegraph/sourcegraph/cmd/symbols/internal/gitserver
   interfaces:
     - GitServerClient
-- filename: enterprise/cmd/executor/internal/command/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/enterprise/cmd/executor/internal/command
-  interfaces:
-    - ExecutionLogEntryStore
-    - Logger
-    - LogEntry
-    - commandRunner
-- filename: enterprise/cmd/executor/internal/worker/mocks_test.go
+- filename: cmd/executor/internal/worker/workspace/mocks_test.go
   sources:
-    - path: github.com/sourcegraph/sourcegraph/enterprise/cmd/executor/internal/command
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/command
       interfaces:
-        - Runner
-    - path: github.com/sourcegraph/sourcegraph/internal/workerutil
+        - Command
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/cmdlogger
+      interfaces:
+        - Logger
+        - LogEntry
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/files
       interfaces:
         - Store
-- filename: enterprise/cmd/frontend/internal/app/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/enterprise/cmd/frontend/internal/app
-  interfaces:
-    - githubClient
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/util
+      interfaces:
+        - CmdRunner
+- filename: cmd/executor/internal/worker/runner/mocks_test.go
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/command
+      interfaces:
+        - Command
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/cmdlogger
+      interfaces:
+        - Logger
+        - LogEntry
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/files
+      interfaces:
+        - Store
+- filename: cmd/executor/internal/worker/files/mocks_test.go
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/files
+      interfaces:
+        - Store
+- filename: cmd/executor/internal/worker/command/mocks_test.go
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/command
+      interfaces:
+        - Command
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/cmdlogger
+      interfaces:
+        - Logger
+        - LogEntry
+        - ExecutionLogEntryStore
+- filename: cmd/executor/internal/worker/cmdlogger/mocks_test.go
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/cmdlogger
+      interfaces:
+        - Logger
+        - LogEntry
+        - ExecutionLogEntryStore
+- filename: cmd/executor/internal/worker/mocks_test.go
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/command
+      interfaces:
+        - Command
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/cmdlogger
+      interfaces:
+        - Logger
+        - LogEntry
+        - ExecutionLogEntryStore
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/util
+      interfaces:
+        - CmdRunner
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/files
+      interfaces:
+        - Store
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/runtime
+      interfaces:
+        - Runtime
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/runner
+      interfaces:
+        - Runner
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/workspace
+      interfaces:
+        - Workspace
+- filename: cmd/executor/internal/worker/runtime/mocks_test.go
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/command
+      interfaces:
+        - Command
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/cmdlogger
+      interfaces:
+        - Logger
+        - LogEntry
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/files
+      interfaces:
+        - Store
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/worker/workspace
+      interfaces:
+        - Workspace
+    - path: github.com/sourcegraph/sourcegraph/cmd/executor/internal/util
+      interfaces:
+        - CmdRunner
 - filename: internal/codeintel/uploads/transport/http/mocks_test.go
   path: github.com/sourcegraph/sourcegraph/internal/uploadhandler
   interfaces:
@@ -45,74 +151,55 @@
   path: github.com/sourcegraph/sourcegraph/internal/codeintel/uploads/transport/http/auth
   interfaces:
     - GitHubClient
-- filename: enterprise/cmd/frontend/internal/executorqueue/handler/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/internal/services/executors/store
-  interfaces:
-    - Store
-- filename: enterprise/cmd/frontend/internal/executorqueue/queues/batches/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/enterprise/cmd/frontend/internal/executorqueue/queues/batches
+- filename: cmd/frontend/internal/executorqueue/queues/batches/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/cmd/frontend/internal/executorqueue/queues/batches
   interfaces:
     - BatchesStore
-- filename: internal/codeintel/autoindexing/background/dependencies/mocks_test.go
+- filename: cmd/frontend/internal/executorqueue/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/cmd/frontend/internal/executorqueue
+  interfaces:
+    - GitserverClient
+- filename: internal/batches/syncer/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/internal/batches/syncer
+  interfaces:
+    - SyncStore
+- filename: internal/codeintel/autoindexing/internal/background/dependencies/mocks_test.go
   sources:
-    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/background/dependencies
+    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/internal/background/dependencies
       interfaces:
-        - UploadsService
         - DependenciesService
-        - AutoindexingService
-        - ReposStore
-        - IndexingExternalServiceStore
-        - SyncExternalServiceStore
         - GitserverRepoStore
+        - ExternalServiceStore
+        - ReposStore
         - IndexEnqueuer
-        - RepoUpdaterClient
+        - UploadService
     - path: github.com/sourcegraph/sourcegraph/internal/codeintel/uploads/shared
       interfaces:
         - PackageReferenceScanner
-    - path: github.com/sourcegraph/sourcegraph/internal/workerutil/dbworker/store
+    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/internal/store
       interfaces:
         - Store
-      prefix: Worker
-- filename: enterprise/internal/batches/sources/mocks_test.go
+- filename: internal/codeintel/dependencies/internal/background/mocks_test.go
   sources:
-    - path: github.com/sourcegraph/sourcegraph/enterprise/internal/batches/sources
+    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/dependencies/internal/background
       interfaces:
-        - ChangesetSource
-        - ForkableChangesetSource
-        - SourcerStore
-    - path: github.com/sourcegraph/sourcegraph/internal/extsvc/bitbucketcloud
-      interfaces:
-        - Client
-      prefix: BitbucketCloud
-- filename: enterprise/internal/batches/syncer/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/enterprise/internal/batches/syncer
-  interfaces:
-    - SyncStore
+        - ExternalServiceStore
+        - AutoIndexingService
+        - DependenciesService
 - filename: internal/codeintel/autoindexing/mocks_test.go
   sources:
     - path: github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/internal/store
       interfaces:
         - Store
-    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/shared
+    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing
       interfaces:
-        - RepoUpdaterClient
-        - GitServerClient
         - InferenceService
         - UploadService
-- filename: internal/codeintel/autoindexing/background/scheduler/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/background/scheduler
-  interfaces:
-    - PolicyMatcher
 - filename: internal/codeintel/autoindexing/internal/inference/mocks_test.go
   path: github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/internal/inference
   interfaces:
     - GitService
     - SandboxService
-- filename: internal/codeintel/dependencies/mocks_test.go
-  sources:
-    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/dependencies/internal/store
-      interfaces:
-        - Store
 - filename: internal/codeintel/policies/mocks_test.go
   sources:
     - path: github.com/sourcegraph/sourcegraph/internal/codeintel/policies/internal/store
@@ -121,62 +208,36 @@
     - path: github.com/sourcegraph/sourcegraph/internal/codeintel/policies
       interfaces:
         - UploadService
-        - GitserverClient
-- filename: internal/codeintel/policies/enterprise/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/internal/codeintel/policies/enterprise
-  interfaces:
-    - GitserverClient
-  package: policies
-- filename: internal/codeintel/codenav/mocks_test.go
-  sources:
-    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/codenav/internal/store
-      interfaces:
-        - Store
-    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/codenav/internal/lsifstore
-      interfaces:
-        - LsifStore
-    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/codenav
-      interfaces:
-        - UploadService
-        - GitTreeTranslator
-        - GitserverClient
 - filename: internal/codeintel/uploads/mocks_test.go
   sources:
     - path: github.com/sourcegraph/sourcegraph/internal/codeintel/uploads/internal/store
       interfaces:
         - Store
-    - path: internal/codeintel/uploads
-      interfaces:
-        - RepoStore
-    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/uploads/internal/lsifstore
-      interfaces:
-        - LSIFStore
     - path: github.com/sourcegraph/sourcegraph/internal/codeintel/uploads
       interfaces:
-        - GitserverClient
-# TODO - cannot merge with the one above because 'Store' is looked for in multiple packages.
-# This is a deficiency of go-mockgen filed in https://github.com/derision-test/go-mockgen/issues/36.
-- filename: internal/codeintel/uploads/mocks2_test.go
-  sources:
-    - path: github.com/sourcegraph/sourcegraph/internal/workerutil/dbworker/store
+        - RepoStore
+    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/uploads
       interfaces:
-        - Store
-      prefix: Worker
-- filename: internal/codeintel/uploads/background/cleanup/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/internal/codeintel/uploads/background/cleanup
-  interfaces:
-    - UploadService
-    - AutoIndexingService
-- filename: internal/codeintel/uploads/background/expiration/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/internal/codeintel/uploads/background/expiration
-  interfaces:
-    - UploadService
-    - PolicyService
-    - PolicyMatcher
+        - PolicyService
+- filename: internal/codeintel/uploads/internal/background/processor/mocks_test.go
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/uploads/internal/background/processor
+      interfaces:
+        - RepoStore
+- filename: internal/codeintel/uploads/internal/background/expirer/mocks_test.go
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/uploads/internal/background/expirer
+      interfaces:
+        - PolicyService
+        - PolicyMatcher
 - filename: internal/database/migration/runner/mocks_test.go
   path: github.com/sourcegraph/sourcegraph/internal/database/migration/runner
   interfaces:
     - Store
+- filename: internal/database/basestore/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/internal/database/basestore
+  interfaces:
+    - Rows
 - filename: internal/featureflag/mocks_test.go
   path: github.com/sourcegraph/sourcegraph/internal/featureflag
   interfaces:
@@ -188,13 +249,17 @@
     - ErrorHandler
     - Finalizer
     - Handler
+- filename: lib/background/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/lib/background
+  interfaces:
+    - Routine
 - filename: internal/oobmigration/mocks_test.go
   path: github.com/sourcegraph/sourcegraph/internal/oobmigration
   interfaces:
     - Migrator
     - storeIface
-- filename: internal/uploadstore/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/internal/uploadstore
+- filename: internal/object/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/internal/object
   interfaces:
     - gcsAPI
     - gcsBucketHandle
@@ -202,7 +267,7 @@
     - gcsObjectHandle
     - s3API
     - s3Uploader
-  package: uploadstore
+  package: object
 - filename: internal/workerutil/mocks_test.go
   path: github.com/sourcegraph/sourcegraph/internal/workerutil
   interfaces:
@@ -210,8 +275,8 @@
     - Store
     - WithHooks
     - WithPreDequeue
-- filename: enterprise/internal/authz/github/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/enterprise/internal/authz/github
+- filename: internal/authz/providers/github/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/internal/authz/providers/github
   interfaces:
     - client
 - filename: internal/conf/mocks_test.go
@@ -222,7 +287,136 @@
   path: github.com/sourcegraph/zoekt
   interfaces:
     - Streamer
-- filename: enterprise/cmd/worker/internal/telemetry/mocks_test.go
-  path: github.com/sourcegraph/sourcegraph/enterprise/cmd/worker/internal/telemetry
+- filename: internal/search/symbol/mocks_test.go
+  path: github.com/sourcegraph/zoekt
+  interfaces:
+    - Streamer
+- filename: cmd/worker/internal/telemetry/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/cmd/worker/internal/telemetry
   interfaces:
     - bookmarkStore
+- filename: cmd/worker/internal/sourcegraphaccounts/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/cmd/worker/internal/sourcegraphaccounts
+  interfaces:
+    - notificationsSubscriberStore
+- filename: internal/codeintel/ranking/mocks_test.go
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/internal/codeintel/ranking/internal/store
+      interfaces:
+        - Store
+    - path: github.com/sourcegraph/sourcegraph/internal/conf/conftypes
+      interfaces:
+        - SiteConfigQuerier
+- filename: cmd/frontend/internal/auth/userpasswd/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/cmd/frontend/internal/auth/userpasswd
+  interfaces:
+    - LockoutStore
+- filename: internal/codeintel/uploads/transport/graphql/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/internal/codeintel/uploads/transport/graphql
+  interfaces:
+    - UploadsService
+- filename: internal/codeintel/codenav/transport/graphql/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/internal/codeintel/codenav/transport/graphql
+  interfaces:
+    - AutoIndexingService
+    - CodeNavService
+- filename: internal/insights/background/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/internal/insights/background
+  interfaces:
+    - RepoStore
+- filename: internal/insights/discovery/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/internal/insights/discovery
+  interfaces:
+    - RepoQueryExecutor
+- filename: internal/insights/scheduler/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/internal/insights/scheduler
+  interfaces:
+    - RepoQueryExecutor
+- filename: internal/insights/store/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/internal/insights/store
+  interfaces:
+    - InsightPermissionStore
+- filename: cmd/cody-gateway/internal/auth/mocks_test.go
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/cody-gateway/internal/actor/productsubscription
+      interfaces:
+        - ListingCache
+- filename: cmd/cody-gateway/internal/dotcom/mocks.go
+  sources:
+    - path: github.com/Khan/genqlient/graphql
+      interfaces:
+        - Client
+- filename: internal/embeddings/embed/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/internal/embeddings/embed
+  interfaces:
+    - ContextService
+- filename: internal/redispool/mocks.go
+  path: github.com/sourcegraph/sourcegraph/internal/redispool
+  interfaces:
+    - KeyValue
+- filename: internal/telemetry/telemetrytest/mocks.go
+  package: telemetrytest
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/internal/telemetry
+      interfaces:
+        - EventsStore
+- filename: cmd/gitserver/internal/integration_tests/mocks.go
+  package: inttests
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/gitserver/internal
+      interfaces:
+        - RepositoryLocker
+        - RepositoryLock
+- filename: cmd/gitserver/internal/mocks_test.go
+  package: internal
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/gitserver/internal
+      interfaces:
+        - service
+        - RepositoryLocker
+        - RepositoryLock
+- filename: dev/build-tracker/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/dev/build-tracker
+  package: main
+  interfaces:
+    - BigQueryWriter
+- filename: cmd/cody-gateway/internal/actor/productsubscription/productsubscriptiontest/mocks.go
+  package: productsubscriptiontest
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/cody-gateway/internal/actor/productsubscription
+      interfaces:
+        - EnterprisePortalClient
+- filename: cmd/enterprise-portal/internal/subscriptionsservice/mocks_test.go
+  package: subscriptionsservice
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/enterprise-portal/internal/subscriptionsservice
+      interfaces:
+        - StoreV1
+- filename: cmd/enterprise-portal/internal/codyaccessservice/mocks_test.go
+  package: codyaccessservice
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/enterprise-portal/internal/codyaccessservice
+      interfaces:
+        - StoreV1
+- filename: dev/sg/internal/analytics/mocks_test.go
+  path: github.com/sourcegraph/sourcegraph/dev/sg/internal/analytics
+  package: analytics
+  interfaces:
+    - secretStore
+- filename: internal/releaseregistry/mocks/mocks.go
+  path: github.com/sourcegraph/sourcegraph/internal/releaseregistry
+  package: mocks
+  interfaces:
+    - ReleaseRegistryClient
+- filename: cmd/enterprise-portal/internal/routines/licenseexpiration/mocks_test.go
+  package: licenseexpiration
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/enterprise-portal/internal/routines/licenseexpiration
+      interfaces:
+        - Store
+- filename: cmd/enterprise-portal/internal/subscriptionlicensechecksservice/mocks_test.go
+  package: subscriptionlicensechecksservice
+  sources:
+    - path: github.com/sourcegraph/sourcegraph/cmd/enterprise-portal/internal/subscriptionlicensechecksservice
+      interfaces:
+        - StoreV1

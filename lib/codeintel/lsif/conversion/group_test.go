@@ -292,10 +292,7 @@ func TestGroupBundleData(t *testing.T) {
 		}),
 	}
 
-	actualBundleData, err := groupBundleData(context.Background(), state)
-	if err != nil {
-		t.Fatalf("unexpected error converting correlation state to types: %s", err)
-	}
+	actualBundleData := groupBundleData(context.Background(), state)
 
 	expectedMetaData := precise.MetaData{
 		NumResultChunks: 1,
@@ -613,9 +610,9 @@ func TestGroupBundleData(t *testing.T) {
 			Scheme:     "scheme C",
 			Identifier: "ident C",
 			Locations: []precise.LocationData{
-				{URI: "bar.go", StartLine: 4, StartCharacter: 5, EndLine: 6, EndCharacter: 7},
-				{URI: "baz.go", StartLine: 7, StartCharacter: 8, EndLine: 9, EndCharacter: 0},
-				{URI: "foo.go", StartLine: 3, StartCharacter: 4, EndLine: 5, EndCharacter: 6},
+				{DocumentPath: "bar.go", StartLine: 4, StartCharacter: 5, EndLine: 6, EndCharacter: 7},
+				{DocumentPath: "baz.go", StartLine: 7, StartCharacter: 8, EndLine: 9, EndCharacter: 0},
+				{DocumentPath: "foo.go", StartLine: 3, StartCharacter: 4, EndLine: 5, EndCharacter: 6},
 			},
 		},
 		{
@@ -623,9 +620,9 @@ func TestGroupBundleData(t *testing.T) {
 			Scheme:     "scheme D",
 			Identifier: "ident D",
 			Locations: []precise.LocationData{
-				{URI: "bar.go", StartLine: 4, StartCharacter: 5, EndLine: 6, EndCharacter: 7},
-				{URI: "baz.go", StartLine: 7, StartCharacter: 8, EndLine: 9, EndCharacter: 0},
-				{URI: "foo.go", StartLine: 3, StartCharacter: 4, EndLine: 5, EndCharacter: 6},
+				{DocumentPath: "bar.go", StartLine: 4, StartCharacter: 5, EndLine: 6, EndCharacter: 7},
+				{DocumentPath: "baz.go", StartLine: 7, StartCharacter: 8, EndLine: 9, EndCharacter: 0},
+				{DocumentPath: "foo.go", StartLine: 3, StartCharacter: 4, EndLine: 5, EndCharacter: 6},
 			},
 		},
 	}
@@ -645,9 +642,9 @@ func TestGroupBundleData(t *testing.T) {
 			Scheme:     "scheme A",
 			Identifier: "ident A",
 			Locations: []precise.LocationData{
-				{URI: "baz.go", StartLine: 7, StartCharacter: 8, EndLine: 9, EndCharacter: 0},
-				{URI: "baz.go", StartLine: 9, StartCharacter: 0, EndLine: 1, EndCharacter: 2},
-				{URI: "foo.go", StartLine: 3, StartCharacter: 4, EndLine: 5, EndCharacter: 6},
+				{DocumentPath: "baz.go", StartLine: 7, StartCharacter: 8, EndLine: 9, EndCharacter: 0},
+				{DocumentPath: "baz.go", StartLine: 9, StartCharacter: 0, EndLine: 1, EndCharacter: 2},
+				{DocumentPath: "foo.go", StartLine: 3, StartCharacter: 4, EndLine: 5, EndCharacter: 6},
 			},
 		},
 		{
@@ -655,9 +652,9 @@ func TestGroupBundleData(t *testing.T) {
 			Scheme:     "scheme B",
 			Identifier: "ident B",
 			Locations: []precise.LocationData{
-				{URI: "baz.go", StartLine: 7, StartCharacter: 8, EndLine: 9, EndCharacter: 0},
-				{URI: "baz.go", StartLine: 9, StartCharacter: 0, EndLine: 1, EndCharacter: 2},
-				{URI: "foo.go", StartLine: 3, StartCharacter: 4, EndLine: 5, EndCharacter: 6},
+				{DocumentPath: "baz.go", StartLine: 7, StartCharacter: 8, EndLine: 9, EndCharacter: 0},
+				{DocumentPath: "baz.go", StartLine: 9, StartCharacter: 0, EndLine: 1, EndCharacter: 2},
+				{DocumentPath: "foo.go", StartLine: 3, StartCharacter: 4, EndLine: 5, EndCharacter: 6},
 			},
 		},
 	}
@@ -677,9 +674,9 @@ func TestGroupBundleData(t *testing.T) {
 			Scheme:     "scheme F",
 			Identifier: "ident F",
 			Locations: []precise.LocationData{
-				{URI: "bar.go", StartLine: 4, StartCharacter: 5, EndLine: 6, EndCharacter: 7},
-				{URI: "baz.go", StartLine: 7, StartCharacter: 8, EndLine: 9, EndCharacter: 0},
-				{URI: "foo.go", StartLine: 3, StartCharacter: 4, EndLine: 5, EndCharacter: 6},
+				{DocumentPath: "bar.go", StartLine: 4, StartCharacter: 5, EndLine: 6, EndCharacter: 7},
+				{DocumentPath: "baz.go", StartLine: 7, StartCharacter: 8, EndLine: 9, EndCharacter: 0},
+				{DocumentPath: "foo.go", StartLine: 3, StartCharacter: 4, EndLine: 5, EndCharacter: 6},
 			},
 		},
 	}
@@ -705,8 +702,8 @@ func sortDiagnostics(s []precise.DiagnosticData) {
 
 func sortDocumentIDRangeIDs(s []precise.DocumentIDRangeID) {
 	sort.Slice(s, func(i, j int) bool {
-		if cmp := strings.Compare(string(s[i].DocumentID), string(s[j].DocumentID)); cmp != 0 {
-			return cmp < 0
+		if compareResult := strings.Compare(string(s[i].DocumentID), string(s[j].DocumentID)); compareResult != 0 {
+			return compareResult < 0
 		} else {
 			return strings.Compare(string(s[i].RangeID), string(s[j].RangeID)) < 0
 		}
@@ -715,10 +712,10 @@ func sortDocumentIDRangeIDs(s []precise.DocumentIDRangeID) {
 
 func sortMonikerLocations(monikerLocations []precise.MonikerLocations) {
 	sort.Slice(monikerLocations, func(i, j int) bool {
-		if cmp := strings.Compare(monikerLocations[i].Scheme, monikerLocations[j].Scheme); cmp != 0 {
-			return cmp < 0
-		} else if cmp := strings.Compare(monikerLocations[i].Identifier, monikerLocations[j].Identifier); cmp != 0 {
-			return cmp < 0
+		if compareResult := strings.Compare(monikerLocations[i].Scheme, monikerLocations[j].Scheme); compareResult != 0 {
+			return compareResult < 0
+		} else if compareResult := strings.Compare(monikerLocations[i].Identifier, monikerLocations[j].Identifier); compareResult != 0 {
+			return compareResult < 0
 		}
 		return false
 	})
@@ -730,8 +727,8 @@ func sortMonikerLocations(monikerLocations []precise.MonikerLocations) {
 
 func sortLocations(locations []precise.LocationData) {
 	sort.Slice(locations, func(i, j int) bool {
-		if cmp := strings.Compare(locations[i].URI, locations[j].URI); cmp != 0 {
-			return cmp < 0
+		if compareResult := strings.Compare(locations[i].DocumentPath, locations[j].DocumentPath); compareResult != 0 {
+			return compareResult < 0
 		}
 
 		return locations[i].StartLine < locations[j].StartLine

@@ -1,51 +1,102 @@
 package autoindexing
 
 import (
-	"sync"
-
+	"github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/internal/background"
+	"github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/internal/background/dependencies"
+	"github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/internal/background/scheduler"
+	"github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/internal/background/summary"
 	"github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/internal/inference"
-	"github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/internal/store"
-	"github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/shared"
+	autoindexingstore "github.com/sourcegraph/sourcegraph/internal/codeintel/autoindexing/internal/store"
+	"github.com/sourcegraph/sourcegraph/internal/codeintel/reposcheduler"
 	"github.com/sourcegraph/sourcegraph/internal/database"
-	"github.com/sourcegraph/sourcegraph/internal/env"
+	"github.com/sourcegraph/sourcegraph/internal/gitserver"
+	"github.com/sourcegraph/sourcegraph/internal/goroutine"
 	"github.com/sourcegraph/sourcegraph/internal/observation"
-	"github.com/sourcegraph/sourcegraph/internal/symbols"
 )
 
 var (
-	svc     *Service
-	svcOnce sync.Once
+	IndexWorkerStoreOptions                 = background.IndexWorkerStoreOptions
+	DependencySyncingJobWorkerStoreOptions  = background.DependencySyncingJobWorkerStoreOptions
+	DependencyIndexingJobWorkerStoreOptions = background.DependencyIndexingJobWorkerStoreOptions
 )
 
-var maximumIndexJobsPerInferredConfiguration = env.MustGetInt("PRECISE_CODE_INTEL_AUTO_INDEX_MAXIMUM_INDEX_JOBS_PER_INFERRED_CONFIGURATION", 25, "Repositories with a number of inferred auto-index jobs exceeding this threshold will not be auto-indexed.")
-
-// GetService creates or returns an already-initialized autoindexing service.
-// If the service is not yet initialized, it will use the provided dependencies.
-func GetService(
+func NewService(
+	observationCtx *observation.Context,
 	db database.DB,
-	uploadSvc shared.UploadService,
-	gitserver shared.GitserverClient,
-	repoUpdater shared.RepoUpdaterClient,
+	depsSvc DependenciesService,
+	policiesSvc PoliciesService,
+	gitserverClient gitserver.Client,
 ) *Service {
-	svcOnce.Do(func() {
-		store := store.New(db, scopedContext("store"))
-		symbolsClient := symbols.DefaultClient
-		inferenceSvc := inference.GetService(db)
+	store := autoindexingstore.New(scopedContext("store", observationCtx), db)
+	inferenceSvc := inference.NewService(db)
 
-		svc = newService(
-			store,
-			uploadSvc,
-			gitserver,
-			symbolsClient,
-			repoUpdater,
-			inferenceSvc,
-			scopedContext("service"),
-		)
-	})
-
-	return svc
+	return newService(
+		scopedContext("service", observationCtx),
+		store,
+		inferenceSvc,
+		db.Repos(),
+		gitserverClient,
+	)
 }
 
-func scopedContext(component string) *observation.Context {
-	return observation.ScopedContext("codeintel", "autoindexing", component)
+var (
+	DependenciesConfigInst = &dependencies.Config{}
+	SchedulerConfigInst    = &scheduler.Config{}
+	SummaryConfigInst      = &summary.Config{}
+)
+
+func NewIndexSchedulers(
+	observationCtx *observation.Context,
+	policiesSvc PoliciesService,
+	policyMatcher PolicyMatcher,
+	repoSchedulingSvc reposcheduler.RepositorySchedulingService,
+	autoindexingSvc Service,
+	repoStore database.RepoStore,
+) []goroutine.BackgroundRoutine {
+	return background.NewIndexSchedulers(
+		scopedContext("scheduler", observationCtx),
+		policiesSvc,
+		policyMatcher,
+		repoSchedulingSvc,
+		autoindexingSvc.indexEnqueuer,
+		repoStore,
+		autoindexingSvc.store,
+		SchedulerConfigInst,
+	)
+}
+
+func NewDependencyIndexSchedulers(
+	observationCtx *observation.Context,
+	db database.DB,
+	uploadSvc UploadService,
+	depsSvc DependenciesService,
+	autoindexingSvc *Service,
+) []goroutine.BackgroundRoutine {
+	return background.NewDependencyIndexSchedulers(
+		scopedContext("dependencies", observationCtx),
+		db,
+		uploadSvc,
+		depsSvc,
+		autoindexingSvc.store,
+		autoindexingSvc.indexEnqueuer,
+		DependenciesConfigInst,
+	)
+}
+
+func NewSummaryBuilder(
+	observationCtx *observation.Context,
+	autoindexingSvc *Service,
+	uploadSvc UploadService,
+) []goroutine.BackgroundRoutine {
+	return background.NewSummaryBuilder(
+		scopedContext("summary", observationCtx),
+		autoindexingSvc.store,
+		autoindexingSvc.jobSelector,
+		uploadSvc,
+		SummaryConfigInst,
+	)
+}
+
+func scopedContext(component string, observationCtx *observation.Context) *observation.Context {
+	return observation.ScopedContext("codeintel", "autoindexing", component, observationCtx)
 }

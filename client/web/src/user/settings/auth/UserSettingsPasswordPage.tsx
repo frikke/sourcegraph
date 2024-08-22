@@ -1,25 +1,34 @@
 import * as React from 'react'
 
-import { RouteComponentProps } from 'react-router'
 import { Subject, Subscription } from 'rxjs'
 import { catchError, filter, mergeMap, tap } from 'rxjs/operators'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { Form } from '@sourcegraph/branded/src/components/Form'
 import { logger } from '@sourcegraph/common'
-import { Button, Container, PageHeader, LoadingSpinner, Link, Alert, Input, Label } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import {
+    Button,
+    Container,
+    PageHeader,
+    LoadingSpinner,
+    Link,
+    Alert,
+    Input,
+    Label,
+    ErrorAlert,
+    Form,
+} from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../../auth'
+import type { AuthenticatedUser } from '../../../auth'
 import { PasswordInput } from '../../../auth/SignInSignUpCommon'
 import { PageTitle } from '../../../components/PageTitle'
-import { UserAreaUserFields } from '../../../graphql-operations'
-import { eventLogger } from '../../../tracking/eventLogger'
+import type { UserAreaUserFields } from '../../../graphql-operations'
 import { validatePassword, getPasswordRequirements } from '../../../util/security'
 import { updatePassword } from '../backend'
 
 import styles from './UserSettingsPasswordPage.module.scss'
 
-interface Props extends RouteComponentProps<{}> {
+interface Props extends TelemetryV2Props {
     user: UserAreaUserFields
     authenticatedUser: AuthenticatedUser
 }
@@ -49,20 +58,26 @@ export class UserSettingsPasswordPage extends React.Component<Props, State> {
     }
 
     public componentDidMount(): void {
-        eventLogger.logViewEvent('UserSettingsPassword')
+        EVENT_LOGGER.logViewEvent('UserSettingsPassword')
+        this.props.telemetryRecorder.recordEvent('settings.password', 'view')
+
         this.subscriptions.add(
             this.submits
                 .pipe(
                     tap(event => {
                         event.preventDefault()
-                        eventLogger.log('UpdatePasswordClicked')
+                        EVENT_LOGGER.log('UpdatePasswordClicked')
+                        this.props.telemetryRecorder.recordEvent('settings.password', 'update')
                     }),
                     filter(event => event.currentTarget.checkValidity()),
                     tap(() => this.setState({ loading: true })),
                     mergeMap(() =>
                         updatePassword({
-                            oldPassword: this.state.oldPassword,
-                            newPassword: this.state.newPassword,
+                            args: {
+                                oldPassword: this.state.oldPassword,
+                                newPassword: this.state.newPassword,
+                            },
+                            telemetryRecorder: this.props.telemetryRecorder,
                         }).pipe(
                             // Sign the user out after their password is changed.
                             // We do this because the backend will no longer accept their current session

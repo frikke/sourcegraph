@@ -7,16 +7,18 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/auth"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/app/ui"
 	"github.com/sourcegraph/sourcegraph/internal/actor"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
-	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/database/dbmocks"
 	"github.com/sourcegraph/sourcegraph/schema"
 )
 
 func TestAllowAnonymousRequest(t *testing.T) {
-	ui.InitRouter(database.NewMockDB(), nil)
+	ui.InitRouter(dbmocks.NewMockDB(), nil)
 	// Ensure auth.public is false (be robust against some other tests having side effects that
 	// change it, or changed defaults).
 	conf.Mock(&conf.Unified{SiteConfiguration: schema.SiteConfiguration{AuthPublic: false, AuthProviders: []schema.AuthProviders{{Builtin: &schema.BuiltinAuthProvider{}}}}})
@@ -53,8 +55,50 @@ func TestAllowAnonymousRequest(t *testing.T) {
 	}
 }
 
+func TestAllowAnonymousRequestWithAdditionalConfig(t *testing.T) {
+	ui.InitRouter(dbmocks.NewMockDB(), nil)
+	// Ensure auth.public is false (be robust against some other tests having side effects that
+	// change it, or changed defaults).
+	conf.Mock(&conf.Unified{SiteConfiguration: schema.SiteConfiguration{AuthPublic: false, AuthProviders: []schema.AuthProviders{{Builtin: &schema.BuiltinAuthProvider{}}}}})
+	defer conf.Mock(nil)
+
+	req := func(method, urlStr string) *http.Request {
+		r, err := http.NewRequest(method, urlStr, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	tests := []struct {
+		req            *http.Request
+		confAuthPublic bool
+		want           bool
+	}{
+		{req: req("GET", "/"), confAuthPublic: false, want: false},
+		{req: req("GET", "/"), confAuthPublic: true, want: true},
+		{req: req("POST", "/"), confAuthPublic: false, want: false},
+		{req: req("POST", "/"), confAuthPublic: true, want: true},
+
+		{req: req("POST", "/-/sign-in"), confAuthPublic: false, want: true},
+		{req: req("POST", "/-/sign-in"), confAuthPublic: true, want: true},
+		{req: req("GET", "/sign-in"), confAuthPublic: false, want: true},
+		{req: req("GET", "/sign-in"), confAuthPublic: true, want: true},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("%s %s + auth.public=%v", test.req.Method, test.req.URL, test.confAuthPublic), func(t *testing.T) {
+			r := test.req
+			conf.Get().AuthPublic = test.confAuthPublic
+			defer func() { conf.Get().AuthPublic = false }()
+
+			got := auth.AllowAnonymousRequest(r)
+			require.Equal(t, test.want, got)
+		})
+	}
+}
+
 func TestNewUserRequiredAuthzMiddleware(t *testing.T) {
-	ui.InitRouter(database.NewMockDB(), nil)
+	ui.InitRouter(dbmocks.NewMockDB(), nil)
 	// Ensure auth.public is false (be robust against some other tests having side effects that
 	// change it, or changed defaults).
 	conf.Mock(&conf.Unified{SiteConfiguration: schema.SiteConfiguration{AuthPublic: false, AuthProviders: []schema.AuthProviders{{Builtin: &schema.BuiltinAuthProvider{}}}}})

@@ -1,32 +1,32 @@
 import React, { useCallback, useEffect } from 'react'
 
 import classNames from 'classnames'
-import { RouteComponentProps } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 
-import { Form } from '@sourcegraph/branded/src/components/Form'
 import { logger } from '@sourcegraph/common'
 import { gql, useMutation, useQuery } from '@sourcegraph/http-client'
+import { UserAvatar } from '@sourcegraph/shared/src/components/UserAvatar'
 import { OrganizationInvitationResponseType } from '@sourcegraph/shared/src/graphql-operations'
-import { Alert, AnchorLink, Button, LoadingSpinner, Link, H2, H3 } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Alert, AnchorLink, Button, Form, H2, H3, Link, LoadingSpinner } from '@sourcegraph/wildcard'
 
 import { orgURL } from '..'
-import { AuthenticatedUser } from '../../auth'
+import type { AuthenticatedUser } from '../../auth'
 import { ModalPage } from '../../components/ModalPage'
 import { PageTitle } from '../../components/PageTitle'
-import {
+import type {
     InvitationByTokenResult,
     InvitationByTokenVariables,
     RespondToOrgInvitationResult,
     RespondToOrgInvitationVariables,
 } from '../../graphql-operations'
-import { eventLogger } from '../../tracking/eventLogger'
 import { userURL } from '../../user'
-import { UserAvatar } from '../../user/UserAvatar'
 import { OrgAvatar } from '../OrgAvatar'
 
 import styles from './OrgInvitationPage.module.scss'
 
-interface Props extends RouteComponentProps<{ token: string }> {
+interface Props extends TelemetryV2Props {
     authenticatedUser: AuthenticatedUser
     className?: string
 }
@@ -70,31 +70,33 @@ export const INVITATION_BY_TOKEN = gql`
 export const OrgInvitationPage: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
     authenticatedUser,
     className,
-    history,
-    match,
+    telemetryRecorder,
 }) => {
-    const token = match.params.token
+    const { token } = useParams<{ token: string }>()
+    const navigate = useNavigate()
 
-    const { data: inviteData, loading: inviteLoading, error: inviteError } = useQuery<
-        InvitationByTokenResult,
-        InvitationByTokenVariables
-    >(INVITATION_BY_TOKEN, {
+    const {
+        data: inviteData,
+        loading: inviteLoading,
+        error: inviteError,
+    } = useQuery<InvitationByTokenResult, InvitationByTokenVariables>(INVITATION_BY_TOKEN, {
         skip: !authenticatedUser || !token,
         variables: {
-            token,
+            token: token!,
         },
     })
 
     const data = inviteData?.invitationByToken
-    const orgName = data?.organization.name
-    const orgId = data?.organization.id
+    const org = data?.organization
     const sender = data?.sender
-    const orgDisplayName = data?.organization.displayName || orgName
     const willVerifyEmail = data?.recipientEmail && !data?.isVerifiedEmail
 
     useEffect(() => {
-        eventLogger.logPageView('OrganizationInvitation', { organizationId: orgId, invitationId: data?.id })
-    }, [orgId, data?.id])
+        if (org) {
+            EVENT_LOGGER.logPageView('OrganizationInvitation', { organizationId: org.id, invitationId: data?.id })
+            telemetryRecorder.recordEvent('org.invite', 'view')
+        }
+    }, [data?.id, telemetryRecorder, org])
 
     const [respondToInvitation, { loading: respondLoading, error: respondError }] = useMutation<
         RespondToOrgInvitationResult,
@@ -106,15 +108,15 @@ export const OrgInvitationPage: React.FunctionComponent<React.PropsWithChildren<
     })
 
     const acceptInvitation = useCallback(async () => {
-        eventLogger.log(
+        EVENT_LOGGER.log(
             'OrganizationInvitationAcceptClicked',
             {
-                organizationId: orgId,
+                organizationId: org!.id,
                 invitationId: data?.id,
                 willVerifyEmail,
             },
             {
-                organizationId: orgId,
+                organizationId: org!.id,
                 invitationId: data?.id,
                 willVerifyEmail,
             }
@@ -126,35 +128,35 @@ export const OrgInvitationPage: React.FunctionComponent<React.PropsWithChildren<
                     response: OrganizationInvitationResponseType.ACCEPT,
                 },
             })
-            eventLogger.log(
+            EVENT_LOGGER.log(
                 'OrganizationInvitationAcceptSucceeded',
-                { organizationId: orgId, invitationId: data?.id },
-                { organizationId: orgId, invitationId: data?.id }
+                { organizationId: org!.id, invitationId: data?.id },
+                { organizationId: org!.id, invitationId: data?.id }
             )
+            telemetryRecorder.recordEvent('org.invite', 'accept')
         } catch {
-            eventLogger.log(
+            EVENT_LOGGER.log(
                 'OrganizationInvitationAcceptFailed',
-                { organizationId: orgId, invitationId: data?.id },
-                { organizationId: orgId, invitationId: data?.id }
+                { organizationId: org!.id, invitationId: data?.id },
+                { organizationId: org!.id, invitationId: data?.id }
             )
+            telemetryRecorder.recordEvent('org.invite', 'acceptFailed')
             return
         }
 
-        if (orgName) {
-            history.push(orgURL(orgName))
-        }
-    }, [data?.id, history, orgId, orgName, respondToInvitation, willVerifyEmail])
+        navigate(orgURL(org!.name))
+    }, [data?.id, navigate, org, respondToInvitation, willVerifyEmail, telemetryRecorder])
 
     const declineInvitation = useCallback(async () => {
-        eventLogger.log(
+        EVENT_LOGGER.log(
             'OrganizationInvitationDeclineClicked',
             {
-                organizationId: orgId,
+                organizationId: org!.id,
                 invitationId: data?.id,
                 willVerifyEmail,
             },
             {
-                organizationId: orgId,
+                organizationId: org!.id,
                 invitationId: data?.id,
                 willVerifyEmail,
             }
@@ -166,35 +168,40 @@ export const OrgInvitationPage: React.FunctionComponent<React.PropsWithChildren<
                     response: OrganizationInvitationResponseType.REJECT,
                 },
             })
-            eventLogger.log(
+            EVENT_LOGGER.log(
                 'OrganizationInvitationDeclineSucceeded',
-                { organizationId: orgId, invitationId: data?.id },
-                { organizationId: orgId, invitationId: data?.id }
+                { organizationId: org!.id, invitationId: data?.id },
+                { organizationId: org!.id, invitationId: data?.id }
             )
+            telemetryRecorder.recordEvent('org.invite', 'decline')
         } catch {
-            eventLogger.log(
+            EVENT_LOGGER.log(
                 'OrganizationInvitationDeclineFailed',
-                { organizationId: orgId, invitationId: data?.id },
-                { organizationId: orgId, invitationId: data?.id }
+                { organizationId: org!.id, invitationId: data?.id },
+                { organizationId: org!.id, invitationId: data?.id }
             )
+            telemetryRecorder.recordEvent('org.invite', 'declineFailed')
         }
 
-        history.push(userURL(authenticatedUser.username))
-    }, [authenticatedUser.username, data?.id, history, orgId, respondToInvitation, willVerifyEmail])
+        navigate(userURL(authenticatedUser.username))
+    }, [org, data?.id, willVerifyEmail, navigate, authenticatedUser.username, respondToInvitation, telemetryRecorder])
 
     const loading = inviteLoading || respondLoading
     const error = inviteError?.message || respondError?.message
 
     return (
         <>
-            <PageTitle title={`Invitation to Organization ${orgName || ''}`} />
-            {orgName && sender && (
+            <PageTitle title={`Invitation to Organization ${org?.name || ''}`} />
+            {org && sender && (
                 <ModalPage
                     className={classNames(styles.orgInvitationPage, className)}
-                    icon={<OrgAvatar org={orgName} className="mt-3 mb-4" size="lg" />}
+                    icon={<OrgAvatar org={org.name} className="mt-3 mb-4" size="lg" />}
                 >
                     <Form className="text-center pr-4 pl-4 pb-4">
-                        <H2>You've been invited to join the {orgDisplayName} organization</H2>
+                        <H2>
+                            You've been invited to join the <strong>{org.name}</strong>{' '}
+                            {org.displayName ? `(${org.displayName})` : ''} organization
+                        </H2>
                         <div className="mt-4">
                             <UserAvatar className={classNames('mr-2', styles.userAvatar)} user={sender} size={24} />
                             <span>
@@ -206,12 +213,13 @@ export const OrgInvitationPage: React.FunctionComponent<React.PropsWithChildren<
                         {data.isVerifiedEmail === false && data.recipientEmail && (
                             <div className="mt-4 mb-4">
                                 This invite was sent to <strong>{data.recipientEmail}</strong>. Joining the{' '}
-                                {orgDisplayName} organization will add this as a verified email on your account.
+                                <strong>{org.name}</strong> organization will add this as a verified email on your
+                                account.
                             </div>
                         )}
                         <div className="mt-4">
                             <Button className="mr-sm-2" disabled={loading} onClick={acceptInvitation} variant="primary">
-                                Join {orgDisplayName}
+                                Join {org.name}
                             </Button>
                             <Button
                                 disabled={loading}
@@ -227,7 +235,7 @@ export const OrgInvitationPage: React.FunctionComponent<React.PropsWithChildren<
                             <small className="mt-4 text-muted d-inline-block">
                                 <AnchorLink to="/-/sign-out">Or sign out and create a new account</AnchorLink>
                                 <br />
-                                to join the {orgDisplayName} organization
+                                to join the {org.name} organization
                             </small>
                         )}
                     </Form>

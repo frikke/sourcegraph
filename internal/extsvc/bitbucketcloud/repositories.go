@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
@@ -18,11 +19,16 @@ func (c *client) Repo(ctx context.Context, namespace, slug string) (*Repo, error
 	}
 
 	var repo Repo
-	if err := c.do(ctx, req, &repo); err != nil {
+	if _, err := c.do(ctx, req, &repo); err != nil {
 		return nil, errors.Wrap(err, "sending request")
 	}
 
 	return &repo, nil
+}
+
+type ReposOptions struct {
+	RequestOptions
+	Role string `url:"role,omitempty"`
 }
 
 // Repos returns a list of repositories that are fetched and populated based on given account
@@ -31,16 +37,64 @@ func (c *client) Repo(ctx context.Context, namespace, slug string) (*Repo, error
 // If the argument pageToken.Next is not empty, it will be used directly as the URL to make
 // the request. The PageToken it returns may also contain the URL to the next page for
 // succeeding requests if any.
-func (c *client) Repos(ctx context.Context, pageToken *PageToken, accountName string) ([]*Repo, *PageToken, error) {
-	var repos []*Repo
-	var next *PageToken
-	var err error
+// If the argument accountName is empty, it will return all repositories for
+// the authenticated user.
+func (c *client) Repos(ctx context.Context, pageToken *PageToken, accountName string, opts *ReposOptions) (repos []*Repo, next *PageToken, err error) {
 	if pageToken.HasMore() {
 		next, err = c.reqPage(ctx, pageToken.Next, &repos)
-	} else {
-		next, err = c.page(ctx, fmt.Sprintf("/2.0/repositories/%s", accountName), nil, pageToken, &repos)
+		return
 	}
+
+	var reposURL string
+	if accountName == "" {
+		reposURL = "/2.0/repositories"
+	} else {
+		reposURL = fmt.Sprintf("/2.0/repositories/%s", url.PathEscape(accountName))
+	}
+
+	var urlValues url.Values
+	if opts != nil && opts.Role != "" {
+		urlValues = make(url.Values)
+		urlValues.Set("role", opts.Role)
+	}
+
+	next, err = c.page(ctx, reposURL, urlValues, pageToken, &repos)
+
+	if opts != nil && opts.FetchAll {
+		repos, err = fetchAll(ctx, c, repos, next, err)
+	}
+
 	return repos, next, err
+}
+
+type ExplicitUserPermsResponse struct {
+	User       *Account `json:"user"`
+	Permission string   `json:"permission"`
+}
+
+func (c *client) ListExplicitUserPermsForRepo(ctx context.Context, pageToken *PageToken, namespace, slug string, opts *RequestOptions) (users []*Account, next *PageToken, err error) {
+	var resp []ExplicitUserPermsResponse
+	if pageToken.HasMore() {
+		next, err = c.reqPage(ctx, pageToken.Next, &resp)
+	} else {
+		userPermsURL := fmt.Sprintf("/2.0/repositories/%s/%s/permissions-config/users", url.PathEscape(namespace), url.PathEscape(slug))
+		next, err = c.page(ctx, userPermsURL, nil, pageToken, &resp)
+	}
+
+	if opts != nil && opts.FetchAll {
+		resp, err = fetchAll(ctx, c, resp, next, err)
+	}
+
+	if err != nil {
+		return
+	}
+
+	users = make([]*Account, len(resp))
+	for i, r := range resp {
+		users[i] = r.User
+	}
+
+	return
 }
 
 type ForkInputProject struct {
@@ -78,7 +132,7 @@ func (c *client) ForkRepository(ctx context.Context, upstream *Repo, input ForkI
 	}
 
 	var fork Repo
-	if err := c.do(ctx, req, &fork); err != nil {
+	if _, err := c.do(ctx, req, &fork); err != nil {
 		return nil, errors.Wrap(err, "sending request")
 	}
 

@@ -6,16 +6,15 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
-	"go.uber.org/atomic"
+	"github.com/sourcegraph/conc/pool"
+	"github.com/sourcegraph/conc/stream"
 
-	"github.com/sourcegraph/sourcegraph/dev/sg/internal/analytics"
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/std"
+	"github.com/sourcegraph/sourcegraph/internal/limiter"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
-	"github.com/sourcegraph/sourcegraph/lib/group"
 	"github.com/sourcegraph/sourcegraph/lib/output"
 )
 
@@ -87,14 +86,7 @@ func NewRunner[Args any](in io.Reader, out *std.Output, categories []Category[Ar
 }
 
 // Check executes all checks exactly once and exits.
-func (r *Runner[Args]) Check(
-	ctx context.Context,
-	args Args,
-) error {
-	var span *analytics.Span
-	ctx, span = r.startSpan(ctx, "Check")
-	defer span.End()
-
+func (r *Runner[Args]) Check(ctx context.Context, args Args) error {
 	results := r.runAllCategoryChecks(ctx, args)
 	if len(results.failed) > 0 {
 		if len(results.skipped) > 0 {
@@ -107,14 +99,7 @@ func (r *Runner[Args]) Check(
 }
 
 // Fix attempts to applies available fixes on checks that are not satisfied.
-func (r *Runner[Args]) Fix(
-	ctx context.Context,
-	args Args,
-) error {
-	var span *analytics.Span
-	ctx, span = r.startSpan(ctx, "Fix")
-	defer span.End()
-
+func (r *Runner[Args]) Fix(ctx context.Context, args Args) error {
 	// Get state
 	results := r.runAllCategoryChecks(ctx, args)
 	if len(results.failed) == 0 {
@@ -147,17 +132,23 @@ func (r *Runner[Args]) Fix(
 
 // Interactive runs both checks and fixes in an interactive manner, prompting the user for
 // decisions about which fixes to apply.
-func (r *Runner[Args]) Interactive(
-	ctx context.Context,
-	args Args,
-) error {
-	var span *analytics.Span
-	ctx, span = r.startSpan(ctx, "Interactive")
-	defer span.End()
-
+func (r *Runner[Args]) Interactive(ctx context.Context, args Args) error {
 	// Keep interactive runner up until all issues are fixed or the user exits
 	results := &runAllCategoryChecksResult{
 		failed: []int{1}, // initialize, this gets reset immediately
+	}
+
+	buildChoices := func(failed []int) map[int]string {
+		choices := make(map[int]string)
+		for _, idx := range failed {
+			category := r.categories[idx]
+			// categories are zero based indexes internally, but are displayed with 1-based indexes
+			choices[idx+1] = fmt.Sprintf("Fix %q", category.Name)
+		}
+
+		choices[FixAll] = "Fix everything"
+		choices[FixQuit] = "Quit"
+		return choices
 	}
 	for len(results.failed) != 0 {
 		// Update results
@@ -166,27 +157,44 @@ func (r *Runner[Args]) Interactive(
 			break
 		}
 
-		r.Output.WriteWarningf("Some checks failed. Which one do you want to fix?")
-
-		idx, err := getNumberOutOf(r.Input, r.Output, results.failed)
+		choice, err := getChoice(r.Input, r.Output, buildChoices(results.failed))
 		if err != nil {
 			if err == io.EOF {
 				return nil
 			}
 			return err
 		}
-		selectedCategory := r.categories[idx]
 
-		r.Output.ClearScreen()
-
-		err = r.presentFailedCategoryWithOptions(ctx, idx, &selectedCategory, args, results)
-		if err != nil {
-			if err == io.EOF {
-				return nil // we are done
+		switch choice {
+		case FixAll:
+			{
+				if everythingFixed := r.fixAllCategories(ctx, args, results); everythingFixed {
+					// evertyhing got fixed \o/
+					return nil
+				}
 			}
+		case FixQuit:
+			{
+				return nil
+			}
+		default:
+			{
+				// choice is 1 index based, so we subtract 1 to make it zero index based so that we can use it with r.categories
+				idx := choice - 1
+				selectedCategory := r.categories[idx]
 
-			r.Output.WriteWarningf("Encountered error while fixing: %s", err.Error())
-			// continue, do not exit
+				r.Output.ClearScreen()
+
+				err = r.presentFailedCategoryWithOptions(ctx, idx, &selectedCategory, args, results)
+				if err != nil {
+					if err == io.EOF {
+						return nil // we are done
+					}
+
+					r.Output.WriteWarningf("Encountered error while fixing: %s", err.Error())
+					// continue, do not exit
+				}
+			}
 		}
 	}
 
@@ -207,14 +215,10 @@ var errSkipped = errors.New("skipped")
 
 // runAllCategoryChecks is the main entrypoint for running the checks in this runner.
 func (r *Runner[Args]) runAllCategoryChecks(ctx context.Context, args Args) *runAllCategoryChecksResult {
-	var runAllSpan *analytics.Span
 	var cancelAll context.CancelFunc
 	ctx, cancelAll = context.WithCancel(ctx)
 	defer cancelAll()
-	ctx, runAllSpan = r.startSpan(ctx, "runAllCategoryChecks")
-	defer runAllSpan.End()
-
-	allCancelled := atomic.NewBool(false)
+	allCancelled := atomic.Bool{}
 
 	if r.RenderDescription != nil {
 		r.RenderDescription(r.Output)
@@ -233,10 +237,10 @@ func (r *Runner[Args]) runAllCategoryChecks(ctx context.Context, args Args) *run
 
 	var (
 		start           = time.Now()
-		categoriesGroup = group.NewWithStreaming[error]()
+		categoriesGroup = stream.New()
 
 		// checksLimiter is shared to limit all concurrent checks across categories.
-		checksLimiter = group.NewBasicLimiter(r.Concurrency)
+		checksLimiter = limiter.New(r.Concurrency)
 
 		// aggregated results
 		categoriesSkipped   = map[int]bool{}
@@ -297,41 +301,46 @@ func (r *Runner[Args]) runAllCategoryChecks(ctx context.Context, args Args) *run
 		i, category := i, category
 
 		// Run categories concurrently
-		categoriesGroup.Go(func() error {
-			categoryCtx, categorySpan := r.startSpan(ctx, "category "+category.Name,
-				trace.WithAttributes(
-					attribute.String("action", "check_category"),
-				))
-			defer categorySpan.End()
+		cb := func(err error) stream.Callback {
+			return func() {
+				// record duration
+				categoriesDurations[i] = time.Since(start)
 
-			if err := category.CheckEnabled(categoryCtx, args); err != nil {
+				// record if skipped
+				if errors.Is(err, errSkipped) {
+					categoriesSkipped[i] = true
+				}
+
+				// If error'd, status bar has already been set to failed with an error message
+				// so we only update if there is no error
+				if err == nil {
+					updateCategoryCompleted(i)
+				}
+			}
+		}
+
+		categoriesGroup.Go(func() stream.Callback {
+			if err := category.CheckEnabled(ctx, args); err != nil {
 				// Mark as done
 				updateCategorySkipped(i, err)
-				categorySpan.Skipped()
-				return errSkipped
+				return cb(errSkipped)
 			}
 
 			// Run all checks for this category concurrently
-			checksGroup := group.New().
-				WithErrors().
-				WithConcurrencyLimiter(checksLimiter)
+			checksGroup := pool.New().WithErrors()
 			for _, check := range category.Checks {
 				// copy
 				check := check
 
 				// run checks concurrently
 				checksGroup.Go(func() (err error) {
-					ctx, span := r.startSpan(categoryCtx, "check "+check.Name,
-						trace.WithAttributes(
-							attribute.String("action", "check"),
-							attribute.String("category", category.Name),
-						))
-					defer span.End()
+					checksLimiter.Acquire()
+					defer checksLimiter.Release()
+
 					defer updateChecksProgress()
 
 					if err := check.IsEnabled(ctx, args); err != nil {
 						updateCheckSkipped(i, check.Name, err)
-						span.Skipped()
 						return nil
 					}
 
@@ -345,14 +354,12 @@ func (r *Runner[Args]) runAllCategoryChecks(ctx context.Context, args Args) *run
 							err = errors.New("skipped because another check failed")
 							check.cachedCheckErr = err
 							updateCheckSkipped(i, check.Name, err)
-							span.Skipped()
 							return err
 						}
 
 						// mark check as failed
 						updateCheckFailed(i, check.Name, err)
 						check.cachedCheckOutput = updateOutput.String()
-						span.Failed()
 
 						// If we should fail fast, mark as failed
 						if r.FailFast {
@@ -363,26 +370,11 @@ func (r *Runner[Args]) runAllCategoryChecks(ctx context.Context, args Args) *run
 						return err
 					}
 
-					span.Succeeded()
 					return nil
 				})
 			}
 
-			return checksGroup.Wait()
-		}, func(err error) {
-			// record duration
-			categoriesDurations[i] = time.Since(start)
-
-			// record if skipped
-			if errors.Is(err, errSkipped) {
-				categoriesSkipped[i] = true
-			}
-
-			// If error'd, status bar has already been set to failed with an error message
-			// so we only update if there is no error
-			if err == nil {
-				updateCategoryCompleted(i)
-			}
+			return cb(checksGroup.Wait())
 		})
 	}
 	categoriesGroup.Wait()
@@ -430,7 +422,7 @@ func (r *Runner[Args]) runAllCategoryChecks(ctx context.Context, args Args) *run
 					}
 
 					// Write the terminal summary to an indented block
-					var style = output.CombineStyles(output.StyleBold, output.StyleFailure)
+					style := output.CombineStyles(output.StyleBold, output.StyleFailure)
 					block := r.Output.Block(output.Linef(output.EmojiFailure, style, check.Name))
 					block.Writef("%s\n", check.cachedCheckErr)
 					if check.cachedCheckOutput != "" {
@@ -456,7 +448,7 @@ func (r *Runner[Args]) runAllCategoryChecks(ctx context.Context, args Args) *run
 						annotationSummary += fmt.Sprintf("\n\n%s", suggestion)
 					}
 
-					if r.GenerateAnnotations {
+					if r.GenerateAnnotations && !check.LegacyAnnotations {
 						generateAnnotation(category.Name, check.Name, annotationSummary)
 					}
 				}
@@ -465,7 +457,6 @@ func (r *Runner[Args]) runAllCategoryChecks(ctx context.Context, args Args) *run
 	}
 
 	if len(results.failed) == 0 {
-		runAllSpan.Succeeded()
 		if len(results.skipped) == 0 {
 			r.Output.Write("")
 			r.Output.WriteLine(output.Linef(output.EmojiOk, output.StyleBold, "Everything looks good! Happy hacking!"))
@@ -479,13 +470,6 @@ func (r *Runner[Args]) runAllCategoryChecks(ctx context.Context, args Args) *run
 }
 
 func (r *Runner[Args]) presentFailedCategoryWithOptions(ctx context.Context, categoryIdx int, category *Category[Args], args Args, results *runAllCategoryChecksResult) error {
-	var span *analytics.Span
-	ctx, span = r.startSpan(ctx, "presentFailedCategoryWithOptions",
-		trace.WithAttributes(
-			attribute.String("category", category.Name),
-		))
-	defer span.End()
-
 	r.printCategoryHeaderAndDependencies(categoryIdx+1, category)
 	fixableCategory := category.HasFixable()
 
@@ -520,7 +504,6 @@ func (r *Runner[Args]) presentFailedCategoryWithOptions(ctx context.Context, cat
 		return nil
 	}
 	if err != nil {
-		span.Failed("fix_failed")
 		return err
 	}
 	return nil
@@ -546,13 +529,6 @@ func (r *Runner[Args]) printCategoryHeaderAndDependencies(categoryIdx int, categ
 }
 
 func (r *Runner[Args]) fixCategoryManually(ctx context.Context, categoryIdx int, category *Category[Args], args Args) error {
-	var span *analytics.Span
-	ctx, span = r.startSpan(ctx, "fixCategoryManually",
-		trace.WithAttributes(
-			attribute.String("category", category.Name),
-		))
-	defer span.End()
-
 	for {
 		toFix := []int{}
 
@@ -575,7 +551,7 @@ func (r *Runner[Args]) fixCategoryManually(ctx context.Context, categoryIdx int,
 		} else {
 			r.Output.WriteNoticef("Which one do you want to fix?")
 			var err error
-			idx, err = getNumberOutOf(r.Input, r.Output, toFix)
+			idx, err = askWhatToFix(r.Input, r.Output, toFix)
 			if err != nil {
 				if err == io.EOF {
 					return nil
@@ -619,19 +595,26 @@ func (r *Runner[Args]) fixCategoryManually(ctx context.Context, categoryIdx int,
 	return nil
 }
 
+func (r *Runner[Args]) fixAllCategories(ctx context.Context, args Args, results *runAllCategoryChecksResult) (ok bool) {
+	r.Output.WriteLine(output.Styledf(output.StyleBold, "Right time for the BIG FIX. Let's try to fix everything!"))
+	fixedCount := 0
+	for _, idx := range results.failed {
+		category := r.categories[idx]
+		fixed := r.fixCategoryAutomatically(ctx, idx, &category, args, results)
+		if fixed {
+			fixedCount++
+		}
+	}
+
+	return fixedCount == len(results.failed)
+}
+
 func (r *Runner[Args]) fixCategoryAutomatically(ctx context.Context, categoryIdx int, category *Category[Args], args Args, results *runAllCategoryChecksResult) (ok bool) {
 	// Best to be verbose when fixing, in case something goes wrong
 	r.Output.SetVerbose()
 	defer r.Output.UnsetVerbose()
 
 	r.Output.WriteLine(output.Styledf(output.StylePending, "Trying my hardest to fix %q automatically...", category.Name))
-
-	var span *analytics.Span
-	ctx, span = r.startSpan(ctx, "fix category "+category.Name,
-		trace.WithAttributes(
-			attribute.String("action", "fix_category"),
-		))
-	defer span.End()
 
 	// Make sure to call this with a final message before returning!
 	complete := func(emoji string, style output.Style, fmtStr string, args ...any) {
@@ -640,14 +623,12 @@ func (r *Runner[Args]) fixCategoryAutomatically(ctx context.Context, categoryIdx
 	}
 
 	if err := category.CheckEnabled(ctx, args); err != nil {
-		span.Skipped("skipped")
 		complete(output.EmojiQuestionMark, output.StyleGrey, "Skipped: %s", err.Error())
 		return true
 	}
 
 	// If nothing in this category is fixable, we are done
 	if !category.HasFixable() {
-		span.Skipped("not_fixable")
 		complete(output.EmojiFailure, output.StyleFailure, "Cannot be fixed automatically.")
 		return false
 	}
@@ -656,7 +637,6 @@ func (r *Runner[Args]) fixCategoryAutomatically(ctx context.Context, categoryIdx
 	var unmetDependencies []string
 	for _, d := range category.DependsOn {
 		if met, exists := results.categories[d]; !exists {
-			span.Failed("required_check_not_found")
 			complete(output.EmojiFailure, output.StyleFailure, "Required check category %q not found", d)
 			return false
 		} else if !met {
@@ -664,30 +644,20 @@ func (r *Runner[Args]) fixCategoryAutomatically(ctx context.Context, categoryIdx
 		}
 	}
 	if len(unmetDependencies) > 0 {
-		span.Failed("unmet_dependencies")
 		complete(output.EmojiFailure, output.StyleFailure, "Required dependencies %s not met.", strings.Join(unmetDependencies, ", "))
 		return false
 	}
 
 	fixCheck := func(c *Check[Args]) {
-		checkCtx, span := r.startSpan(ctx, "fix "+c.Name,
-			trace.WithAttributes(
-				attribute.String("action", "fix"),
-				attribute.String("category", category.Name),
-			))
-		defer span.End()
-
 		// If category is fixed, we are good to go
 		if c.IsSatisfied() {
-			span.Succeeded()
 			return
 		}
 
 		// Skip
-		if err := c.IsEnabled(checkCtx, args); err != nil {
+		if err := c.IsEnabled(ctx, args); err != nil {
 			r.Output.WriteLine(output.Linef(output.EmojiQuestionMark, output.CombineStyles(output.StyleGrey, output.StyleBold),
 				"%q skipped: %s", c.Name, err.Error()))
-			span.Skipped()
 			return
 		}
 
@@ -695,7 +665,6 @@ func (r *Runner[Args]) fixCategoryAutomatically(ctx context.Context, categoryIdx
 		if c.Fix == nil {
 			r.Output.WriteLine(output.Linef(output.EmojiShrug, output.CombineStyles(output.StyleWarning, output.StyleBold),
 				"%q cannot be fixed automatically.", c.Name))
-			span.Skipped("unfixable")
 			return
 		}
 
@@ -710,7 +679,6 @@ func (r *Runner[Args]) fixCategoryAutomatically(ctx context.Context, categoryIdx
 		if err != nil {
 			r.Output.WriteLine(output.Linef(output.EmojiWarning, output.CombineStyles(output.StyleFailure, output.StyleBold),
 				"Failed to fix %q: %s", c.Name, err.Error()))
-			span.Failed()
 			return
 		}
 
@@ -720,17 +688,15 @@ func (r *Runner[Args]) fixCategoryAutomatically(ctx context.Context, categoryIdx
 			c.cachedCheckErr = nil
 			c.cachedCheckOutput = ""
 		} else {
-			err = c.Update(checkCtx, r.Output, args)
+			err = c.Update(ctx, r.Output, args)
 		}
 
 		if err != nil {
 			r.Output.WriteLine(output.Styledf(output.CombineStyles(output.StyleWarning, output.StyleBold),
 				"Check %q still failing: %s", c.Name, err.Error()))
-			span.Failed("unfixed")
 		} else {
 			r.Output.WriteLine(output.Styledf(output.CombineStyles(output.StyleSuccess, output.StyleBold),
 				"Check %q is satisfied now!", c.Name))
-			span.Succeeded()
 		}
 	}
 
@@ -747,11 +713,4 @@ func (r *Runner[Args]) fixCategoryAutomatically(ctx context.Context, categoryIdx
 	}
 
 	return
-}
-
-func (r *Runner[Args]) startSpan(ctx context.Context, spanName string, opts ...trace.SpanStartOption) (context.Context, *analytics.Span) {
-	if r.AnalyticsCategory == "" {
-		return ctx, analytics.NoOpSpan()
-	}
-	return analytics.StartSpan(ctx, spanName, r.AnalyticsCategory, opts...)
 }

@@ -25,14 +25,14 @@ import (
 //   - metadata.yaml
 //
 // For historic revisions, squashed migrations are not necessarily split into privileged unprivileged
-// cateogories. When there is a single squashed migration, this function will extract the privileged
+// categories. When there is a single squashed migration, this function will extract the privileged
 // statements into a new migration. These migrations will have a negative-valued identifier, whose
 // absolute value indicates the squashed migration it was split from. NOTE: Callers must take care to
 // stitch these relations back together, as it can't be done easily pre-composition across versions.
 //
 // See the method `linkVirtualPrivilegedMigrations`.
-func ReadMigrations(schemaName, root, rev string) (fs.FS, error) {
-	migrations, err := readRawMigrations(schemaName, root, rev)
+func ReadMigrations(ma MigrationsReader, schemaName, rev string) (fs.FS, error) {
+	migrations, err := readRawMigrations(ma, schemaName, rev)
 	if err != nil {
 		return nil, err
 	}
@@ -398,9 +398,9 @@ func replaceParents(contents string, parents ...int) string {
 
 // replaceParentsInDefinitionMap updates the `parents` field of the definition with the given identifier.
 func replaceParentsInDefinitionMap(definitionMap map[int]definition.Definition, id int, parents []int) {
-	definition := definitionMap[id]
-	definition.Parents = parents
-	definitionMap[id] = definition
+	def := definitionMap[id]
+	def.Parents = parents
+	definitionMap[id] = def
 }
 
 var alterExtensionPattern = lazyregexp.New(`(?:CREATE|COMMENT ON|DROP)\s+EXTENSION.*;`)

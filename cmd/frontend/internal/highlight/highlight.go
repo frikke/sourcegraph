@@ -6,39 +6,35 @@ import (
 	"encoding/base64"
 	"fmt"
 	"html/template"
-	"net/http"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
-	"github.com/inconshreveable/log15"
-	otlog "github.com/opentracing/opentracing-go/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/sourcegraph/sourcegraph/internal/honey"
-
+	"github.com/sourcegraph/log"
 	"github.com/sourcegraph/scip/bindings/go/scip"
 
-	"github.com/sourcegraph/sourcegraph/internal/env"
+	"github.com/sourcegraph/sourcegraph/internal/binary"
 	"github.com/sourcegraph/sourcegraph/internal/gosyntect"
+	"github.com/sourcegraph/sourcegraph/internal/honey"
 	"github.com/sourcegraph/sourcegraph/internal/observation"
-	"github.com/sourcegraph/sourcegraph/internal/trace/ot"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
-var (
-	syntectServer = env.Get("SRC_SYNTECT_SERVER", "http://syntect-server:9238", "syntect_server HTTP(s) address")
-	client        *gosyntect.Client
-)
+func LoadConfig() {
+	client = gosyntect.GetSyntectClient()
+}
 
 var (
+	client          *gosyntect.Client
 	highlightOpOnce sync.Once
 	highlightOp     *observation.Operation
 )
@@ -54,28 +50,12 @@ func getHighlightOp() *observation.Operation {
 
 		highlightOp = obsvCtx.Operation(observation.Op{
 			Name:        "codeintel.syntax-highlight.Code",
-			LogFields:   []otlog.Field{},
+			Attrs:       []attribute.KeyValue{},
 			ErrorFilter: func(err error) observation.ErrorFilterBehaviour { return observation.EmitForHoney },
 		})
 	})
 
 	return highlightOp
-}
-
-func init() {
-	client = gosyntect.New(syntectServer)
-}
-
-// IsBinary is a helper to tell if the content of a file is binary or not.
-// TODO(tjdevries): This doesn't make sense to be here, IMO
-func IsBinary(content []byte) bool {
-	// We first check if the file is valid UTF8, since we always consider that
-	// to be non-binary.
-	//
-	// Secondly, if the file is not valid UTF8, we check if the detected HTTP
-	// content type is text, which covers a whole slew of other non-UTF8 text
-	// encodings for us.
-	return !utf8.Valid(content) && !strings.HasPrefix(http.DetectContentType(content), "text/")
 }
 
 // Params defines mandatory and optional parameters to use when highlighting
@@ -108,6 +88,11 @@ type Params struct {
 
 	// Format defines the response format of the syntax highlighting request.
 	Format gosyntect.HighlightResponseType
+
+	// KeepFinalNewline keeps the final newline of the file content when highlighting.
+	// By default we drop the last newline to match behavior of common code hosts
+	// that don't render another line at the end of the file.
+	KeepFinalNewline bool
 }
 
 // Metadata contains metadata about a request to highlight code. It is used to
@@ -261,7 +246,7 @@ func (h *HighlightedCode) LinesForRanges(ranges []LineRange) ([][]string, error)
 		appendTextToNode(currentCell, kind, line)
 	}
 
-	lsifToHTML(h.code, h.document, addRow, addText, validLines)
+	scipToHTML(h.code, h.document, addRow, addText, validLines)
 
 	stringRows := map[int32]string{}
 	for row, node := range htmlRows {
@@ -340,24 +325,24 @@ func Code(ctx context.Context, p Params) (response *HighlightedCode, aborted boo
 	// TODO: It could be worthwhile to log that this language isn't supported or something
 	// like that? Otherwise there is no feedback that this configuration isn't currently working,
 	// which is a bit of a confusing situation for the user.
-	if !client.IsTreesitterSupported(filetypeQuery.Language) {
+	if !gosyntect.IsTreesitterSupported(filetypeQuery.Language) {
 		filetypeQuery.Engine = EngineSyntect
 	}
 
-	ctx, errCollector, trace, endObservation := getHighlightOp().WithErrorsAndLogger(ctx, &err, observation.Args{LogFields: []otlog.Field{
-		otlog.String("revision", p.Metadata.Revision),
-		otlog.String("repo", p.Metadata.RepoName),
-		otlog.String("fileExtension", filepath.Ext(p.Filepath)),
-		otlog.String("filepath", p.Filepath),
-		otlog.Int("sizeBytes", len(p.Content)),
-		otlog.Bool("highlightLongLines", p.HighlightLongLines),
-		otlog.Bool("disableTimeout", p.DisableTimeout),
-		otlog.String("syntaxEngine", engineToDisplay[filetypeQuery.Engine]),
+	ctx, errCollector, traceLogger, endObservation := getHighlightOp().WithErrorsAndLogger(ctx, &err, observation.Args{Attrs: []attribute.KeyValue{
+		attribute.String("revision", p.Metadata.Revision),
+		attribute.String("repo", p.Metadata.RepoName),
+		attribute.String("fileExtension", filepath.Ext(p.Filepath)),
+		attribute.String("filepath", p.Filepath),
+		attribute.Int("sizeBytes", len(p.Content)),
+		attribute.Bool("highlightLongLines", p.HighlightLongLines),
+		attribute.Bool("disableTimeout", p.DisableTimeout),
+		attribute.Stringer("syntaxEngine", filetypeQuery.Engine),
 	}})
 	defer endObservation(1, observation.Args{})
 
 	var prometheusStatus string
-	requestTime := prometheus.NewTimer(metricRequestHistogram)
+	start := time.Now()
 	defer func() {
 		if prometheusStatus != "" {
 			requestCounter.WithLabelValues(prometheusStatus).Inc()
@@ -366,7 +351,7 @@ func Code(ctx context.Context, p Params) (response *HighlightedCode, aborted boo
 		} else {
 			requestCounter.WithLabelValues("success").Inc()
 		}
-		requestTime.ObserveDuration()
+		metricRequestHistogram.Observe(time.Since(start).Seconds())
 	}()
 
 	if !p.DisableTimeout {
@@ -379,7 +364,7 @@ func Code(ctx context.Context, p Params) (response *HighlightedCode, aborted boo
 	}
 
 	// Never pass binary files to the syntax highlighter.
-	if IsBinary(p.Content) {
+	if binary.IsBinary(p.Content) {
 		return nil, false, ErrBinary
 	}
 	code := string(p.Content)
@@ -392,7 +377,9 @@ func Code(ctx context.Context, p Params) (response *HighlightedCode, aborted boo
 	// This matches other online code reading tools such as e.g. GitHub; see
 	// https://github.com/sourcegraph/sourcegraph/issues/8024 for more
 	// background.
-	code = strings.TrimSuffix(code, "\n")
+	if !p.KeepFinalNewline {
+		code = strings.TrimSuffix(code, "\n")
+	}
 
 	unhighlightedCode := func(err error, code string) (*HighlightedCode, bool, error) {
 		errCollector.Collect(&err)
@@ -426,34 +413,36 @@ func Code(ctx context.Context, p Params) (response *HighlightedCode, aborted boo
 		Code:             code,
 		Filepath:         p.Filepath,
 		StabilizeTimeout: stabilizeTimeout,
-		Tracer:           ot.GetTracer(ctx),
 		LineLengthLimit:  maxLineLength,
-		CSS:              true,
 		Engine:           getEngineParameter(filetypeQuery.Engine),
 	}
 
-	// Set the Filetype part of the command if:
-	//    1. We are overriding the config, because then we don't want syntect to try and
-	//       guess the filetype (but otherwise we want to maintain backwards compat with
-	//       whatever we were calculating before)
-	//    2. We are using treesitter. Always have syntect use the language provided in that
-	//       case to make sure that we have normalized the names of the language by then.
-	if filetypeQuery.LanguageOverride || filetypeQuery.Engine == EngineTreeSitter {
-		query.Filetype = filetypeQuery.Language
-	}
+	query.Filetype = filetypeQuery.Language
 
 	resp, err := client.Highlight(ctx, query, p.Format)
 
-	if ctx.Err() == context.DeadlineExceeded {
-		log15.Warn(
-			"syntax highlighting took longer than 3s, this *could* indicate a bug in Sourcegraph",
-			"filepath", p.Filepath,
-			"filetype", query.Filetype,
-			"repo_name", p.Metadata.RepoName,
-			"revision", p.Metadata.Revision,
-			"snippet", fmt.Sprintf("%q…", firstCharacters(code, 80)),
+	if ctx.Err() == context.Canceled {
+		traceLogger.Warn(
+			"syntax highlighting canceled, this *could* indicate a bug in Sourcegraph",
+			log.Duration("elapsed", time.Since(start)),
 		)
-		trace.Log(otlog.Bool("timeout", true))
+		traceLogger.AddEvent("syntaxHighlighting", attribute.Bool("canceled", true))
+		prometheusStatus = "canceled"
+
+		// Canceled, return plain table with aborted set. Callers expect
+		// non-nil response if err is nil.
+		plainResponse, err := generatePlainTable(code)
+		if err != nil {
+			return nil, false, err
+		}
+		return plainResponse, true, nil
+	} else if ctx.Err() == context.DeadlineExceeded {
+		traceLogger.Warn(
+			"syntax highlighting took longer than 3s, this *could* indicate a bug in Sourcegraph",
+			log.Duration("elapsed", time.Since(start)),
+			snippet(code),
+		)
+		traceLogger.AddEvent("syntaxHighlighting", attribute.Bool("timeout", true))
 		prometheusStatus = "timeout"
 
 		// Timeout, so render plain table.
@@ -463,23 +452,24 @@ func Code(ctx context.Context, p Params) (response *HighlightedCode, aborted boo
 		}
 		return plainResponse, true, nil
 	} else if err != nil {
-		log15.Error(
-			"syntax highlighting failed (this is a bug, please report it)",
-			"filepath", p.Filepath,
-			"filetype", query.Filetype,
-			"repo_name", p.Metadata.RepoName,
-			"revision", p.Metadata.Revision,
-			"snippet", fmt.Sprintf("%q…", firstCharacters(code, 80)),
-			"error", err,
-		)
-
-		if known, problem := identifyError(err); known {
+		known, problem := identifyError(err)
+		if known {
 			// A problem that can sometimes be expected has occurred. We will
 			// identify such problems through metrics/logs and resolve them on
 			// a case-by-case basis.
-			trace.Log(otlog.Bool(problem, true))
+			traceLogger.AddEvent("TODO Domain Owner", attribute.Bool(problem, true))
 			prometheusStatus = problem
+		} else {
+			problem = "unknown"
 		}
+
+		traceLogger.Error(
+			"syntax highlighting failed (this is a bug, please report it)",
+			log.Duration("elapsed", time.Since(start)),
+			snippet(code),
+			log.String("problem", problem),
+			log.Error(err),
+		)
 
 		// It is not useful to surface errors in the UI, so fall back to
 		// unhighlighted text.
@@ -488,7 +478,7 @@ func Code(ctx context.Context, p Params) (response *HighlightedCode, aborted boo
 
 	// We need to return SCIP data if explicitly requested or if the selected
 	// engine is tree sitter.
-	if p.Format == gosyntect.FormatJSONSCIP || filetypeQuery.Engine == EngineTreeSitter {
+	if p.Format == gosyntect.FormatJSONSCIP || filetypeQuery.Engine.isTreesitterBased() {
 		document := new(scip.Document)
 		data, err := base64.StdEncoding.DecodeString(resp.Data)
 
@@ -544,12 +534,12 @@ var metricRequestHistogram = promauto.NewHistogram(
 		Help: "time for a request to have syntax highlight",
 	})
 
-func firstCharacters(s string, n int) string {
-	v := []rune(s)
-	if len(v) < n {
-		return string(v)
+func snippet(codeS string) log.Field {
+	s := []rune(codeS)
+	if len(s) > 80 {
+		s = s[:80]
 	}
-	return string(v[:n])
+	return log.String("snippet", fmt.Sprintf("%q…", string(s)))
 }
 
 func generatePlainTable(code string) (*HighlightedCode, error) {

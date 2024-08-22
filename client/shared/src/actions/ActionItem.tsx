@@ -1,28 +1,28 @@
 import * as React from 'react'
 
-import { mdiOpenInNew } from '@mdi/js'
+import { mdiHelpCircleOutline, mdiOpenInNew } from '@mdi/js'
 import classNames from 'classnames'
-import * as H from 'history'
+import type * as H from 'history'
 import { from, Subject, Subscription } from 'rxjs'
-import { catchError, map, mapTo, mergeMap, startWith, tap } from 'rxjs/operators'
+import { catchError, map, mergeMap, startWith, tap } from 'rxjs/operators'
 
-import { ActionContribution, Evaluated } from '@sourcegraph/client-api'
-import { asError, ErrorLike, isErrorLike, isExternalLink, logger } from '@sourcegraph/common'
+import type { ActionContribution, Evaluated } from '@sourcegraph/client-api'
+import { asError, type ErrorLike, isExternalLink, logger } from '@sourcegraph/common'
 import {
     LoadingSpinner,
     Button,
     ButtonLink,
-    ButtonLinkProps,
+    type ButtonLinkProps,
     WildcardThemeContext,
     Icon,
     Tooltip,
 } from '@sourcegraph/wildcard'
 
-import { ExecuteCommandParameters } from '../api/client/mainthread-api'
+import type { ExecuteCommandParameters } from '../api/client/mainthread-api'
 import { urlForOpenPanel } from '../commands/commands'
-import { RequiredExtensionsControllerProps } from '../extensions/controller'
-import { PlatformContextProps } from '../platform/context'
-import { TelemetryProps } from '../telemetry/telemetryService'
+import type { ExtensionsControllerProps } from '../extensions/controller'
+import type { TelemetryV2Props } from '../telemetry'
+import type { TelemetryProps } from '../telemetry/telemetryService'
 
 import styles from './ActionItem.module.scss'
 
@@ -52,9 +52,7 @@ export interface ActionItemStyleProps {
     actionItemOutline?: ButtonLinkProps['outline']
 }
 
-export interface ActionItemComponentProps
-    extends RequiredExtensionsControllerProps<'executeCommand'>,
-        PlatformContextProps<'settings'> {
+export interface ActionItemComponentProps extends ExtensionsControllerProps<'executeCommand'> {
     location: H.Location
 
     iconClassName?: string
@@ -62,7 +60,7 @@ export interface ActionItemComponentProps
     actionItemStyleProps?: ActionItemStyleProps
 }
 
-export interface ActionItemProps extends ActionItemAction, ActionItemComponentProps, TelemetryProps {
+export interface ActionItemProps extends ActionItemAction, ActionItemComponentProps, TelemetryProps, TelemetryV2Props {
     variant?: 'actionItem'
 
     hideLabel?: boolean
@@ -92,20 +90,6 @@ export interface ActionItemProps extends ActionItemAction, ActionItemComponentPr
      */
     showLoadingSpinnerDuringExecution?: boolean
 
-    /**
-     * Whether to show the error (if any) from executing the command inline on this component and NOT in the global
-     * notifications UI component.
-     *
-     * This inline error display behavior is intended for actions that are scoped to a particular component. If the
-     * error were displayed in the global notifications UI component, it might not be clear which of the many
-     * possible scopes the error applies to.
-     *
-     * For example, the hover actions ("Go to definition", "Find references", etc.) use showInlineError == true
-     * because those actions are scoped to a specific token in a file. The command palette uses showInlineError ==
-     * false because it is a global UI component (and because showing tooltips on menu items would look strange).
-     */
-    showInlineError?: boolean
-
     /** Instead of showing the icon and/or title, show this element. */
     title?: JSX.Element | null
 
@@ -130,6 +114,12 @@ interface State {
     actionOrError: typeof LOADING | null | ErrorLike
 }
 
+/**
+ * For testing only, used to set the window.location value for {@link isExternalLink}.
+ * @internal
+ */
+export const windowLocation__testingOnly: { value: Pick<URL, 'origin' | 'href'> | null } = { value: null }
+
 export class ActionItem extends React.PureComponent<ActionItemProps, State, typeof WildcardThemeContext> {
     public static contextType = WildcardThemeContext
     public context!: React.ContextType<typeof WildcardThemeContext>
@@ -145,9 +135,15 @@ export class ActionItem extends React.PureComponent<ActionItemProps, State, type
                 .pipe(
                     mergeMap(parameters =>
                         from(
-                            this.props.extensionsController.executeCommand(parameters, this.props.showInlineError)
+                            this.props.extensionsController
+                                ? this.props.extensionsController.executeCommand(parameters)
+                                : Promise.reject(
+                                      new Error(
+                                          'ActionItems commands other than open and invokeFunction-new are deprecated'
+                                      )
+                                  )
                         ).pipe(
-                            mapTo(null),
+                            map(() => null),
                             catchError(error => [asError(error)]),
                             map(actionOrError => ({ actionOrError })),
                             tap(() => {
@@ -224,7 +220,11 @@ export class ActionItem extends React.PureComponent<ActionItemProps, State, type
                         className={this.props.className}
                         tabIndex={this.props.tabIndex}
                     >
-                        {content}
+                        {this.props.action?.title === '?' ? (
+                            <Icon aria-hidden={true} svgPath={mdiHelpCircleOutline} />
+                        ) : (
+                            content
+                        )}
                     </span>
                 </Tooltip>
             )
@@ -241,7 +241,7 @@ export class ActionItem extends React.PureComponent<ActionItemProps, State, type
         const to = primaryTo || altTo
         // Open in new tab if an external link
         const newTabProps =
-            to && isExternalLink(to)
+            to && isExternalLink(to, windowLocation__testingOnly.value ?? window.location)
                 ? {
                       target: '_blank',
                       rel: 'noopener noreferrer',
@@ -268,14 +268,9 @@ export class ActionItem extends React.PureComponent<ActionItemProps, State, type
             tabIndex: this.props.tabIndex,
         }
 
-        const tooltipOrErrorMessage =
-            this.props.showInlineError && isErrorLike(this.state.actionOrError)
-                ? `Error: ${this.state.actionOrError.message}`
-                : tooltip
-
         if (!to) {
             return (
-                <Tooltip content={tooltipOrErrorMessage}>
+                <Tooltip content={tooltip}>
                     <Button
                         {...sharedProps}
                         {...buttonLinkProps}
@@ -289,7 +284,7 @@ export class ActionItem extends React.PureComponent<ActionItemProps, State, type
                         onClick={this.runAction}
                         data-action-item-pressed={pressed}
                         aria-pressed={pressed}
-                        aria-label={tooltipOrErrorMessage}
+                        aria-label={tooltip}
                     >
                         {content}{' '}
                         {showLoadingSpinner && (
@@ -303,7 +298,7 @@ export class ActionItem extends React.PureComponent<ActionItemProps, State, type
         }
 
         return (
-            <Tooltip content={tooltipOrErrorMessage}>
+            <Tooltip content={tooltip}>
                 <span>
                     <ButtonLink
                         data-content={this.props.dataContent}
@@ -362,22 +357,62 @@ export class ActionItem extends React.PureComponent<ActionItemProps, State, type
 
         // Record action ID (but not args, which might leak sensitive data).
         this.props.telemetryService.log(action.id)
+        if (action.telemetryProps) {
+            this.props.telemetryRecorder.recordEvent(
+                // 👷 HACK: We have no control over what gets sent over Comlink/
+                // web workers, so we depend on action contribution implementations
+                // to give type guidance to ensure that we don't accidentally share
+                // arbitrary, potentially sensitive string values. In this
+                // RPC handler, when passing the provided event to the
+                // TelemetryRecorder implementation, we forcibly cast all
+                // the inputs below (feature) into known types
+                // (the string 'feature') so that the recorder will accept
+                // it. DO NOT do this elsewhere!
+                action.telemetryProps.feature as 'feature',
+                'executed',
+                {
+                    privateMetadata: { action: action.id, ...action.telemetryProps.privateMetadata },
+                }
+            )
+        } else {
+            this.props.telemetryRecorder.recordEvent('blob.action', 'executed', {
+                privateMetadata: { action: action.id },
+            })
+        }
+
+        const emitDidExecute = (): void => {
+            if (this.props.onDidExecute) {
+                this.props.onDidExecute(action.id)
+            }
+        }
+
+        const onSelect = onSelectCallbackForClientCommandOpen(action)
+        if (onSelect?.(event)) {
+            emitDidExecute()
+            return
+        }
 
         if (urlForClientCommandOpen(action, this.props.location.hash)) {
             if (event.currentTarget.tagName === 'A' && event.currentTarget.hasAttribute('href')) {
                 // Do not execute the command. The <LinkOrButton>'s default event handler will do what we want (which
                 // is to open a URL). The only case where this breaks is if both the action and alt action are "open"
                 // commands; in that case, this only ever opens the (non-alt) action.
-                if (this.props.onDidExecute) {
-                    // Defer calling onRun until after the URL has been opened. If we call it immediately, then in
-                    // CommandList it immediately updates the (most-recent-first) ordering of the ActionItems, and
-                    // the URL actually changes underneath us before the URL is opened. There is no harm to
-                    // deferring this call; onRun's documentation allows this.
-                    const onDidExecute = this.props.onDidExecute
-                    setTimeout(() => onDidExecute(action.id))
-                }
+                emitDidExecute()
                 return
             }
+        }
+
+        // A special-case to support invokeFunction style actions without the extensions controller
+        if (action.command === 'invokeFunction-new') {
+            const args = action.commandArguments || []
+            for (const arg of args) {
+                if (typeof arg === 'function') {
+                    arg()
+                }
+            }
+
+            emitDidExecute()
+            return
         }
 
         // If the action we're running is *not* opening a URL by using the event target's default handler, then
@@ -395,6 +430,19 @@ export class ActionItem extends React.PureComponent<ActionItemProps, State, type
         ((this.props.disabledDuringExecution || this.props.showLoadingSpinnerDuringExecution) &&
             this.state.actionOrError === LOADING) ||
         this.props.disabledWhen
+}
+
+type OnSelectHandler = (event: React.MouseEvent<HTMLElement> | React.KeyboardEvent<HTMLElement>) => boolean
+export function onSelectCallbackForClientCommandOpen(
+    action: Pick<Evaluated<ActionContribution>, 'command' | 'commandArguments'>
+): OnSelectHandler | undefined {
+    if (action.command === 'open' && action.commandArguments && action.commandArguments.length > 1) {
+        const onSelect = action.commandArguments[1]
+        if (typeof onSelect === 'function') {
+            return onSelect as OnSelectHandler
+        }
+    }
+    return undefined
 }
 
 export function urlForClientCommandOpen(

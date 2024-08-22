@@ -6,24 +6,40 @@ import { CardBody, Card, Link, H4, Text } from '@sourcegraph/wildcard'
 
 import { SourcegraphIcon } from '../../../auth/icons'
 
+import { BatchChangesChangelogAlert } from './BatchChangesChangelogAlert'
+
 import styles from './BatchChangesListIntro.module.scss'
 
 export interface BatchChangesListIntroProps {
     isLicensed: boolean | undefined
+    viewerIsAdmin: boolean
 }
 
 export const BatchChangesListIntro: React.FunctionComponent<React.PropsWithChildren<BatchChangesListIntroProps>> = ({
     isLicensed,
+    viewerIsAdmin,
 }) => {
-    if (isLicensed === undefined || isLicensed === true) {
+    if (isLicensed === undefined) {
         return null
     }
 
     return (
-        <div className="row">
-            <div className="col-12 mb-3">
-                <BatchChangesUnlicensedAlert />
-            </div>
+        <div className={classNames(styles.alertsRow)}>
+            {isLicensed === true ? (
+                <div className={classNames(styles.alertsRowContent, 'flex-1 mb-3')}>
+                    <BatchChangesChangelogAlert viewerIsAdmin={viewerIsAdmin} />
+                </div>
+            ) : (
+                <>
+                    <div className={classNames(styles.alertsRowContent, 'flex-1 mb-3')}>
+                        <BatchChangesUnlicensedAlert />
+                    </div>
+                    <BatchChangesChangelogAlert
+                        viewerIsAdmin={viewerIsAdmin}
+                        className={classNames(styles.alertsRowContent, 'flex-1 mb-3')}
+                    />
+                </>
+            )}
         </div>
     )
 }
@@ -38,10 +54,10 @@ const BatchChangesUnlicensedAlert: React.FunctionComponent<React.PropsWithChildr
                     <H4>Batch changes trial</H4>
                     <Text>
                         Batch changes is a paid feature of Sourcegraph. All users can create sample batch changes with
-                        up to five changesets without a license.
+                        up to ten changesets without a license.
                     </Text>
                     <Text className="mb-0">
-                        <Link to="https://about.sourcegraph.com/contact/sales/">Contact sales</Link> to obtain a trial
+                        <Link to="https://sourcegraph.com/contact/sales/">Contact sales</Link> to obtain a trial
                         license.
                     </Text>
                 </div>

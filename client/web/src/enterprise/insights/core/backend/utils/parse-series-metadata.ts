@@ -1,15 +1,15 @@
-import { InsightDataSeries } from '../../../../../graphql-operations'
-import { BackendInsight, InsightType, SearchBasedInsightSeries } from '../../types'
-
-import { DATA_SERIES_COLORS_LIST } from './create-line-chart-content'
+import type { InsightDataSeries } from '../../../../../graphql-operations'
+import { DATA_SERIES_COLORS_LIST } from '../../../constants'
+import { type BackendInsight, InsightType, type SearchBasedInsightSeries } from '../../types'
 
 export function getParsedSeriesMetadata(
     insight: BackendInsight,
     seriesData: InsightDataSeries[]
 ): SearchBasedInsightSeries[] {
     switch (insight.type) {
-        case InsightType.SearchBased:
+        case InsightType.SearchBased: {
             return insight.series
+        }
 
         case InsightType.Compute: {
             return seriesData.map((generatedSeries, index) => ({

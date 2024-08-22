@@ -1,7 +1,6 @@
 package github
 
 import (
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -38,24 +37,4 @@ func (s *mockHTTPResponseBody) Do(req *http.Request) (*http.Response, error) {
 		StatusCode: status,
 		Body:       io.NopCloser(strings.NewReader(s.responseBody)),
 	}, nil
-}
-
-func stringForRepoList(repos []*Repository) string {
-	repoStrings := []string{}
-	for _, repo := range repos {
-		repoStrings = append(repoStrings, fmt.Sprintf("%#v", repo))
-	}
-	return "{\n" + strings.Join(repoStrings, ",\n") + "}\n"
-}
-
-func repoListsAreEqual(a []*Repository, b []*Repository) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		if *a[i] != *b[i] {
-			return false
-		}
-	}
-	return true
 }

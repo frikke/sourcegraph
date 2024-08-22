@@ -1,8 +1,8 @@
-import { mkdirSync, WriteStream, createWriteStream } from 'fs'
+import { mkdirSync, type WriteStream, createWriteStream } from 'fs'
 import path from 'path'
-import { Readable } from 'stream'
+import type { Readable } from 'stream'
 
-import { Entry, open as _openZip, ZipFile } from 'yauzl'
+import { type Entry, open as _openZip, type ZipFile } from 'yauzl'
 
 export function installExtension(extensionPath: string, extensionDirectory: string): Promise<void> {
     return openZip(extensionPath, true).then(zipfile => extractZip(zipfile, extensionDirectory))
@@ -50,7 +50,7 @@ function extractZip(zipfile: ZipFile, targetPath: string): Promise<void> {
             }
         })
         zipfile.readEntry()
-        // eslint-disable-next-line @typescript-eslint/no-misused-promises
+
         zipfile.on('entry', async (entry: Entry) => {
             const fileName = entry.fileName // .replace(options.sourcePathRegex, '')
 

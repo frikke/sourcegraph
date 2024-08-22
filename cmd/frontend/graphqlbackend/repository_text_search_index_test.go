@@ -20,26 +20,27 @@ import (
 )
 
 func TestRetrievingAndDeduplicatingIndexedRefs(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+
 	logger := logtest.Scoped(t)
 	db := database.NewDB(logger, nil)
 	defaultBranchRef := "refs/heads/main"
-	gitserver.Mocks.ResolveRevision = func(rev string, opt gitserver.ResolveRevisionOptions) (api.CommitID, error) {
+	gsClient := gitserver.NewMockClient()
+	gsClient.GetDefaultBranchFunc.SetDefaultReturn(defaultBranchRef, "", nil)
+	gsClient.ResolveRevisionFunc.SetDefaultHook(func(_ context.Context, _ api.RepoName, rev string, _ gitserver.ResolveRevisionOptions) (api.CommitID, error) {
 		if rev != defaultBranchRef && strings.HasSuffix(rev, defaultBranchRef) {
 			return "", errors.New("x")
 		}
-		return api.CommitID("deadbeef"), nil
-	}
-	gitserver.Mocks.GetDefaultBranch = func(repo api.RepoName) (refName string, commit api.CommitID, err error) {
-		// Mock default branch lookup in (*RepsitoryResolver).DefaultBranch.
-		return defaultBranchRef, "", nil
-	}
-	defer gitserver.ResetMocks()
+		return "deadbeef", nil
+	})
 
 	repoIndexResolver := &repositoryTextSearchIndexResolver{
-		repo: NewRepositoryResolver(db, gitserver.NewClient(db), &types.Repo{Name: "alice/repo"}),
-		client: &backend.FakeSearcher{Repos: []*zoekt.RepoListEntry{{
+		repo: NewRepositoryResolver(db, gsClient, &types.Repo{Name: "alice/repo"}),
+		client: &backend.FakeStreamer{Repos: []*zoekt.RepoListEntry{{
 			Repository: zoekt.Repository{
-				Name: string("alice/repo"),
+				Name: "alice/repo",
 				Branches: []zoekt.RepositoryBranch{
 					{Name: "HEAD", Version: "deadbeef"},
 					{Name: "main", Version: "deadbeef"},
@@ -59,7 +60,7 @@ func TestRetrievingAndDeduplicatingIndexedRefs(t *testing.T) {
 	want := []string{"refs/heads/main", "refs/heads/1.0"}
 	got := []string{}
 	for _, ref := range refs {
-		got = append(got, ref.ref.name)
+		got = append(got, ref.ref.Name())
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)

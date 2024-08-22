@@ -2,6 +2,7 @@ package linters
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/check"
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/repo"
@@ -18,7 +19,18 @@ func NewRunner(out *std.Output, annotations bool, targets ...Target) Runner {
 		if c.Fix == nil {
 			return ""
 		}
-		return fmt.Sprintf("Try `sg lint -fix %s` to fix this issue!", category)
+		if annotations {
+			path := fmt.Sprintf("../../%s.md", category)
+			fd, err := os.Create(path)
+			if err != nil {
+				os.Stderr.WriteString(err.Error() + "\n")
+			}
+			_, err = fd.WriteString(fmt.Sprintf("Try `sg lint --fix %s` to fix this issue!", category))
+			if err != nil {
+				os.Stderr.WriteString(err.Error() + "\n")
+			}
+		}
+		return fmt.Sprintf("Try `sg lint --fix %s` to fix this issue!", category)
 	}
 	return runner
 }

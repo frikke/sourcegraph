@@ -6,10 +6,15 @@ import (
 	"github.com/graph-gophers/graphql-go"
 	"github.com/graph-gophers/graphql-go/relay"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/cody"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/ssc"
 	"github.com/sourcegraph/sourcegraph/internal/actor"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/dotcom"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc"
+	"github.com/sourcegraph/sourcegraph/internal/gqlutil"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 type externalAccountResolver struct {
@@ -28,7 +33,7 @@ func externalAccountByID(ctx context.Context, db database.DB, id graphql.ID) (*e
 	}
 
 	// 🚨 SECURITY: Only the user and site admins should be able to see a user's external accounts.
-	if err := backend.CheckSiteAdminOrSameUser(ctx, db, account.UserID); err != nil {
+	if err := auth.CheckSiteAdminOrSameUser(ctx, db, account.UserID); err != nil {
 		return nil, err
 	}
 
@@ -50,8 +55,36 @@ func (r *externalAccountResolver) ServiceType() string { return r.account.Servic
 func (r *externalAccountResolver) ServiceID() string   { return r.account.ServiceID }
 func (r *externalAccountResolver) ClientID() string    { return r.account.ClientID }
 func (r *externalAccountResolver) AccountID() string   { return r.account.AccountID }
-func (r *externalAccountResolver) CreatedAt() DateTime { return DateTime{Time: r.account.CreatedAt} }
-func (r *externalAccountResolver) UpdatedAt() DateTime { return DateTime{Time: r.account.UpdatedAt} }
+
+// TEMPORARY: This resolver is temporary to help us debug the #inc-284-plg-users-paying-for-and-being-billed-for-pro-without-being-upgrade.
+func (r *externalAccountResolver) CodySubscription(ctx context.Context) (*CodySubscriptionResolver, error) {
+	if !dotcom.SourcegraphDotComMode() {
+		return nil, errors.New("this feature is only available on sourcegraph.com")
+	}
+
+	if r.account.ServiceType != "openidconnect" || r.account.ServiceID != ssc.GetSAMSServiceID() {
+		return nil, nil
+	}
+
+	userResolver, err := r.User(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	subscription, err := cody.SubscriptionForSAMSAccountID(ctx, r.db, *userResolver.user, r.account.AccountID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CodySubscriptionResolver{subscription: subscription}, nil
+}
+
+func (r *externalAccountResolver) CreatedAt() gqlutil.DateTime {
+	return gqlutil.DateTime{Time: r.account.CreatedAt}
+}
+func (r *externalAccountResolver) UpdatedAt() gqlutil.DateTime {
+	return gqlutil.DateTime{Time: r.account.UpdatedAt}
+}
 
 func (r *externalAccountResolver) RefreshURL() *string {
 	// TODO(sqs): Not supported.
@@ -67,10 +100,10 @@ func (r *externalAccountResolver) AccountData(ctx context.Context) (*JSONValue, 
 	// Therefore, the site admins and the user can view account data of GitHub and
 	// GitLab, but only site admins can view account data for all other types.
 	var err error
-	if r.account.ServiceType == extsvc.TypeGitHub || r.account.ServiceType == extsvc.TypeGitLab || r.account.ServiceType == extsvc.TypeGitHubApp {
-		err = backend.CheckSiteAdminOrSameUser(ctx, r.db, actor.FromContext(ctx).UID)
+	if r.account.ServiceType == extsvc.TypeGitHub || r.account.ServiceType == extsvc.TypeGitLab {
+		err = auth.CheckSiteAdminOrSameUser(ctx, r.db, actor.FromContext(ctx).UID)
 	} else {
-		err = backend.CheckUserIsSiteAdmin(ctx, r.db, actor.FromContext(ctx).UID)
+		err = auth.CheckUserIsSiteAdmin(ctx, r.db, actor.FromContext(ctx).UID)
 	}
 	if err != nil {
 		return nil, err
@@ -84,5 +117,25 @@ func (r *externalAccountResolver) AccountData(ctx context.Context) (*JSONValue, 
 
 		return &JSONValue{raw}, nil
 	}
+	return nil, nil
+}
+
+func (r *externalAccountResolver) PublicAccountData(ctx context.Context) (*externalAccountDataResolver, error) {
+	// 🚨 SECURITY: We only return this data to site admin or user who is linked to the external account
+	// This method differs from the one above - here we only return specific attributes
+	// from the account that are public info, e.g. username, email, etc.
+	err := auth.CheckSiteAdminOrSameUser(ctx, r.db, actor.FromContext(ctx).UID)
+	if err != nil {
+		return nil, err
+	}
+
+	if r.account.Data != nil {
+		res, err := NewExternalAccountDataResolver(ctx, r.account)
+		if err != nil {
+			return nil, nil
+		}
+		return res, nil
+	}
+
 	return nil, nil
 }

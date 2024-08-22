@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sourcegraph/sourcegraph/enterprise/dev/ci/images"
+	"github.com/sourcegraph/sourcegraph/dev/ci/images"
 )
 
 func mustTime() time.Time {
@@ -41,7 +41,7 @@ func TestParseTag(t *testing.T) {
 		},
 		{
 			"from constructor",
-			images.MainBranchImageTag(mustTime(), "abcde", 1234),
+			images.BranchImageTag(mustTime(), "abcde", 1234, "main", ""),
 			&ParsedMainBranchImageTag{
 				Build:       1234,
 				Date:        "2006-01-02",
@@ -65,7 +65,7 @@ func TestParseTag(t *testing.T) {
 	}
 }
 
-func Test_findLatestTag(t *testing.T) {
+func TestFindLatestTag(t *testing.T) {
 	tests := []struct {
 		name string
 		tags []string
@@ -84,7 +84,7 @@ func Test_findLatestTag(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got, _ := findLatestMainTag(tt.tags); got != tt.want {
+			if got, _ := FindLatestMainTag(tt.tags); got != tt.want {
 				t.Errorf("findLatestTag() = %v, want %v", got, tt.want)
 			}
 		})
@@ -93,35 +93,63 @@ func Test_findLatestTag(t *testing.T) {
 
 func TestParseRawImgString(t *testing.T) {
 	tests := []struct {
-		name string
-		tag  string
-		want *ImageReference
+		name   string
+		rawImg string
+		want   *Repository
 	}{
 		{
 			"base",
 			"index.docker.io/sourcegraph/server:3.36.2@sha256:07d7407fdc656d7513aa54cdffeeecb33aa4e284eea2fd82e27342411430e5f2",
-			&ImageReference{
-				Registry: "docker.io",
-				Name:     "sourcegraph/server",
-				Tag:      "3.36.2",
-				Digest:   "sha256:07d7407fdc656d7513aa54cdffeeecb33aa4e284eea2fd82e27342411430e5f2",
+			&Repository{
+				registry: "docker.io",
+				org:      "sourcegraph",
+				name:     "server",
+				tag:      "3.36.2",
+				digest:   "sha256:07d7407fdc656d7513aa54cdffeeecb33aa4e284eea2fd82e27342411430e5f2",
 			},
 		},
 		{
 			"base",
 			"index.docker.io/sourcegraph/server:3.36.2",
-			&ImageReference{
-				Registry: "docker.io",
-				Name:     "sourcegraph/server",
-				Tag:      "3.36.2",
-				Digest:   "",
+			&Repository{
+				registry: "docker.io",
+				org:      "sourcegraph",
+				name:     "server",
+				tag:      "3.36.2",
+				digest:   "",
+			},
+		},
+		{
+			"base",
+			"us-central1-docker.pkg.dev/sourcegraph-ci/rfc795-internal/cadvisor:5.3.666@sha256:775a22b491a9956b725c12d72841adbcd9852964f171a942118f9aa8839e47d7",
+			&Repository{
+				registry: "us-central1-docker.pkg.dev",
+				org:      "sourcegraph-ci/rfc795-internal",
+				name:     "cadvisor",
+				tag:      "5.3.666",
+				digest:   "sha256:775a22b491a9956b725c12d72841adbcd9852964f171a942118f9aa8839e47d7",
+			},
+		},
+		{
+			"base",
+			// sometimes yaml image values are quoted
+			`"us-central1-docker.pkg.dev/sourcegraph-ci/rfc795-internal/cadvisor:5.3.666@sha256:775a22b491a9956b725c12d72841adbcd9852964f171a942118f9aa8839e47d7"`,
+			&Repository{
+				registry: "us-central1-docker.pkg.dev",
+				org:      "sourcegraph-ci/rfc795-internal",
+				name:     "cadvisor",
+				tag:      "5.3.666",
+				digest:   "sha256:775a22b491a9956b725c12d72841adbcd9852964f171a942118f9aa8839e47d7",
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got, _ := parseImgString(tt.tag); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("parseImgString() got = %v, want %v", got, tt.want)
+			got, err := ParseRepository(tt.rawImg)
+			if err != nil {
+				t.Errorf("ParseRepository() error = %v", err)
+			} else if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ParseRepository() got = %v, want %v", got, tt.want)
 			}
 		})
 	}

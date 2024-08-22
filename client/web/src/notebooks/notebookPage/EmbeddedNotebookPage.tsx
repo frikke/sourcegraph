@@ -1,52 +1,44 @@
-import React, { useCallback, useEffect, useMemo } from 'react'
+import { type FC, useCallback, useEffect, useMemo } from 'react'
 
 import { noop } from 'lodash'
+import { useParams } from 'react-router-dom'
 import { NEVER } from 'rxjs'
 import { catchError, startWith } from 'rxjs/operators'
 
 import { asError, isErrorLike } from '@sourcegraph/common'
-import { FetchFileParameters } from '@sourcegraph/search-ui'
-import { fetchHighlightedFileLineRanges as fetchHighlightedFileLineRangesShared } from '@sourcegraph/shared/src/backend/file'
-import { ExtensionsControllerProps } from '@sourcegraph/shared/src/extensions/controller'
-import { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
+import {
+    type FetchFileParameters,
+    fetchHighlightedFileLineRanges as fetchHighlightedFileLineRangesShared,
+} from '@sourcegraph/shared/src/backend/file'
+import type { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
 import { aggregateStreamingSearch } from '@sourcegraph/shared/src/search/stream'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
 import { Alert, LoadingSpinner, useObservable } from '@sourcegraph/wildcard'
 
-import { eventLogger } from '../../tracking/eventLogger'
 import { fetchNotebook } from '../backend'
 import { convertNotebookTitleToFileName } from '../serialize'
 
-import { NotebookContent, NotebookContentProps } from './NotebookContent'
+import { NotebookContent, type NotebookContentProps } from './NotebookContent'
 
 interface EmbeddedNotebookPageProps
     extends Pick<
             NotebookContentProps,
-            | 'isLightTheme'
-            | 'searchContextsEnabled'
-            | 'showSearchContext'
-            | 'isSourcegraphDotCom'
-            | 'authenticatedUser'
-            | 'settingsCascade'
+            'searchContextsEnabled' | 'isSourcegraphDotCom' | 'authenticatedUser' | 'settingsCascade' | 'ownEnabled'
         >,
-        PlatformContextProps<'sourcegraphURL' | 'requestGraphQL' | 'urlToFile' | 'settings'>,
-        ExtensionsControllerProps<'extHostAPI' | 'executeCommand'> {
-    notebookId: string
-}
+        PlatformContextProps<'sourcegraphURL' | 'requestGraphQL' | 'urlToFile' | 'settings' | 'telemetryRecorder'> {}
 
 const LOADING = 'loading' as const
 
-export const EmbeddedNotebookPage: React.FunctionComponent<React.PropsWithChildren<EmbeddedNotebookPageProps>> = ({
-    notebookId,
-    platformContext,
-    extensionsController,
-    ...props
-}) => {
-    useEffect(() => eventLogger.logPageView('EmbeddedNotebookPage'), [])
+export const EmbeddedNotebookPage: FC<EmbeddedNotebookPageProps> = ({ platformContext, ...props }) => {
+    const { notebookId } = useParams()
+
+    useEffect(() => EVENT_LOGGER.logPageView('EmbeddedNotebookPage'), [])
+    platformContext.telemetryRecorder.recordEvent('embeddedNotebook', 'view')
 
     const notebookOrError = useObservable(
         useMemo(
             () =>
-                fetchNotebook(notebookId).pipe(
+                fetchNotebook(notebookId!).pipe(
                     startWith(LOADING),
                     catchError(error => [asError(error)])
                 ),
@@ -84,16 +76,16 @@ export const EmbeddedNotebookPage: React.FunctionComponent<React.PropsWithChildr
                     blocks={notebookOrError.blocks}
                     onUpdateBlocks={noop}
                     viewerCanManage={false}
-                    globbing={true}
                     fetchHighlightedFileLineRanges={fetchHighlightedFileLineRanges}
                     streamSearch={aggregateStreamingSearch}
-                    telemetryService={eventLogger}
+                    telemetryService={EVENT_LOGGER}
+                    telemetryRecorder={platformContext.telemetryRecorder}
                     platformContext={platformContext}
-                    extensionsController={extensionsController}
                     exportedFileName={convertNotebookTitleToFileName(notebookOrError.title)}
                     // Copying is not supported in embedded notebooks
                     onCopyNotebook={() => NEVER}
                     isEmbedded={true}
+                    patternType={notebookOrError.patternType}
                 />
             )}
         </div>

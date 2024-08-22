@@ -39,7 +39,7 @@ type settingsMutationGroupInput struct {
 type settingsMutation struct {
 	db      database.DB
 	input   *settingsMutationGroupInput
-	subject *settingsSubject
+	subject *settingsSubjectResolver
 }
 
 type settingsMutationArgs struct {
@@ -53,7 +53,7 @@ func (r *schemaResolver) SettingsMutation(ctx context.Context, args *settingsMut
 		return nil, err
 	}
 
-	subject, err := settingsSubjectForNode(ctx, n)
+	subject, err := settingsSubjectForNodeAndCheckAccess(ctx, n)
 	if err != nil {
 		return nil, err
 	}

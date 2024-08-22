@@ -18,21 +18,21 @@ var HTTPAddrInternal = env.Get(
 	"HTTP listen address for internal HTTP API. This should never be exposed externally, as it lacks certain authz checks.",
 )
 
-var sourcegraphDotComMode, _ = strconv.ParseBool(env.Get("SOURCEGRAPHDOTCOM_MODE", "false", "run as Sourcegraph.com, with add'l marketing and redirects"))
 var openGraphPreviewServiceURL = env.Get("OPENGRAPH_PREVIEW_SERVICE_URL", "", "The URL of the OpenGraph preview image generating service")
-
-// SourcegraphDotComMode is true if this server is running Sourcegraph.com
-// (solely by checking the SOURCEGRAPHDOTCOM_MODE env var). Sourcegraph.com shows
-// additional marketing and sets up some additional redirects.
-func SourcegraphDotComMode() bool {
-	return sourcegraphDotComMode
-}
-
-// MockSourcegraphDotComMode is used by tests to mock the result of SourcegraphDotComMode.
-func MockSourcegraphDotComMode(value bool) {
-	sourcegraphDotComMode = value
-}
+var extsvcConfigFile = env.Get("EXTSVC_CONFIG_FILE", "", "EXTSVC_CONFIG_FILE can contain configurations for multiple code host connections. See https://sourcegraph.com/docs/admin/config/advanced_config_file for details.")
+var extsvcConfigAllowEdits, _ = strconv.ParseBool(env.Get("EXTSVC_CONFIG_ALLOW_EDITS", "false", "When EXTSVC_CONFIG_FILE is in use, allow edits in the application to be made which will be overwritten on next process restart"))
 
 func OpenGraphPreviewServiceURL() string {
 	return openGraphPreviewServiceURL
+}
+
+// ExtsvcConfigFile returns value of EXTSVC_CONFIG_FILE environment variable
+func ExtsvcConfigFile() string {
+	return extsvcConfigFile
+}
+
+// ExtsvcConfigAllowEdits returns boolean value of EXTSVC_CONFIG_ALLOW_EDITS
+// environment variable.
+func ExtsvcConfigAllowEdits() bool {
+	return extsvcConfigAllowEdits
 }

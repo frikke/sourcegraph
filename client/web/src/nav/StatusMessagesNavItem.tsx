@@ -1,14 +1,21 @@
 import React, { useState, useMemo } from 'react'
 
-import { mdiInformation, mdiAlert, mdiSync, mdiCheckboxMarkedCircle } from '@mdi/js'
+import {
+    mdiInformation,
+    mdiAlert,
+    mdiSync,
+    mdiCheckboxMarkedCircle,
+    mdiDatabaseSyncOutline,
+    mdiInformationOutline,
+} from '@mdi/js'
 import classNames from 'classnames'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
 import { useQuery } from '@sourcegraph/http-client'
 import {
     CloudAlertIconRefresh,
     CloudSyncIconRefresh,
     CloudCheckIconRefresh,
+    CloudInfoIconRefresh,
 } from '@sourcegraph/shared/src/components/icons'
 import {
     Button,
@@ -22,15 +29,16 @@ import {
     H4,
     Text,
     Tooltip,
+    ErrorAlert,
 } from '@sourcegraph/wildcard'
 
-import { StatusMessagesResult } from '../graphql-operations'
+import type { StatusAndRepoCountResult } from '../graphql-operations'
 
-import { STATUS_MESSAGES } from './StatusMessagesNavItemQueries'
+import { STATUS_AND_REPO_COUNT } from './StatusMessagesNavItemQueries'
 
 import styles from './StatusMessagesNavItem.module.scss'
 
-type EntryType = 'progress' | 'warning' | 'success' | 'error'
+type EntryType = 'progress' | 'warning' | 'success' | 'error' | 'indexing' | 'info'
 
 interface StatusMessageEntryProps {
     title: string
@@ -46,7 +54,7 @@ function entryIcon(entryType: EntryType): JSX.Element {
     const sharedProps = { height: 14, width: 14, inline: false }
 
     switch (entryType) {
-        case 'error':
+        case 'error': {
             return (
                 <Icon
                     {...sharedProps}
@@ -55,7 +63,8 @@ function entryIcon(entryType: EntryType): JSX.Element {
                     aria-label="Error"
                 />
             )
-        case 'warning':
+        }
+        case 'warning': {
             return (
                 <Icon
                     {...sharedProps}
@@ -64,7 +73,8 @@ function entryIcon(entryType: EntryType): JSX.Element {
                     aria-label="Warning"
                 />
             )
-        case 'success':
+        }
+        case 'success': {
             return (
                 <Icon
                     {...sharedProps}
@@ -73,7 +83,8 @@ function entryIcon(entryType: EntryType): JSX.Element {
                     aria-label="Success"
                 />
             )
-        case 'progress':
+        }
+        case 'progress': {
             return (
                 <Icon
                     {...sharedProps}
@@ -82,32 +93,67 @@ function entryIcon(entryType: EntryType): JSX.Element {
                     aria-label="In progress"
                 />
             )
+        }
+        case 'indexing': {
+            return (
+                <Icon
+                    {...sharedProps}
+                    className={classNames('text-primary', styles.icon)}
+                    svgPath={mdiDatabaseSyncOutline}
+                    aria-label="Indexing"
+                />
+            )
+        }
+        case 'info': {
+            return (
+                <Icon
+                    {...sharedProps}
+                    className={classNames('text-primary', styles.icon)}
+                    svgPath={mdiInformationOutline}
+                    aria-label="Information"
+                />
+            )
+        }
     }
 }
 
 const getMessageColor = (entryType: EntryType): string => {
     switch (entryType) {
-        case 'error':
+        case 'error': {
             return styles.messageError
-        case 'warning':
+        }
+        case 'warning': {
             return styles.messageWarning
-        default:
+        }
+        default: {
             return ''
+        }
     }
 }
 
 const getBorderClassname = (entryType: EntryType): string => {
     switch (entryType) {
-        case 'error':
+        case 'error': {
             return styles.entryBorderError
-        case 'warning':
+        }
+        case 'warning': {
             return styles.entryBorderWarning
-        case 'success':
+        }
+        case 'success': {
             return styles.entryBorderSuccess
-        case 'progress':
+        }
+        case 'progress': {
             return styles.entryBorderProgress
-        default:
+        }
+        case 'indexing': {
+            return styles.entryBorderProgress
+        }
+        case 'info': {
+            return styles.entryBorderInfo
+        }
+        default: {
             return ''
+        }
     }
 }
 
@@ -152,10 +198,9 @@ export const StatusMessagesNavItem: React.FunctionComponent<React.PropsWithChild
     const [isOpen, setIsOpen] = useState(false)
     const toggleIsOpen = (): void => setIsOpen(old => !old)
 
-    const { data, error } = useQuery<StatusMessagesResult>(STATUS_MESSAGES, {
+    const { data, error } = useQuery<StatusAndRepoCountResult>(STATUS_AND_REPO_COUNT, {
         fetchPolicy: 'no-cache',
-        pollInterval:
-            props.disablePolling !== undefined && !props.disablePolling ? STATUS_MESSAGES_POLL_INTERVAL : undefined,
+        pollInterval: props.disablePolling !== true ? STATUS_MESSAGES_POLL_INTERVAL : undefined,
     })
 
     const icon: JSX.Element | null = useMemo(() => {
@@ -164,25 +209,38 @@ export const StatusMessagesNavItem: React.FunctionComponent<React.PropsWithChild
         }
 
         let codeHostMessage
-        let icon
+        let iconProps
         if (
             data.statusMessages?.some(
                 ({ __typename: type }) => type === 'ExternalServiceSyncError' || type === 'SyncError'
             )
         ) {
-            codeHostMessage = 'Syncing repositories failed!'
-            icon = CloudAlertIconRefresh
+            codeHostMessage = 'Syncing repositories failed'
+            iconProps = { as: CloudAlertIconRefresh }
+        } else if (data.statusMessages?.some(({ __typename: type }) => type === 'GitUpdatesDisabled')) {
+            codeHostMessage = 'Syncing repositories disabled'
+            iconProps = { as: CloudAlertIconRefresh }
         } else if (data.statusMessages?.some(({ __typename: type }) => type === 'CloningProgress')) {
             codeHostMessage = 'Cloning repositories...'
-            icon = CloudSyncIconRefresh
+            iconProps = { as: CloudSyncIconRefresh }
+        } else if (data.statusMessages?.some(({ __typename: type }) => type === 'IndexingProgress')) {
+            codeHostMessage = 'Indexing repositories...'
+            iconProps = { as: CloudSyncIconRefresh }
+        } else if (data.statusMessages?.some(({ __typename: type }) => type === 'NoRepositoriesDetected')) {
+            codeHostMessage = 'No repositories'
+            iconProps = { as: CloudInfoIconRefresh }
         } else {
             codeHostMessage = 'Repositories up to date'
-            icon = CloudCheckIconRefresh
+            iconProps = { as: CloudCheckIconRefresh }
         }
 
         return (
             <Tooltip content={isOpen ? undefined : codeHostMessage}>
-                <Icon as={icon} size="md" {...(isOpen ? { 'aria-hidden': true } : { 'aria-label': codeHostMessage })} />
+                <Icon
+                    {...iconProps}
+                    size="md"
+                    {...(isOpen ? { 'aria-hidden': true } : { 'aria-label': codeHostMessage })}
+                />
             </Tooltip>
         )
     }, [data, isOpen])
@@ -210,6 +268,33 @@ export const StatusMessagesNavItem: React.FunctionComponent<React.PropsWithChild
         return (
             <>
                 {data.statusMessages.map(status => {
+                    if (status.__typename === 'GitUpdatesDisabled') {
+                        return (
+                            <StatusMessagesNavItemEntry
+                                key={status.message}
+                                message={status.message}
+                                title="Code syncing disabled"
+                                messageHint="Remove disableGitAutoUpdates or set it to false in the site configuration"
+                                linkTo="/site-admin/configuration"
+                                linkText="View site configuration"
+                                linkOnClick={toggleIsOpen}
+                                entryType="warning"
+                            />
+                        )
+                    }
+                    if (status.__typename === 'NoRepositoriesDetected') {
+                        return (
+                            <StatusMessagesNavItemEntry
+                                key="no-repositories"
+                                title="No repositories"
+                                message="Connect a code host to connect repositories to Sourcegraph."
+                                linkTo="/setup"
+                                linkText="Setup code hosts"
+                                linkOnClick={toggleIsOpen}
+                                entryType="info"
+                            />
+                        )
+                    }
                     if (status.__typename === 'CloningProgress') {
                         return (
                             <StatusMessagesNavItemEntry
@@ -221,6 +306,22 @@ export const StatusMessagesNavItem: React.FunctionComponent<React.PropsWithChild
                                 linkText="View repositories"
                                 linkOnClick={toggleIsOpen}
                                 entryType="progress"
+                            />
+                        )
+                    }
+                    if (status.__typename === 'IndexingProgress') {
+                        return (
+                            <StatusMessagesNavItemEntry
+                                key="indexing-progress"
+                                message={`Indexing repositories. ${status.indexed} out of ${
+                                    status.indexed + status.notIndexed
+                                } indexed.`}
+                                title="Indexing repositories"
+                                messageHint="Indexing repositories speeds up search."
+                                linkTo="/site-admin/repositories"
+                                linkText="View repositories"
+                                linkOnClick={toggleIsOpen}
+                                entryType="indexing"
                             />
                         )
                     }
@@ -252,6 +353,20 @@ export const StatusMessagesNavItem: React.FunctionComponent<React.PropsWithChild
                             />
                         )
                     }
+                    if (status.__typename === 'GitserverDiskThresholdReached') {
+                        return (
+                            <StatusMessagesNavItemEntry
+                                key="disk-threshold-reached"
+                                title="Gitserver disk threshold reached"
+                                message={status.message}
+                                messageHint="Search and cloning may be impacted until disk usage is reduced."
+                                linkTo="/site-admin/gitservers"
+                                linkText="Manage Gitservers"
+                                linkOnClick={toggleIsOpen}
+                                entryType="warning"
+                            />
+                        )
+                    }
                     return null
                 })}
             </>
@@ -261,12 +376,12 @@ export const StatusMessagesNavItem: React.FunctionComponent<React.PropsWithChild
     return (
         <Popover isOpen={isOpen} onOpenChange={event => setIsOpen(event.isOpen)}>
             <PopoverTrigger
-                className="nav-link py-0 px-0 percy-hide chromatic-ignore"
+                className="nav-link py-0 px-0"
                 as={Button}
                 variant="link"
                 aria-label={isOpen ? 'Hide status messages' : 'Show status messages'}
             >
-                {error && (
+                {error ? (
                     <Tooltip content="Sorry, we couldn’t fetch notifications!">
                         <Icon
                             aria-label="Sorry, we couldn’t fetch notifications!"
@@ -274,8 +389,9 @@ export const StatusMessagesNavItem: React.FunctionComponent<React.PropsWithChild
                             size="md"
                         />
                     </Tooltip>
+                ) : (
+                    icon
                 )}
-                {icon}
             </PopoverTrigger>
 
             <PopoverContent position={Position.bottom} className={classNames('p-0', styles.dropdownMenu)}>

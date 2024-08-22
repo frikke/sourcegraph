@@ -1,18 +1,17 @@
 import React from 'react'
 
-import * as H from 'history'
+import { useLocation } from 'react-router-dom'
 
 import { pluralize } from '@sourcegraph/common'
 import { BulkOperationState } from '@sourcegraph/shared/src/graphql-operations'
 import { Link } from '@sourcegraph/wildcard'
 
 import { DismissibleAlert, isAlertDismissed } from '../../../components/DismissibleAlert'
-import { ActiveBulkOperationsConnectionFields } from '../../../graphql-operations'
+import type { ActiveBulkOperationsConnectionFields } from '../../../graphql-operations'
 
 import { TabName } from './BatchChangeDetailsTabs'
 
 export interface BulkOperationsAlertsProps {
-    location: H.Location
     bulkOperations: ActiveBulkOperationsConnectionFields
 }
 
@@ -28,9 +27,9 @@ export interface BulkOperationsAlertsProps {
  */
 export const BulkOperationsAlerts: React.FunctionComponent<React.PropsWithChildren<BulkOperationsAlertsProps>> = ({
     bulkOperations,
-    location,
 }) => {
     // Don't show the header banners if the bulkoperations tab is open.
+    const location = useLocation()
     const parameters = new URLSearchParams(location.search)
     if (parameters.get('tab') === TabName.BulkOperations) {
         return null

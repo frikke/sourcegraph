@@ -1,12 +1,14 @@
 .bin/
 *.bundle.*
+package/
+bazel-*
 client/phabricator/scripts/loader.js
 client/browser/build
 **/package.json
 **/coverage
 internal/database/schema*.md
 internal/database/schema*.json
-internal/database/migration/shared/upgradedata/stitched-migration-graph.json
+internal/database/migration/shared/data/**/*.json
 cmd/xlang-python/python-langserver/
 package-lock.json
 package.json
@@ -15,8 +17,8 @@ vendor/
 .nyc_output/
 out/
 dist/
-client/shared/src/graphqlschema.ts
-client/shared/src/schema/
+client/web/dist/
+client/shared/src/schema/*.d.ts
 ts-node-*
 testdata
 .github/*
@@ -37,5 +39,37 @@ cmd/symbols/squirrel/language-file-extensions.json
 client/jetbrains/build
 client/jetbrains/.idea
 client/jetbrains/.gradle
+client/backstage-common/node_modules
 .browserslistrc
 code-intel-extensions.json
+.direnv
+pnpm-lock.yaml
+node_modules/
+client/web-sveltekit/.svelte-kit
+client/web-sveltekit/build
+client/web-sveltekit/**/*.gql.ts
+client/web-sveltekit/**/graphql-operations.ts
+client/web-sveltekit/**/graphql-types.ts
+client/web-sveltekit/**/graphql-type-mocks.ts
+client/web-sveltekit/src/auto-imports.d.ts
+*.module.scss.d.ts
+.vscode-test
+
+dev/backcompat/flakes.json
+
+# Errors when used with @ianvs/prettier-plugin-sort-imports due to TS language API hitting global `eval`
+client/browser/src/types/webextension-polyfill/index.d.ts
+
+graphql-operations.ts
+
+wolfi-images/*.lock.json
+
+# This is downloaded from upstream directly and should not be modified
+dev/linearhooks/internal/lineargql/schema.graphql
+
+# This is an embedded external minified library and should not be modified
+internal/appliance/web/static/script/htmx.min.js
+internal/appliance/web/static/script/bootstrap.bundle.min.js
+
+# Generated code
+client/web/src/enterprise/site-admin/dotcom/productSubscriptions/enterpriseportalgen/**

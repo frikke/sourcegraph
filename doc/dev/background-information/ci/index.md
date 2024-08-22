@@ -11,29 +11,24 @@ Sourcegraph also maintains a variety of tooling on [GitHub Actions](#github-acti
 <div class="getting-started">
   <a href="#buildkite-pipelines" class="btn" alt="Buildkite pipelines">
    <span>★ Buildkite pipelines</span>
-   </br>
+   <br>
    An introduction to Sourcegraph's Buildkite pipelines.
-  </a>
-
-  <a href="./reference" class="btn" alt="Pipeline references">
-   <span>Pipelines reference</span>
-   </br>
-   A complete Buildkite pipeline reference covering all the different pipeline types.
   </a>
 
   <a href="./development" class="btn" alt="Development">
    <span>Development</span>
-   </br>
+   <br>
    Contribute changes to Sourcegraph's Buildkite pipelines!
   </a>
 </div>
+
+Run `sg ci docs` to see documentation about the CI pipeline steps.
 
 
 ## Buildkite pipelines
 
 [Tests](../../how-to/testing.md) are automatically run in our [various Buildkite pipelines](https://buildkite.com/sourcegraph) when you push your changes (i.e. when you run `git push`) to the `sourcegraph/sourcegraph` GitHub repository.
-Pipeline steps are generated on the fly using the [pipeline generator](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@main/-/tree/enterprise/dev/ci) - a complete reference of all available pipeline types and steps is available in the generated [Pipeline reference](./reference.md). To keep the repository tidy, consider deleting the branch after the pipeline has completed. The build results will be available even after the branch is deleted.
-You can also see these docs locally with `sg ci docs`.
+Pipeline steps are generated on the fly using the [pipeline generator](https://sourcegraph.com/github.com/sourcegraph/sourcegraph@main/-/tree/dev/ci) - a complete reference of all available pipeline types and steps is available from `sg ci docs`. To keep the repository tidy, consider deleting the branch after the pipeline has completed. The build results will be available even after the branch is deleted.
 
 To see what checks will get run against your current branch, use [`sg`](../../setup/quickstart.md):
 
@@ -64,7 +59,7 @@ In the Buildkite UI, soft failures currently look like the following, with a _tr
 We use soft failures for the following reasons only:
 
 - Steps that determine whether a subsequent step should run, where soft failures are the only technical way to communicate that a later step should be skipped in this manner using Buildkite.
-  - Examples: [hash comparison steps that determine if a build should run](https://sourcegraph.com/search?q=context:%40sourcegraph/all+repo:%5Egithub%5C.com/sourcegraph/sourcegraph%24+file:%5Eenterprise/dev/ci/internal/ci/operations%5C.go+compare-hash.sh&patternType=literal)
+  - Examples: [hash comparison steps that determine if a build should run](https://sourcegraph.com/search?q=context:%40sourcegraph/all+repo:%5Egithub%5C.com/sourcegraph/sourcegraph%24+file:%5Edev/ci/internal/ci/operations%5C.go+compare-hash.sh&patternType=literal)
 - Regular analysis tasks, where soft failures serve as an monitoring indicator to warn the team responsible for fixing issues.
   - Examples: [image vulnerability scanning](#image-vulnerability-scanning), linting tasks for catching deprecation warnings
 - Temporary exceptions to accommodate experimental or in-progress work.
@@ -79,7 +74,7 @@ All other failures are hard failures.
 #### Image vulnerability scanning
 
 Our CI pipeline scans uses [Trivy](https://aquasecurity.github.io/trivy/) to scan our Docker images for security vulnerabilities.
-Refer to our [Pipeline reference](./reference.md) to see what pipelines Trivy checks run in.
+Refer to `sg ci docs` to see what pipelines Trivy checks run in.
 
 If there are any `HIGH` or `CRITICAL` severities in a Docker image that have a known fix:
 
@@ -92,7 +87,7 @@ We also run [separate vulnerability scans for our infrastructure](https://handbo
 
 ### Pipeline health
 
-Maintaining [Buildkite pipeline](#buildkite-pipelines) health is a critical part of ensuring we ship a stable product - changes that make it to the `main` branch may be deployed to various Sourcegraph instances, and having a reliable and predictable pipeline is crucial to ensuring bugs do not make it to production environments.
+Maintaining [Buildkite pipeline](#buildkite-pipelines) health is a critical part of ensuring we ship a stable product—changes that make it to the `main` branch may be deployed to various Sourcegraph instances, and having a reliable and predictable pipeline is crucial to ensuring bugs do not make it to production environments.
 
 To enable this, we [address flakes as they arise](#flakes) and mitigate the impacts of pipeline instability with [branch locks](#branch-locks).
 
@@ -102,7 +97,7 @@ To enable this, we [address flakes as they arise](#flakes) and mitigate the impa
 
 > WARNING: **A red `main` build is not okay and must be fixed.** Learn more about our `main` branch policy in [Testing principles: Failures on the `main` branch](../testing_principles.md#failures-on-the-main-branch).
 
-[`buildchecker`](#buildchecker) is a tool responding to periods of consecutive build failures on the `main` branch Sourcegraph Buildkite pipeline. If it detects a series of failures on the `main` branch, merges to `main` will be restricted to members of the Sourcegraph team who authored the failing commits until the issue is resolved - this is referred to as a "branch lock". When a build passes on `main` again, `buildchecker` will automatically unlock the branch.
+[`buildchecker`](#buildchecker) is a tool responding to periods of consecutive build failures on the `main` branch Sourcegraph Buildkite pipeline. If it detects a series of failures on the `main` branch, merges to `main` will be restricted to members of the Sourcegraph team who authored the failing commits until the issue is resolved—this is referred to as a "branch lock". When a build passes on `main` again, `buildchecker` will automatically unlock the branch.
 
 **Authors of the most recent failed builds are responsible for investigating failures.** Please refer to the [Continuous integration playbook](https://handbook.sourcegraph.com/departments/product-engineering/engineering/process/incidents/playbooks/ci#build-has-failed-on-the-main-branch) for step-by-step guides on what to do in various scenarios.
 
@@ -110,7 +105,7 @@ To enable this, we [address flakes as they arise](#flakes) and mitigate the impa
 
 A *flake* is defined as a test or script that is unreliable or non-deterministic, i.e. it exhibits both a passing and a failing result with the same code. In other words: something that sometimes fails, but if you retry it enough times, it passes, *eventually*.
 
-Tests are not the only thing that are flaky - flakes can also encompass [sporadic infrastructure issues](#flaky-infrastructure) and [unreliable steps](#flaky-steps).
+Tests are not the only thing that are flaky—flakes can also encompass [sporadic infrastructure issues](#flaky-infrastructure) and [unreliable steps](#flaky-steps).
 
 ##### Flaky tests
 
@@ -123,14 +118,16 @@ Typical reasons why a test may be flaky:
 - Unreliable test infrastructure (such as CI)
 - Reliance on third-party services that are inconsistent
 
-If a flaky test is discovered, immediately use language-specific functionality to skip a test and open a PR to disable the test:
+**If a flaky test is discovered:**
 
-- Go: [`testing.T.Skip`](https://pkg.go.dev/testing#hdr-Skipping)
-- Typescript: [`.skip()`](https://mochajs.org/#inclusive-tests)
+1. Immediately use language-specific functionality to skip a test and open a PR to disable the test:
 
-If the language or framework allows for a skip reason, include a link to the issue track re-enabling the test, or leave a docstring with a link.
+    - Go: [`testing.T.Skip`](https://pkg.go.dev/testing#hdr-Skipping)
+    - Typescript: [`.skip()`](https://mochajs.org/#inclusive-tests)
 
-Then open an issue to investigate the flaky test (use the [flaky test issue template](https://github.com/sourcegraph/sourcegraph/issues/new/choose)), and assign it to the most likely owner.
+   If the language or framework allows for a skip reason, include a link to the issue track re-enabling the test, or leave a docstring with a link.
+
+2. Open an issue to investigate the flaky test (use the [flaky test issue template](https://github.com/sourcegraph/sourcegraph/issues/new/choose)), and assign it to the most likely owner.
 
 ##### Flaky steps
 
@@ -142,8 +139,8 @@ If a step is flaky we need to get the build back to reliable as soon as possible
 An example use of `Skip`:
 
 ```diff
---- a/enterprise/dev/ci/internal/ci/operations.go
-+++ b/enterprise/dev/ci/internal/ci/operations.go
+--- a/dev/ci/internal/ci/operations.go
++++ b/dev/ci/internal/ci/operations.go
 @@ -260,7 +260,9 @@ func addGoBuild(pipeline *bk.Pipeline) {
  func addDockerfileLint(pipeline *bk.Pipeline) {
         pipeline.AddStep(":docker: Lint",
@@ -167,7 +164,7 @@ Also see [Buildkite infrastructure](#buildkite-infrastructure).
 
 ##### Flaky linters
 
-Linters are all run through [`sg lint`](../sg/reference.md#sg-lint), with linters defined in [`dev/sg/linters`](https://sourcegraph.com/github.com/sourcegraph/sourcegraph/-/tree/dev/sg/linters).
+Linters are all run through [`sg lint`], with linters defined in [`dev/sg/linters`](https://sourcegraph.com/github.com/sourcegraph/sourcegraph/-/tree/dev/sg/linters).
 If a linter is flaky, you can modify the `dev/sg/linters` package to disable the specific linter (or entire category of linters) with the `Enabled: disabled(...)` helper:
 
 ```diff
@@ -187,10 +184,9 @@ See [Pipeline development](./development.md) to get started with contributing to
 
 ### Deployment notifications
 
-When a pull request is deployed, an automated notification will be posted in either [#alerts-cloud-preprod](https://sourcegraph.slack.com/archives/C039JKERFBN) or [#deployments-cloud](https://sourcegraph.slack.com/archives/C03BGBR796H) depending in which environment it happened.
-Notifications include a list of the pull-request that were shipped as well as a list of which services specifically were rolled out.
+When a pull request is deployed, an automated notification will be posted in [#deployments-cloud](https://sourcegraph.slack.com/archives/C03BGBR796H). Notifications include a list of the pull-request that were shipped as well as a list of which services specifically were rolled out.
 
-If you want to be explictly notified (through a Slack ping) when your pull request reaches _preprod_ or _cloud production_, add the label `notify-on-deploy`.
+If you want to be explictly notified (through a Slack ping) when your pull request reaches _dotcom production_, add the label `notify-on-deploy`.
 
 ## GitHub Actions
 
@@ -198,7 +194,7 @@ If you want to be explictly notified (through a Slack ping) when your pull reque
 
 [![buildchecker](https://github.com/sourcegraph/sourcegraph/actions/workflows/buildchecker.yml/badge.svg)](https://github.com/sourcegraph/sourcegraph/actions/workflows/buildchecker.yml) [![buildchecker-history](https://github.com/sourcegraph/sourcegraph/actions/workflows/buildchecker-history.yml/badge.svg)](https://github.com/sourcegraph/sourcegraph/actions/workflows/buildchecker-history.yml)
 
-[`buildchecker`](https://github.com/sourcegraph/sourcegraph/actions/workflows/buildchecker.yml), our [branch lock management tool](#branch-locks), runs in GitHub actions - see the [workflow specification](https://github.com/sourcegraph/sourcegraph/blob/main/.github/workflows/buildchecker.yml).
+[`buildchecker`](https://github.com/sourcegraph/sourcegraph/actions/workflows/buildchecker.yml), our [branch lock management tool](#branch-locks), runs in GitHub actions—see the [workflow specification](https://github.com/sourcegraph/sourcegraph/blob/main/.github/workflows/buildchecker.yml).
 
 To learn more about `buildchecker`, refer to the [`buildchecker` source code and documentation](https://github.com/sourcegraph/sourcegraph/tree/main/dev/buildchecker).
 
@@ -206,7 +202,7 @@ To learn more about `buildchecker`, refer to the [`buildchecker` source code and
 
 [![pr-auditor](https://github.com/sourcegraph/sourcegraph/actions/workflows/pr-auditor.yml/badge.svg)](https://github.com/sourcegraph/sourcegraph/actions/workflows/pr-auditor.yml)
 
-[`pr-auditor`](https://github.com/sourcegraph/sourcegraph/actions/workflows/pr-auditor.yml), our [PR audit tool](../testing_principles.md#policy), runs in GitHub actions - see the [workflow specification](https://github.com/sourcegraph/sourcegraph/blob/main/.github/workflows/pr-auditor.yml).
+[`pr-auditor`](https://github.com/sourcegraph/sourcegraph/actions/workflows/pr-auditor.yml), our [PR audit tool](../testing_principles.md#policy), runs in GitHub actions—see the [workflow specification](https://github.com/sourcegraph/sourcegraph/blob/main/.github/workflows/pr-auditor.yml).
 
 To learn more about `pr-auditor`, refer to the [`pr-auditor` source code and documentation](https://github.com/sourcegraph/sourcegraph/tree/main/dev/pr-auditor).
 
@@ -234,6 +230,6 @@ The `license_finder` tool can be installed using `gem install license_finder`. Y
 LICENSE_CHECK=true ./dev/licenses.sh
 ```
 
-The `./dev/licenses.sh` script will also output some `license_finder` configuration for debugging purposes - this configuration is based on the `doc/dependency_decisions.yml` file, which tracks decisions made about licenses and dependencies.
+The `./dev/licenses.sh` script will also output some `license_finder` configuration for debugging purposes—this configuration is based on the `doc/dependency_decisions.yml` file, which tracks decisions made about licenses and dependencies.
 
 For more details, refer to the [`license_finder` documentation](https://github.com/pivotal/LicenseFinder#usage).

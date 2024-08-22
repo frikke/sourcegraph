@@ -1,12 +1,12 @@
-import React, { useEffect, useState } from 'react'
+import React, { type FC, useEffect, useState } from 'react'
 
-import { mdiLock } from '@mdi/js'
+import { mdiChevronDown, mdiChevronUp, mdiLock } from '@mdi/js'
 import classNames from 'classnames'
-import * as H from 'history'
-import { RouteComponentProps } from 'react-router'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
+import { Timestamp } from '@sourcegraph/branded/src/components/Timestamp'
 import { useMutation, useQuery } from '@sourcegraph/http-client'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
 import {
     Container,
     PageHeader,
@@ -19,12 +19,15 @@ import {
     Input,
     Text,
     Code,
+    ErrorAlert,
+    CollapseHeader,
+    Collapse,
+    CollapsePanel,
+    Label,
 } from '@sourcegraph/wildcard'
 
-import { TerminalLine } from '../../auth/Terminal'
 import { PageTitle } from '../../components/PageTitle'
-import { Timestamp } from '../../components/time/Timestamp'
-import {
+import type {
     CheckMirrorRepositoryConnectionResult,
     CheckMirrorRepositoryConnectionVariables,
     RecloneRepositoryResult,
@@ -40,11 +43,11 @@ import {
     RECLONE_REPOSITORY_MUTATION,
     UPDATE_MIRROR_REPOSITORY,
 } from '../../site-admin/backend'
-import { eventLogger } from '../../tracking/eventLogger'
 import { DirectImportRepoAlert } from '../DirectImportRepoAlert'
 
 import { FETCH_SETTINGS_AREA_REPOSITORY_GQL } from './backend'
 import { ActionContainer, BaseActionContainer } from './components/ActionContainer'
+import { RepoSettingsOptions } from './RepoSettingsOptions'
 
 import styles from './RepoSettingsMirrorPage.module.scss'
 
@@ -53,10 +56,9 @@ interface UpdateMirrorRepositoryActionContainerProps {
     onDidUpdateRepository: () => Promise<void>
     disabled: boolean
     disabledReason: string | undefined
-    history: H.History
 }
 
-const UpdateMirrorRepositoryActionContainer: React.FunctionComponent<UpdateMirrorRepositoryActionContainerProps> = props => {
+const UpdateMirrorRepositoryActionContainer: FC<UpdateMirrorRepositoryActionContainerProps> = props => {
     const [updateRepo] = useMutation<UpdateMirrorRepositoryResult, UpdateMirrorRepositoryVariables>(
         UPDATE_MIRROR_REPOSITORY,
         { variables: { repository: props.repo.id } }
@@ -74,16 +76,20 @@ const UpdateMirrorRepositoryActionContainer: React.FunctionComponent<UpdateMirro
     let info: React.ReactNode
     if (props.repo.mirrorInfo.cloneInProgress) {
         title = 'Cloning in progress...'
-        description =
-            <Code>{props.repo.mirrorInfo.cloneProgress}</Code> ||
+        description = props.repo.mirrorInfo.cloneProgress ? (
+            <div className="overflow-auto">
+                <Code>{props.repo.mirrorInfo.cloneProgress}</Code>
+            </div>
+        ) : (
             'This repository is currently being cloned from its remote repository.'
+        )
         buttonLabel = (
             <span>
                 <LoadingSpinner /> Cloning...
             </span>
         )
         buttonDisabled = true
-        info = <DirectImportRepoAlert className={styles.alert} />
+        info = <DirectImportRepoAlert className={classNames(styles.alert, 'mb-0')} />
     } else if (props.repo.mirrorInfo.cloned) {
         const updateSchedule = props.repo.mirrorInfo.updateSchedule
         title = (
@@ -92,6 +98,10 @@ const UpdateMirrorRepositoryActionContainer: React.FunctionComponent<UpdateMirro
                     Last refreshed:{' '}
                     {props.repo.mirrorInfo.updatedAt ? <Timestamp date={props.repo.mirrorInfo.updatedAt} /> : 'unknown'}{' '}
                 </div>
+            </>
+        )
+        info = (
+            <>
                 {updateSchedule && (
                     <div>
                         Next scheduled update <Timestamp date={updateSchedule.due} /> (position{' '}
@@ -122,14 +132,14 @@ const UpdateMirrorRepositoryActionContainer: React.FunctionComponent<UpdateMirro
     return (
         <ActionContainer
             title={title}
-            description={<div>{description}</div>}
+            titleAs="h3"
+            description={description}
             buttonLabel={buttonLabel}
             buttonDisabled={buttonDisabled || props.disabled}
             buttonSubtitle={props.disabledReason}
             flashText="Added to queue"
             info={info}
             run={run}
-            history={props.history}
         />
     )
 }
@@ -137,15 +147,16 @@ const UpdateMirrorRepositoryActionContainer: React.FunctionComponent<UpdateMirro
 interface CheckMirrorRepositoryConnectionActionContainerProps {
     repo: SettingsAreaRepositoryFields
     onDidUpdateReachability: (reachable: boolean) => void
-    history: H.History
 }
 
-const CheckMirrorRepositoryConnectionActionContainer: React.FunctionComponent<CheckMirrorRepositoryConnectionActionContainerProps> = props => {
+const CheckMirrorRepositoryConnectionActionContainer: FC<
+    CheckMirrorRepositoryConnectionActionContainerProps
+> = props => {
     const [checkConnection, { data, loading, error }] = useMutation<
         CheckMirrorRepositoryConnectionResult,
         CheckMirrorRepositoryConnectionVariables
     >(CHECK_MIRROR_REPOSITORY_CONNECTION, {
-        variables: { repository: props.repo.id, name: null },
+        variables: { repository: props.repo.id },
         onCompleted: result => {
             props.onDidUpdateReachability(result.checkMirrorRepositoryConnection.error === null)
         },
@@ -161,6 +172,7 @@ const CheckMirrorRepositoryConnectionActionContainer: React.FunctionComponent<Ch
     return (
         <BaseActionContainer
             title="Check connection to remote repository"
+            titleAs="h3"
             description={<span>Diagnose problems cloning or updating from the remote repository.</span>}
             action={
                 <Button
@@ -204,35 +216,108 @@ const CheckMirrorRepositoryConnectionActionContainer: React.FunctionComponent<Ch
     )
 }
 
-interface RepoSettingsMirrorPageProps extends RouteComponentProps<{}> {
+// Add interface for props then create component
+interface CorruptionLogProps {
     repo: SettingsAreaRepositoryFields
-    history: H.History
+}
+
+const CorruptionLogsContainer: FC<CorruptionLogProps> = props => {
+    const health = props.repo.mirrorInfo.isCorrupted ? (
+        <>
+            <Alert className={classNames('mb-0', styles.alert)} variant="danger">
+                The repository is corrupt, check the log entries below for more info and consider recloning.
+            </Alert>
+            <br />
+        </>
+    ) : null
+
+    const logEvents: JSX.Element[] = props.repo.mirrorInfo.corruptionLogs.map(log => (
+        <li key={`${props.repo.name}#${log.timestamp}`} className="list-group-item px-2 py-1">
+            <div className="d-flex flex-column align-items-center justify-content-between">
+                <Text className={classNames('overflow-auto', 'text-monospace', styles.log)}>{log.reason}</Text>
+                <small className="text-muted mb-0">
+                    <Timestamp date={log.timestamp} />
+                </small>
+            </div>
+        </li>
+    ))
+
+    const [isOpened, setIsOpened] = useState(false)
+    const hasLogs = logEvents.length !== 0
+
+    return (
+        <BaseActionContainer
+            title="Repository corruption"
+            titleAs="h3"
+            description={<span>Recent corruption events that have been detected on this repository.</span>}
+            className="mb-0"
+            details={
+                <div className="flex-1">
+                    {health}
+                    {!hasLogs && <Text className="mt-3 text-muted text-center mb-0">No corruption history</Text>}
+                    {hasLogs && (
+                        <Collapse isOpen={isOpened} onOpenChange={setIsOpened}>
+                            <CollapseHeader
+                                as={Button}
+                                outline={true}
+                                focusLocked={true}
+                                variant="secondary"
+                                className="w-100 my-2"
+                                disabled={!hasLogs}
+                            >
+                                Show corruption history
+                                <Icon
+                                    aria-hidden={true}
+                                    svgPath={isOpened ? mdiChevronUp : mdiChevronDown}
+                                    className="mr-1"
+                                />
+                            </CollapseHeader>
+                            <CollapsePanel>
+                                <ul className="list-group">{logEvents}</ul>
+                            </CollapsePanel>
+                        </Collapse>
+                    )}
+                </div>
+            }
+        />
+    )
+}
+
+interface RepoSettingsMirrorPageProps extends TelemetryV2Props {
+    repo: SettingsAreaRepositoryFields
+    disablePolling?: boolean
 }
 
 /**
  * The repository settings mirror page.
  */
-export const RepoSettingsMirrorPage: React.FunctionComponent<
-    React.PropsWithChildren<RepoSettingsMirrorPageProps>
-> = props => {
-    eventLogger.logPageView('RepoSettingsMirror')
+export const RepoSettingsMirrorPage: FC<RepoSettingsMirrorPageProps> = ({
+    repo: initialRepo,
+    disablePolling = false,
+    telemetryRecorder,
+}) => {
+    useEffect(() => {
+        EVENT_LOGGER.logPageView('RepoSettingsMirror')
+        telemetryRecorder.recordEvent('repo.settings.mirror', 'view')
+    }, [telemetryRecorder])
+
     const [reachable, setReachable] = useState<boolean>()
     const [recloneRepository] = useMutation<RecloneRepositoryResult, RecloneRepositoryVariables>(
         RECLONE_REPOSITORY_MUTATION,
         {
-            variables: { repo: props.repo.id },
+            variables: { repo: initialRepo.id },
         }
     )
 
     const { data, error, refetch } = useQuery<SettingsAreaRepositoryResult, SettingsAreaRepositoryVariables>(
         FETCH_SETTINGS_AREA_REPOSITORY_GQL,
         {
-            variables: { name: props.repo.name },
-            pollInterval: 3000,
+            variables: { name: initialRepo.name },
+            pollInterval: disablePolling ? undefined : 3000,
         }
     )
 
-    const repo = data?.repository ? data.repository : props.repo
+    const repo = data?.repository ? data.repository : initialRepo
 
     const onDidUpdateReachability = (reachable: boolean | undefined): void => setReachable(reachable)
 
@@ -240,35 +325,32 @@ export const RepoSettingsMirrorPage: React.FunctionComponent<
         <>
             <PageTitle title="Mirror settings" />
             <PageHeader path={[{ text: 'Mirroring and cloning' }]} headingElement="h2" className="mb-3" />
+            <RepoSettingsOptions repo={repo} />
             <Container className="repo-settings-mirror-page">
                 {error && <ErrorAlert error={error} />}
 
                 <div className="form-group">
-                    <Input
-                        value={repo.mirrorInfo.remoteURL || '(unknown)'}
-                        readOnly={true}
-                        className="mb-0"
-                        label={
-                            <>
-                                {' '}
-                                Remote repository URL{' '}
-                                <small className="text-info">
-                                    <Icon aria-hidden={true} svgPath={mdiLock} /> Only visible to site admins
-                                </small>
-                            </>
-                        }
-                    />
+                    <Label>
+                        {' '}
+                        Remote repository URL{' '}
+                        <small className="text-muted">
+                            <Icon aria-hidden={true} svgPath={mdiLock} className="text-warning" /> Only visible to site
+                            admins
+                        </small>
+                    </Label>
+                    <Input value={repo.mirrorInfo.remoteURL || '(unknown)'} readOnly={true} className="mb-0" />
                     {repo.viewerCanAdminister && (
                         <small className="form-text text-muted">
                             Configure repository mirroring in{' '}
-                            <Link to="/site-admin/external-services">external services</Link>.
+                            <Link to="/site-admin/external-services">code host connections</Link>.
                         </small>
                     )}
                 </div>
                 {repo.mirrorInfo.lastError && (
                     <Alert variant="warning">
-                        <TerminalLine>Error updating repo:</TerminalLine>
-                        <TerminalLine>{repo.mirrorInfo.lastError}</TerminalLine>
+                        {/* TODO: This should not be a list item, but it was before this was refactored. */}
+                        <li className="d-flex w-100">Error updating repo:</li>
+                        <li className="d-flex w-100">{repo.mirrorInfo.lastError}</li>
                     </Alert>
                 )}
                 <UpdateMirrorRepositoryActionContainer
@@ -278,10 +360,10 @@ export const RepoSettingsMirrorPage: React.FunctionComponent<
                     }}
                     disabled={typeof reachable === 'boolean' && !reachable}
                     disabledReason={typeof reachable === 'boolean' && !reachable ? 'Not reachable' : undefined}
-                    history={props.history}
                 />
                 <ActionContainer
                     title="Reclone repository"
+                    titleAs="h3"
                     description={
                         <div>
                             This will delete the repository from disk and reclone it.
@@ -307,12 +389,10 @@ export const RepoSettingsMirrorPage: React.FunctionComponent<
                     run={async () => {
                         await recloneRepository()
                     }}
-                    history={props.history}
                 />
                 <CheckMirrorRepositoryConnectionActionContainer
                     repo={repo}
                     onDidUpdateReachability={onDidUpdateReachability}
-                    history={props.history}
                 />
                 {reachable === false && (
                     <Alert variant="info">
@@ -341,6 +421,7 @@ export const RepoSettingsMirrorPage: React.FunctionComponent<
                         </ul>
                     </Alert>
                 )}
+                <CorruptionLogsContainer repo={repo} />
             </Container>
         </>
     )

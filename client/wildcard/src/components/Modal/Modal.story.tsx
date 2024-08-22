@@ -1,9 +1,7 @@
-import { Meta, Story } from '@storybook/react'
-
-import { BrandedStory } from '@sourcegraph/branded/src/components/BrandedStory'
-import webStyles from '@sourcegraph/web/src/SourcegraphWebApp.scss'
+import type { Meta, StoryFn } from '@storybook/react'
 
 import { H1 } from '..'
+import { BrandedStory } from '../../stories/BrandedStory'
 
 import { Modal } from '.'
 
@@ -11,16 +9,12 @@ const config: Meta = {
     title: 'wildcard/Modal',
     component: Modal,
 
-    decorators: [
-        story => (
-            <BrandedStory styles={webStyles}>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>
-        ),
-    ],
+    decorators: [story => <BrandedStory>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>],
 }
 
 export default config
 
-export const Default: Story = () => (
+export const Default: StoryFn = () => (
     <Modal aria-label="Welcome message">
         <H1>Hello world!</H1>
     </Modal>
@@ -28,9 +22,7 @@ export const Default: Story = () => (
 
 Default.parameters = {
     component: Modal,
-    chromatic: {
-        disableSnapshot: false,
-    },
+
     design: [
         {
             type: 'figma',
@@ -45,13 +37,13 @@ Default.parameters = {
     ],
 }
 
-export const PositionCentered: Story = () => (
+export const PositionCentered: StoryFn = () => (
     <Modal position="center" aria-label="Welcome message">
         <H1>Hello world!</H1>
     </Modal>
 )
 
-export const PositionFull: Story = () => (
+export const PositionFull: StoryFn = () => (
     <Modal position="full" aria-label="Welcome message">
         <H1>Hello world!</H1>
     </Modal>

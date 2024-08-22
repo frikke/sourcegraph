@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/sourcegraph/sourcegraph/internal/metrics"
 	"github.com/sourcegraph/sourcegraph/internal/observation"
@@ -15,33 +16,43 @@ type Operations struct {
 	tryLock           *observation.Operation
 	up                *observation.Operation
 	versions          *observation.Operation
+	runDDLStatements  *observation.Operation
 	withMigrationLog  *observation.Operation
 }
 
-func NewOperations(observationContext *observation.Context) *Operations {
-	metrics := metrics.NewREDMetrics(
-		observationContext.Registerer,
-		"migrations",
-		metrics.WithLabels("op"),
-		metrics.WithCountHelp("Total number of method invocations."),
-	)
+var (
+	once sync.Once
+	ops  *Operations
+)
 
-	op := func(name string) *observation.Operation {
-		return observationContext.Operation(observation.Op{
-			Name:              fmt.Sprintf("migrations.%s", name),
-			MetricLabelValues: []string{name},
-			Metrics:           metrics,
-		})
-	}
+func NewOperations(observationCtx *observation.Context) *Operations {
+	once.Do(func() {
+		redMetrics := metrics.NewREDMetrics(
+			observationCtx.Registerer,
+			"migrations",
+			metrics.WithLabels("op"),
+			metrics.WithCountHelp("Total number of method invocations."),
+		)
 
-	return &Operations{
-		describe:          op("Describe"),
-		down:              op("Down"),
-		ensureSchemaTable: op("EnsureSchemaTable"),
-		indexStatus:       op("IndexStatus"),
-		tryLock:           op("TryLock"),
-		up:                op("Up"),
-		versions:          op("Versions"),
-		withMigrationLog:  op("WithMigrationLog"),
-	}
+		op := func(name string) *observation.Operation {
+			return observationCtx.Operation(observation.Op{
+				Name:              fmt.Sprintf("migrations.%s", name),
+				MetricLabelValues: []string{name},
+				Metrics:           redMetrics,
+			})
+		}
+
+		ops = &Operations{
+			describe:          op("Describe"),
+			down:              op("Down"),
+			ensureSchemaTable: op("EnsureSchemaTable"),
+			indexStatus:       op("IndexStatus"),
+			tryLock:           op("TryLock"),
+			up:                op("Up"),
+			versions:          op("Versions"),
+			runDDLStatements:  op("RunDDLStatements"),
+			withMigrationLog:  op("WithMigrationLog"),
+		}
+	})
+	return ops
 }

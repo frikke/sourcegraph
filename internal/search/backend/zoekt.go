@@ -3,27 +3,13 @@ package backend
 import (
 	"sync"
 
-	"github.com/sourcegraph/sourcegraph/internal/httpcli"
+	"github.com/sourcegraph/log"
 	"github.com/sourcegraph/zoekt"
-	"github.com/sourcegraph/zoekt/rpc"
-	zoektstream "github.com/sourcegraph/zoekt/stream"
-)
+	proto "github.com/sourcegraph/zoekt/grpc/protos/zoekt/webserver/v1"
+	"google.golang.org/grpc"
 
-// We don't use the normal factory for internal requests because we disable
-// retries. Currently our retry framework copies the full body on every
-// request, this is prohibitive when zoekt generates a large query.
-//
-// Once our retry framework supports the use of Request.GetBody we can switch
-// back to the normal internal request factory.
-var zoektHTTPClient, _ = httpcli.NewFactory(
-	httpcli.NewMiddleware(
-		httpcli.ContextErrorMiddleware,
-	),
-	httpcli.NewMaxIdleConnsPerHostOpt(500),
-	// This will also generate a metric named "src_zoekt_webserver_requests_total".
-	httpcli.MeteredTransportOpt("zoekt_webserver"),
-	httpcli.TracedTransportOpt,
-).Client()
+	"github.com/sourcegraph/sourcegraph/internal/grpc/defaults"
+)
 
 // ZoektStreamFunc is a convenience function to create a stream receiver from a
 // function.
@@ -31,16 +17,6 @@ type ZoektStreamFunc func(*zoekt.SearchResult)
 
 func (f ZoektStreamFunc) Send(event *zoekt.SearchResult) {
 	f(event)
-}
-
-// StreamSearchEvent has fields optionally set representing events that happen
-// during a search.
-//
-// This is a Sourcegraph extension.
-type StreamSearchEvent struct {
-	// SearchResult is non-nil if this event is a search result. These should be
-	// combined with previous and later SearchResults.
-	SearchResult *zoekt.SearchResult
 }
 
 // ZoektDialer is a function that returns a zoekt.Streamer for the given endpoint.
@@ -97,17 +73,28 @@ func (c *cachedStreamerCloser) Close() {
 	c.Streamer.Close()
 }
 
-// ZoektDial connects to a Searcher HTTP RPC server at address (host:port).
-func ZoektDial(endpoint string) zoekt.Streamer {
-	client := rpc.Client(endpoint)
-	streamClient := &zoektStream{
-		Searcher: client,
-		Client:   zoektstream.NewClient("http://"+endpoint, zoektHTTPClient),
-	}
-	return NewMeteredSearcher(endpoint, streamClient)
-}
+// maxRecvMsgSize is the max message size we can receive from Zoekt without erroring.
+// By default, this caps at 4MB, but Zoekt can send payloads significantly larger
+// than that depending on the type of search being executed.
+// 128MiB is a best guess at reasonable size that will rarely fail.
+const maxRecvMsgSize = 128 * 1024 * 1024 // 128MiB
 
-type zoektStream struct {
-	zoekt.Searcher
-	*zoektstream.Client
+// ZoektDial connects to a Searcher gRPC server at address (host:port).
+func ZoektDial(endpoint string) zoekt.Streamer {
+	conn, err := defaults.Dial(
+		endpoint,
+		log.Scoped("zoekt"),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxRecvMsgSize)),
+	)
+
+	// Frontend usually adds a wrapper called automaticRetryClient that will automatically retry requests according
+	// to the default.RetryPolicy. For Zoekt, we *do not* use automatic retries, as we want direct control over the
+	// error-handling. For example, during search we try to identify if a replica is unreachable, and skip over it
+	// and return partial results.
+	client := proto.NewWebserverServiceClient(conn)
+	return NewMeteredSearcher(endpoint, &zoektGRPCClient{
+		endpoint: endpoint,
+		client:   client,
+		dialErr:  err,
+	})
 }

@@ -7,7 +7,10 @@ import { BulkOperationState } from '@sourcegraph/shared/src/graphql-operations'
 import { Container, Icon } from '@sourcegraph/wildcard'
 
 import { dismissAlert } from '../../../components/DismissibleAlert'
-import { useConnection, UseConnectionResult } from '../../../components/FilteredConnection/hooks/useConnection'
+import {
+    useShowMorePagination,
+    type UseShowMorePaginationResult,
+} from '../../../components/FilteredConnection/hooks/useShowMorePagination'
 import {
     ConnectionContainer,
     ConnectionError,
@@ -17,7 +20,7 @@ import {
     ShowMoreButton,
     SummaryContainer,
 } from '../../../components/FilteredConnection/ui'
-import {
+import type {
     BatchChangeBulkOperationsResult,
     BatchChangeBulkOperationsVariables,
     BulkOperationFields,
@@ -40,7 +43,7 @@ export const BulkOperationsTab: React.FunctionComponent<React.PropsWithChildren<
         <Container>
             <ConnectionContainer>
                 {error && <ConnectionError errors={[error.message]} />}
-                <ConnectionList className="list-group list-group-flush">
+                <ConnectionList className="list-group list-group-flush" aria-label="bulk operations">
                     {connection?.nodes?.map(node => (
                         <BulkOperationNode key={node.id} node={node} />
                     ))}
@@ -51,7 +54,6 @@ export const BulkOperationsTab: React.FunctionComponent<React.PropsWithChildren<
                         <ConnectionSummary
                             noSummaryIfAllNodesVisible={true}
                             centered={true}
-                            first={BATCH_COUNT}
                             connection={connection}
                             noun="bulk operation"
                             pluralNoun="bulk operations"
@@ -75,8 +77,10 @@ const EmptyBulkOperationsListElement: React.FunctionComponent<React.PropsWithChi
 
 const BATCH_COUNT = 15
 
-const useBulkOperationsListConnection = (batchChangeID: Scalars['ID']): UseConnectionResult<BulkOperationFields> => {
-    const { connection, startPolling, stopPolling, ...rest } = useConnection<
+const useBulkOperationsListConnection = (
+    batchChangeID: Scalars['ID']
+): UseShowMorePaginationResult<BatchChangeBulkOperationsResult, BulkOperationFields> => {
+    const { connection, startPolling, stopPolling, ...rest } = useShowMorePagination<
         BatchChangeBulkOperationsResult,
         BatchChangeBulkOperationsVariables,
         BulkOperationFields
@@ -84,11 +88,9 @@ const useBulkOperationsListConnection = (batchChangeID: Scalars['ID']): UseConne
         query: BULK_OPERATIONS,
         variables: {
             batchChange: batchChangeID,
-            after: null,
-            first: BATCH_COUNT,
         },
         options: {
-            useURL: true,
+            pageSize: BATCH_COUNT,
             fetchPolicy: 'cache-and-network',
         },
         getConnection: result => {

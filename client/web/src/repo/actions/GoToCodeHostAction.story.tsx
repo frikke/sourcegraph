@@ -2,15 +2,15 @@
 import { useEffect, useState } from 'react'
 
 import { mdiGithub, mdiGitlab, mdiBitbucket } from '@mdi/js'
-import { Meta, Story, DecoratorFn } from '@storybook/react'
+import type { Meta, StoryFn, Decorator } from '@storybook/react'
 
 import { PhabricatorIcon } from '@sourcegraph/shared/src/components/icons'
-import { ExternalServiceKind } from '@sourcegraph/shared/src/schema'
 import { Button, Popover, PopoverTrigger, Icon } from '@sourcegraph/wildcard'
 
 import { WebStory } from '../../components/WebStory'
+import { ExternalServiceKind } from '../../graphql-operations'
 
-const decorator: DecoratorFn = story => <div className="container mt-3">{story()}</div>
+const decorator: Decorator = story => <div className="container mt-3">{story()}</div>
 
 const config: Meta = {
     title: 'web/repo/actions/InstallBrowserExtensionPopover',
@@ -19,7 +19,7 @@ const config: Meta = {
 
 export default config
 
-export const GitHub: Story = () => (
+export const GitHub: StoryFn = () => (
     <WebStory>
         {() => {
             const serviceKind = ExternalServiceKind.GITHUB
@@ -43,8 +43,7 @@ export const GitHub: Story = () => (
 
 GitHub.storyName = 'GitHub'
 
-// Disable Chromatic for the non-GitHub popovers since they are mostly the same
-export const GitLab: Story = () => (
+export const GitLab: StoryFn = () => (
     <WebStory>
         {() => {
             const serviceKind = ExternalServiceKind.GITLAB
@@ -65,13 +64,8 @@ export const GitLab: Story = () => (
 )
 
 GitLab.storyName = 'GitLab'
-GitLab.parameters = {
-    chromatic: {
-        disable: true,
-    },
-}
 
-export const Phabricator: Story = () => (
+export const Phabricator: StoryFn = () => (
     <WebStory>
         {() => {
             const serviceKind = ExternalServiceKind.PHABRICATOR
@@ -91,13 +85,7 @@ export const Phabricator: Story = () => (
     </WebStory>
 )
 
-Phabricator.parameters = {
-    chromatic: {
-        disable: true,
-    },
-}
-
-export const BitbucketServer: Story = () => (
+export const BitbucketServer: StoryFn = () => (
     <WebStory>
         {() => {
             const serviceKind = ExternalServiceKind.BITBUCKETSERVER
@@ -118,9 +106,3 @@ export const BitbucketServer: Story = () => (
 )
 
 BitbucketServer.storyName = 'Bitbucket server'
-
-BitbucketServer.parameters = {
-    chromatic: {
-        disable: true,
-    },
-}

@@ -1,10 +1,11 @@
-import { MockedResponse } from '@apollo/client/testing'
+import type { MockedResponse } from '@apollo/client/testing'
 import { subDays } from 'date-fns'
 
 import { getDocumentNode } from '@sourcegraph/http-client'
 import { GitRefType } from '@sourcegraph/shared/src/graphql-operations'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 
-import {
+import type {
     GitCommitAncestorsConnectionFields,
     GitRefConnectionFields,
     RepositoryGitCommitResult,
@@ -12,16 +13,18 @@ import {
 } from '../../graphql-operations'
 import { REPOSITORY_GIT_REFS } from '../GitReference'
 
-import { RevisionsPopoverProps } from './RevisionsPopover'
+import type { RevisionsPopoverProps } from './RevisionsPopover'
 import { REPOSITORY_GIT_COMMIT } from './RevisionsPopoverCommits'
 
 export const MOCK_PROPS: RevisionsPopoverProps = {
     repoId: 'some-repo-id',
     repoName: 'testorg/testrepo',
+    repoServiceType: 'github',
     defaultBranch: 'main',
     currentRev: 'main',
     togglePopover: () => null,
     showSpeculativeResults: false,
+    telemetryRecorder: noOpTelemetryRecorder,
 }
 
 const yesterday = subDays(new Date(), 1).toISOString()
@@ -55,11 +58,11 @@ const generateGitReferenceNodes = (nodeCount: number, variant: GitRefType): GitR
                         date: yesterday,
                         person: commitPerson,
                     },
-                    behindAhead: null,
+                    behindAhead: {},
                 },
             },
         }
-    })
+    }) as GitRefConnectionFields['nodes']
 
 const generateGitCommitNodes = (nodeCount: number): GitCommitAncestorsConnectionFields['nodes'] =>
     new Array(nodeCount).fill(null).map((_value, index) => ({

@@ -1,27 +1,28 @@
 import React, { useEffect, useState } from 'react'
 
-import { Navigate, useLocation, useParams } from 'react-router-dom-v5-compat'
+import { Navigate, useLocation, useParams } from 'react-router-dom'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { Alert, Link, LoadingSpinner } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Alert, Link, LoadingSpinner, ErrorAlert, Container } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../auth'
-import { HeroPage } from '../components/HeroPage'
+import type { AuthenticatedUser } from '../auth'
 import { PageTitle } from '../components/PageTitle'
-import { SourcegraphContext } from '../jscontext'
-import { eventLogger } from '../tracking/eventLogger'
+import type { SourcegraphContext } from '../jscontext'
 
-import { SourcegraphIcon } from './icons'
+import { AuthPageWrapper } from './AuthPageWrapper'
 import { getReturnTo } from './SignInSignUpCommon'
 
-import unlockAccountStyles from './SignInSignUpCommon.module.scss'
+import styles from './UnlockAccount.module.scss'
 
-interface UnlockAccountPageProps {
+interface UnlockAccountPageProps extends TelemetryV2Props {
     authenticatedUser: AuthenticatedUser | null
     context: Pick<
         SourcegraphContext,
         'allowSignup' | 'authProviders' | 'sourcegraphDotComMode' | 'xhrHeaders' | 'resetPasswordEnabled'
     >
+    /** Used for testing only. */
+    mockSuccess?: boolean
 }
 
 export const UnlockAccountPage: React.FunctionComponent<React.PropsWithChildren<UnlockAccountPageProps>> = props => {
@@ -51,59 +52,58 @@ export const UnlockAccountPage: React.FunctionComponent<React.PropsWithChildren<
                 throw new Error('The url you provided is either expired or invalid.')
             }
 
-            eventLogger.log('OkUnlockAccount', { token })
+            EVENT_LOGGER.log('OkUnlockAccount')
+            props.telemetryRecorder.recordEvent('auth.unlockAccount', 'success')
         } catch (error) {
             setError(error)
-            eventLogger.log('KoUnlockAccount', { token })
+            EVENT_LOGGER.log('KoUnlockAccount')
+            props.telemetryRecorder.recordEvent('auth.unlockAccount', 'fail')
         } finally {
             setLoading(false)
         }
-    }, [token, props.context.xhrHeaders])
+    }, [token, props.context.xhrHeaders, props.telemetryRecorder])
 
     useEffect(() => {
         if (props.authenticatedUser) {
             return
         }
-        eventLogger.logPageView('UnlockUserAccountRequest', null, false)
+        EVENT_LOGGER.logPageView('UnlockUserAccountRequest', null, false)
+        props.telemetryRecorder.recordEvent('auth.unlockAccount', 'view')
+
         unlockAccount().catch(error => {
             setError(error)
         })
-    }, [unlockAccount, props.authenticatedUser])
+    }, [unlockAccount, props.authenticatedUser, props.telemetryRecorder])
 
     if (props.authenticatedUser) {
         const returnTo = getReturnTo(location)
         return <Navigate to={returnTo} replace={true} />
     }
 
-    const body = (
-        <div>
-            {loading && <LoadingSpinner />}
-            {error && <ErrorAlert className="mt-2" error={error} />}
-            {!loading && !error && (
-                <>
-                    <Alert variant="success">
-                        Your account was unlocked. Please try to <Link to="/sign-in">sign in</Link> to continue.
-                    </Alert>
-                </>
-            )}
-        </div>
-    )
-
     return (
-        <div className={unlockAccountStyles.signinSignupPage}>
+        <>
             <PageTitle title="Unlock account" />
-            <HeroPage
-                icon={SourcegraphIcon}
-                iconLinkTo={props.context.sourcegraphDotComMode ? '/search' : undefined}
-                iconClassName="bg-transparent"
-                lessPadding={true}
+            <AuthPageWrapper
                 title={
                     props.context.sourcegraphDotComMode
-                        ? 'Unlock your Sourcegraph Cloud account'
+                        ? 'Unlock your Sourcegraph.com account'
                         : 'Unlock your Sourcegraph Server account'
                 }
-                body={body}
-            />
-        </div>
+                sourcegraphDotComMode={props.context.sourcegraphDotComMode}
+                className={styles.wrapper}
+            >
+                <Container>
+                    {!props.mockSuccess && loading && <LoadingSpinner />}
+                    {!props.mockSuccess && error && <ErrorAlert className="mb-0" error={error} />}
+                    {((!loading && !error) || props.mockSuccess) && (
+                        <>
+                            <Alert variant="success" className="mb-0">
+                                Your account was unlocked. Please try to <Link to="/sign-in">sign in</Link> to continue.
+                            </Alert>
+                        </>
+                    )}
+                </Container>
+            </AuthPageWrapper>
+        </>
     )
 }

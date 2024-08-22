@@ -1,13 +1,13 @@
-import { Meta, Story, DecoratorFn } from '@storybook/react'
+import type { Meta, StoryFn, Decorator } from '@storybook/react'
 
-import { ExternalServiceKind } from '@sourcegraph/shared/src/graphql-operations'
-import { BatchSpecSource } from '@sourcegraph/shared/src/schema'
+import type { ExternalServiceKind } from '@sourcegraph/shared/src/graphql-operations'
 
 import { WebStory } from '../../../components/WebStory'
+import { BatchSpecSource } from '../../../graphql-operations'
 
 import { WebhookAlert } from './WebhookAlert'
 
-const decorator: DecoratorFn = story => <div className="p-3 container">{story()}</div>
+const decorator: Decorator = story => <div className="p-3 container">{story()}</div>
 
 const config: Meta = {
     title: 'web/batches/details/WebhookAlert',
@@ -26,6 +26,11 @@ const currentSpec = {
     viewerBatchChangesCodeHosts: {
         totalCount: 0,
         nodes: [],
+    },
+    files: null,
+    description: {
+        __typename: 'BatchChangeDescription' as const,
+        name: 'spec with ID 1',
     },
 }
 
@@ -54,25 +59,25 @@ const batchChange = (totalCount: number, hasNextPage: boolean) => ({
     },
 })
 
-export const SiteAdmin: Story = () => (
+export const SiteAdmin: StoryFn = () => (
     <WebStory>{() => <WebhookAlert batchChange={batchChange(3, false)} isSiteAdmin={true} />}</WebStory>
 )
 
 SiteAdmin.storyName = 'Site admin'
 
-export const RegularUser: Story = () => (
+export const RegularUser: StoryFn = () => (
     <WebStory>{() => <WebhookAlert batchChange={batchChange(3, false)} />}</WebStory>
 )
 
 RegularUser.storyName = 'Regular user'
 
-export const RegularUserWithMoreThanThreeCodeHosts: Story = () => (
+export const RegularUserWithMoreThanThreeCodeHosts: StoryFn = () => (
     <WebStory>{() => <WebhookAlert batchChange={batchChange(4, true)} />}</WebStory>
 )
 
 RegularUserWithMoreThanThreeCodeHosts.storyName = 'Regular user with more than three code hosts'
 
-export const AllCodeHostsHaveWebhooks: Story = () => (
+export const AllCodeHostsHaveWebhooks: StoryFn = () => (
     <WebStory>
         {() => (
             <WebhookAlert

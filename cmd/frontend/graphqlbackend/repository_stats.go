@@ -4,10 +4,9 @@ import (
 	"context"
 	"sync"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
-	"github.com/sourcegraph/sourcegraph/internal/conf"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
 	"github.com/sourcegraph/sourcegraph/internal/database"
-	"github.com/sourcegraph/sourcegraph/internal/gitserver"
+	"github.com/sourcegraph/sourcegraph/internal/embeddings/background/repo"
 	"github.com/sourcegraph/sourcegraph/internal/search"
 )
 
@@ -23,36 +22,19 @@ type repositoryStatsResolver struct {
 	repoStatistics     database.RepoStatistics
 	repoStatisticsErr  error
 
-	gitDirBytesOnce sync.Once
-	gitDirBytes     int64
-	gitDirBytesErr  error
+	embeddedStatsOnce sync.Once
+	embeddedRepos     int32
+	embeddedStatsErr  error
+}
+
+func (r *repositoryStatsResolver) Embedded(ctx context.Context) (int32, error) {
+	return r.computeEmbeddedRepos(ctx)
 }
 
 func (r *repositoryStatsResolver) GitDirBytes(ctx context.Context) (BigInt, error) {
-	gitDirBytes, err := r.computeGitDirBytes(ctx)
-	if err != nil {
-		return BigInt{}, err
-	}
-	return BigInt{Int: gitDirBytes}, nil
+	gitDirBytes, err := r.db.GitserverRepos().GetGitserverGitDirSize(ctx)
+	return BigInt(gitDirBytes), err
 
-}
-
-func (r *repositoryStatsResolver) computeGitDirBytes(ctx context.Context) (int64, error) {
-	r.gitDirBytesOnce.Do(func() {
-		stats, err := gitserver.NewClient(r.db).ReposStats(ctx)
-		if err != nil {
-			r.gitDirBytesErr = err
-			return
-		}
-
-		var gitDirBytes int64
-		for _, stat := range stats {
-			gitDirBytes += stat.GitDirBytes
-		}
-		r.gitDirBytes = gitDirBytes
-	})
-
-	return r.gitDirBytes, r.gitDirBytesErr
 }
 
 func (r *repositoryStatsResolver) Indexed(ctx context.Context) (int32, error) {
@@ -72,40 +54,23 @@ func (r *repositoryStatsResolver) Indexed(ctx context.Context) (int32, error) {
 	return min(indexedRepos, total), nil
 }
 
-func min(a, b int32) int32 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func (r *repositoryStatsResolver) IndexedLinesCount(ctx context.Context) (BigInt, error) {
 	_, indexedLinesCount, err := r.computeIndexedStats(ctx)
 	if err != nil {
-		return BigInt{}, err
+		return 0, err
 	}
-	return BigInt{Int: indexedLinesCount}, nil
+	return BigInt(indexedLinesCount), nil
 }
 
 func (r *repositoryStatsResolver) computeIndexedStats(ctx context.Context) (int32, int64, error) {
 	r.indexedStatsOnce.Do(func() {
-		var (
-			indexedRepos     int32
-			indexedLineCount int64
-		)
-
-		if conf.SearchIndexEnabled() {
-			repos, err := search.ListAllIndexed(ctx)
-			if err != nil {
-				r.indexedStatsErr = err
-				return
-			}
-			indexedRepos = int32(len(repos.Minimal))
-			indexedLineCount = int64(repos.Stats.DefaultBranchNewLinesCount) + int64(repos.Stats.OtherBranchesNewLinesCount)
+		repos, err := search.ListAllIndexed(ctx, search.Indexed())
+		if err != nil {
+			r.indexedStatsErr = err
+			return
 		}
-
-		r.indexedRepos = indexedRepos
-		r.indexedLinesCount = indexedLineCount
+		r.indexedRepos = int32(repos.Stats.Repos)
+		r.indexedLinesCount = int64(repos.Stats.DefaultBranchNewLinesCount) + int64(repos.Stats.OtherBranchesNewLinesCount)
 	})
 
 	return r.indexedRepos, r.indexedLinesCount, r.indexedStatsErr
@@ -151,6 +116,14 @@ func (r *repositoryStatsResolver) FailedFetch(ctx context.Context) (int32, error
 	return int32(counts.FailedFetch), nil
 }
 
+func (r *repositoryStatsResolver) Corrupted(ctx context.Context) (int32, error) {
+	counts, err := r.computeRepoStatistics(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return int32(counts.Corrupted), nil
+}
+
 func (r *repositoryStatsResolver) computeRepoStatistics(ctx context.Context) (database.RepoStatistics, error) {
 	r.repoStatisticsOnce.Do(func() {
 		r.repoStatistics, r.repoStatisticsErr = r.db.RepoStatistics().GetRepoStatistics(ctx)
@@ -158,10 +131,23 @@ func (r *repositoryStatsResolver) computeRepoStatistics(ctx context.Context) (da
 	return r.repoStatistics, r.repoStatisticsErr
 }
 
+func (r *repositoryStatsResolver) computeEmbeddedRepos(ctx context.Context) (int32, error) {
+	r.embeddedStatsOnce.Do(func() {
+		count, err := repo.NewRepoEmbeddingJobsStore(r.db).CountRepoEmbeddings(ctx)
+		if err != nil {
+			r.embeddedStatsErr = err
+			return
+		}
+		r.embeddedRepos = int32(count)
+	})
+
+	return r.embeddedRepos, r.embeddedStatsErr
+}
+
 func (r *schemaResolver) RepositoryStats(ctx context.Context) (*repositoryStatsResolver, error) {
 	// 🚨 SECURITY: Only site admins may query repository statistics for the site.
 	db := r.db
-	if err := backend.CheckCurrentUserIsSiteAdmin(ctx, db); err != nil {
+	if err := auth.CheckCurrentUserIsSiteAdmin(ctx, db); err != nil {
 		return nil, err
 	}
 

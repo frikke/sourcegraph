@@ -4,11 +4,14 @@ import (
 	"context"
 	"testing"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
-	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
+	"github.com/sourcegraph/sourcegraph/internal/conf"
+	"github.com/sourcegraph/sourcegraph/internal/database/dbmocks"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc"
+	"github.com/sourcegraph/sourcegraph/internal/gitserver"
 	"github.com/sourcegraph/sourcegraph/internal/repos"
 	"github.com/sourcegraph/sourcegraph/internal/types"
+	"github.com/sourcegraph/sourcegraph/schema"
 )
 
 func TestStatusMessages(t *testing.T) {
@@ -16,6 +19,14 @@ func TestStatusMessages(t *testing.T) {
 		query StatusMessages {
 			statusMessages {
 				__typename
+
+				... on GitUpdatesDisabled {
+					message
+				}
+
+				... on NoRepositoriesDetected {
+					message
+				}
 
 				... on CloningProgress {
 					message
@@ -36,14 +47,14 @@ func TestStatusMessages(t *testing.T) {
 		}
 	`
 
-	db := database.NewMockDB()
+	db := dbmocks.NewMockDB()
 	t.Run("unauthenticated", func(t *testing.T) {
-		users := database.NewMockUserStore()
+		users := dbmocks.NewMockUserStore()
 		users.GetByCurrentAuthUserFunc.SetDefaultReturn(nil, nil)
 		db.UsersFunc.SetDefaultReturn(users)
 
-		result, err := newSchemaResolver(db).StatusMessages(context.Background())
-		if want := backend.ErrNotAuthenticated; err != want {
+		result, err := newSchemaResolver(db, gitserver.NewTestClient(t), nil).StatusMessages(context.Background())
+		if want := auth.ErrNotAuthenticated; err != want {
 			t.Errorf("got err %v, want %v", err, want)
 		}
 		if result != nil {
@@ -52,14 +63,16 @@ func TestStatusMessages(t *testing.T) {
 	})
 
 	t.Run("no messages", func(t *testing.T) {
-		users := database.NewMockUserStore()
+		users := dbmocks.NewMockUserStore()
 		users.GetByCurrentAuthUserFunc.SetDefaultReturn(&types.User{ID: 1, SiteAdmin: true}, nil)
 		db.UsersFunc.SetDefaultReturn(users)
 
 		repos.MockStatusMessages = func(_ context.Context) ([]repos.StatusMessage, error) {
 			return []repos.StatusMessage{}, nil
 		}
-		defer func() { repos.MockStatusMessages = nil }()
+		t.Cleanup(func() {
+			repos.MockStatusMessages = nil
+		})
 
 		RunTests(t, []*Test{
 			{
@@ -75,10 +88,10 @@ func TestStatusMessages(t *testing.T) {
 	})
 
 	t.Run("messages", func(t *testing.T) {
-		users := database.NewMockUserStore()
+		users := dbmocks.NewMockUserStore()
 		users.GetByCurrentAuthUserFunc.SetDefaultReturn(&types.User{ID: 1, SiteAdmin: true}, nil)
 
-		externalServices := database.NewMockExternalServiceStore()
+		externalServices := dbmocks.NewMockExternalServiceStore()
 		externalServices.GetByIDFunc.SetDefaultReturn(&types.ExternalService{
 			ID:          1,
 			DisplayName: "GitHub.com testing",
@@ -90,6 +103,16 @@ func TestStatusMessages(t *testing.T) {
 
 		repos.MockStatusMessages = func(_ context.Context) ([]repos.StatusMessage, error) {
 			res := []repos.StatusMessage{
+				{
+					GitUpdatesDisabled: &repos.GitUpdatesDisabled{
+						Message: "Repositories will not be cloned or updated.",
+					},
+				},
+				{
+					NoRepositoriesDetected: &repos.NoRepositoriesDetected{
+						Message: "No repositories have been added to Sourcegraph.",
+					},
+				},
 				{
 					Cloning: &repos.CloningProgress{
 						Message: "Currently cloning 5 repositories in parallel...",
@@ -109,15 +132,32 @@ func TestStatusMessages(t *testing.T) {
 			}
 			return res, nil
 		}
-		defer func() { repos.MockStatusMessages = nil }()
 
-		RunTests(t, []*Test{
-			{
-				Schema: mustParseGraphQLSchema(t, db),
-				Query:  graphqlQuery,
-				ExpectedResult: `
+		conf.Mock(&conf.Unified{
+			SiteConfiguration: schema.SiteConfiguration{
+				DisableAutoGitUpdates: true,
+			},
+		})
+
+		t.Cleanup(func() {
+			repos.MockStatusMessages = nil
+			conf.Mock(nil)
+		})
+
+		RunTest(t, &Test{
+			Schema: mustParseGraphQLSchema(t, db),
+			Query:  graphqlQuery,
+			ExpectedResult: `
 					{
 						"statusMessages": [
+							{
+								"__typename": "GitUpdatesDisabled",
+        						"message": "Repositories will not be cloned or updated."
+							},
+							{
+								"__typename": "NoRepositoriesDetected",
+        						"message": "No repositories have been added to Sourcegraph."
+							},
 							{
 								"__typename": "CloningProgress",
 								"message": "Currently cloning 5 repositories in parallel..."
@@ -137,7 +177,6 @@ func TestStatusMessages(t *testing.T) {
 						]
 					}
 				`,
-			},
 		})
 	})
 }

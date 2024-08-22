@@ -1,6 +1,8 @@
 package deploy
 
-import "os"
+import (
+	"os"
+)
 
 // Deploy type constants. Any changes here should be reflected in the DeployType type declared in client/web/src/jscontext.ts:
 // https://sourcegraph.com/search?q=r:github.com/sourcegraph/sourcegraph%24+%22type+DeployType%22
@@ -11,6 +13,9 @@ const (
 	PureDocker    = "pure-docker"
 	Dev           = "dev"
 	Helm          = "helm"
+	Kustomize     = "kustomize"
+	K3s           = "k3s"
+	Appliance     = "appliance"
 )
 
 var mock string
@@ -37,7 +42,7 @@ func Mock(val string) {
 func IsDeployTypeKubernetes(deployType string) bool {
 	switch deployType {
 	// includes older Kubernetes aliases for backwards compatibility
-	case "k8s", "cluster", Kubernetes, Helm:
+	case "k8s", "cluster", Kubernetes, Helm, Kustomize, K3s, Appliance:
 		return true
 	}
 

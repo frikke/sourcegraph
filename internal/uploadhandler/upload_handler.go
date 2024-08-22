@@ -8,35 +8,38 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/opentracing/opentracing-go/log"
+	"go.opentelemetry.io/otel/attribute"
 
 	sglog "github.com/sourcegraph/log"
 
+	"github.com/sourcegraph/sourcegraph/internal/object"
 	"github.com/sourcegraph/sourcegraph/internal/observation"
-	"github.com/sourcegraph/sourcegraph/internal/uploadstore"
+	"github.com/sourcegraph/sourcegraph/internal/trace/policy"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 type UploadHandler[T any] struct {
 	logger              sglog.Logger
 	dbStore             DBStore[T]
-	uploadStore         uploadstore.Store
+	uploadStore         object.Storage
+	enqueuer            UploadEnqueuer[T]
 	operations          *Operations
 	metadataFromRequest func(ctx context.Context, r *http.Request) (T, int, error)
 }
 
 func NewUploadHandler[T any](
-	logger sglog.Logger,
+	observationCtx *observation.Context,
 	dbStore DBStore[T],
-	uploadStore uploadstore.Store,
+	uploadStore object.Storage,
 	operations *Operations,
 	metadataFromRequest func(ctx context.Context, r *http.Request) (T, int, error),
 ) http.Handler {
 	handler := &UploadHandler[T]{
-		logger:              logger,
+		logger:              observationCtx.Logger,
 		dbStore:             dbStore,
 		uploadStore:         uploadStore,
 		operations:          operations,
+		enqueuer:            NewUploadEnqueuer[T](observationCtx, dbStore, uploadStore),
 		metadataFromRequest: metadataFromRequest,
 	}
 
@@ -75,10 +78,13 @@ func (h *UploadHandler[T]) handleEnqueue(w http.ResponseWriter, r *http.Request)
 	// easily. The remainder of the function simply serializes the result to the
 	// HTTP response writer.
 	payload, statusCode, err := func() (_ any, statusCode int, err error) {
-		ctx, trace, endObservation := h.operations.handleEnqueue.With(r.Context(), &err, observation.Args{})
+		// Always enable tracing for uploads, since a typical Sourcegraph instance doesn't
+		// have that many uploads, and lack of traces by default makes debugging harder.
+		ctx := policy.WithShouldTrace(r.Context(), true)
+		ctx, trace, endObservation := h.operations.handleEnqueue.With(ctx, &err, observation.Args{})
 		defer func() {
-			endObservation(1, observation.Args{LogFields: []log.Field{
-				log.Int("statusCode", statusCode),
+			endObservation(1, observation.Args{Attrs: []attribute.KeyValue{
+				attribute.Int("statusCode", statusCode),
 			}})
 		}()
 
@@ -86,16 +92,7 @@ func (h *UploadHandler[T]) handleEnqueue(w http.ResponseWriter, r *http.Request)
 		if err != nil {
 			return nil, statusCode, err
 		}
-		trace.Log(
-			log.Int("uploadID", uploadState.uploadID),
-			log.Int("numParts", uploadState.numParts),
-			log.Int("numUploadedParts", len(uploadState.uploadedParts)),
-			log.Bool("multipart", uploadState.multipart),
-			log.Bool("suppliedIndex", uploadState.suppliedIndex),
-			log.Int("index", uploadState.index),
-			log.Bool("done", uploadState.done),
-			log.Object("metadata", uploadState.metadata),
-		)
+		trace.AddEvent("finished constructUploadState", uploadState.Attrs()...)
 
 		if uploadHandlerFunc := h.selectUploadHandlerFunc(uploadState); uploadHandlerFunc != nil {
 			return uploadHandlerFunc(ctx, uploadState, r.Body)
@@ -136,7 +133,7 @@ func (h *UploadHandler[T]) handleEnqueue(w http.ResponseWriter, r *http.Request)
 type uploadHandlerFunc[T any] func(context.Context, uploadState[T], io.Reader) (any, int, error)
 
 func (h *UploadHandler[T]) selectUploadHandlerFunc(uploadState uploadState[T]) uploadHandlerFunc[T] {
-	if uploadState.uploadID == 0 {
+	if !uploadState.suppliedUploadID {
 		if uploadState.multipart {
 			return h.handleEnqueueMultipartSetup
 		}

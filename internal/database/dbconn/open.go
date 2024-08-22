@@ -4,7 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
-	"log"
+	"fmt"
+	"log" //nolint:logging // TODO move all logging to sourcegraph/log
 	"strconv"
 	"strings"
 	"sync"
@@ -13,10 +14,12 @@ import (
 	"github.com/XSAM/otelsql"
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/stdlib"
+	"github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/qustavo/sqlhooks/v2"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/sourcegraph/sourcegraph/internal/env"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
@@ -69,7 +72,7 @@ func openDBWithStartupWait(cfg *pgx.ConnConfig) (db *sql.DB, err error) {
 	startupDeadline := time.Now().Add(startupTimeout)
 	for {
 		if time.Now().After(startupDeadline) {
-			return nil, errors.Errorf("database did not start up within %s (%v)", startupTimeout, err)
+			return nil, errors.Wrapf(err, "database did not start up within %s", startupTimeout)
 		}
 		db, err = open(cfg)
 		if err == nil {
@@ -109,21 +112,20 @@ func openDBWithStartupWait(cfg *pgx.ConnConfig) (db *sql.DB, err error) {
 //	  │           │Implement all SQL driver methods
 //	  │
 //	  │Expects all SQL driver methods
-//
-// A sqlhooks.Driver must be used as a Driver otherwise errors will be raised.
 type extendedDriver struct {
-	driver.Driver
+	sqlhooksDriver *sqlhooks.Driver
 }
 
 // extendedConn wraps sqlHooks' conn that does implement Ping, ResetSession and
 // CheckNamedValue into one that does, by accessing the underlying conn from the
 // original driver that does implement these methods.
 type extendedConn struct {
-	driver.ExecerContext
-	driver.QueryerContext
 	driver.Conn
 	driver.ConnPrepareContext
 	driver.ConnBeginTx
+
+	execerContext  driver.ExecerContext
+	queryerContext driver.QueryerContext
 }
 
 var _ driver.Pinger = &extendedConn{}
@@ -134,10 +136,32 @@ var _ driver.NamedValueChecker = &extendedConn{}
 // Ping, ResetSession and CheckNamedValue optional methods that the
 // otelsql.Conn expects to be implemented.
 func (d *extendedDriver) Open(str string) (driver.Conn, error) {
-	if _, ok := d.Driver.(*sqlhooks.Driver); !ok {
-		return nil, errors.New("sql driver is not a sqlhooks.Driver")
+	if pgConnectionUpdater != "" {
+		// Driver.Open() is called during after we first attempt to connect to the database
+		// during startup time in `dbconn.open()`, where the manager will persist the config internally,
+		// and also call the underlying pgx RegisterConnConfig() to register the config to pgx driver.
+		// Therefore, this should never be nil.
+		//
+		// We do not need this code path unless connection updater is enabled.
+		cfg := manager.getConfig(str)
+		if cfg == nil {
+			return nil, errors.Newf("no config found %q", str)
+		}
+
+		u, ok := connectionUpdaters[pgConnectionUpdater]
+		if !ok {
+			return nil, errors.Errorf("unknown connection updater %q", pgConnectionUpdater)
+		}
+		if u.ShouldUpdate(cfg) {
+			config, err := u.Update(cfg.Copy())
+			if err != nil {
+				return nil, errors.Wrapf(err, "update connection %q", str)
+			}
+			str = manager.registerConfig(config)
+		}
 	}
-	c, err := d.Driver.Open(str)
+
+	c, err := d.sqlhooksDriver.Open(str)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +174,7 @@ func (d *extendedDriver) Open(str string) (driver.Conn, error) {
 		return nil, errors.New("sql conn doen't implement driver.QueryerContext")
 	}
 	if _, ok := c.(any).(driver.Conn); !ok {
-		return nil, errors.New("sql conn doen't implement driver.Conn")
+		return nil, errors.New("sql conn doesn't implement driver.Conn")
 	}
 	if _, ok := c.(any).(driver.ConnPrepareContext); !ok {
 		return nil, errors.New("sql conn doen't implement driver.ConnPrepareContext")
@@ -161,31 +185,48 @@ func (d *extendedDriver) Open(str string) (driver.Conn, error) {
 
 	// Build the extended connection.
 	return &extendedConn{
-		ExecerContext:      c.(any).(driver.ExecerContext),
-		QueryerContext:     c.(any).(driver.QueryerContext),
 		Conn:               c.(any).(driver.Conn),
 		ConnPrepareContext: c.(any).(driver.ConnPrepareContext),
 		ConnBeginTx:        c.(any).(driver.ConnBeginTx),
+		execerContext:      c.(any).(driver.ExecerContext),
+		queryerContext:     c.(any).(driver.QueryerContext),
 	}, nil
 }
 
+// UnwrappableConn is a wrapped conn can surface the underlying connection. It
+// is also implemented by the otelsql driver.
+// See https://sourcegraph.com/github.com/XSAM/otelsql@0256631c154becc112155e330591de4e2802af5e/-/blob/conn.go?L279
+type UnwrappableConn interface{ Raw() driver.Conn }
+
+var _ UnwrappableConn = (*extendedConn)(nil)
+
 // Access the underlying connection, so we can forward the methods that
 // sqlhooks does not implement on its own.
-func (n *extendedConn) rawConn() driver.Conn {
+func (n *extendedConn) Raw() driver.Conn {
 	c := n.Conn.(*sqlhooks.ExecerQueryerContextWithSessionResetter)
 	return c.Conn.Conn
 }
 
 func (n *extendedConn) Ping(ctx context.Context) error {
-	return n.rawConn().(driver.Pinger).Ping(ctx)
+	return n.Raw().(driver.Pinger).Ping(ctx)
 }
 
 func (n *extendedConn) ResetSession(ctx context.Context) error {
-	return n.rawConn().(driver.SessionResetter).ResetSession(ctx)
+	return n.Raw().(driver.SessionResetter).ResetSession(ctx)
 }
 
 func (n *extendedConn) CheckNamedValue(namedValue *driver.NamedValue) error {
-	return n.rawConn().(driver.NamedValueChecker).CheckNamedValue(namedValue)
+	return n.Raw().(driver.NamedValueChecker).CheckNamedValue(namedValue)
+}
+
+func (n *extendedConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	ctx, query = instrumentQuery(ctx, query, len(args))
+	return n.execerContext.ExecContext(ctx, query, args)
+}
+
+func (n *extendedConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	ctx, query = instrumentQuery(ctx, query, len(args))
+	return n.queryerContext.QueryContext(ctx, query, args)
 }
 
 func registerPostgresProxy() {
@@ -200,29 +241,38 @@ func registerPostgresProxy() {
 			metricSQLErrorTotal:   m.WithLabelValues("error"),
 		},
 	))
-	sql.Register("postgres-proxy", &extendedDriver{dri})
+	if sqlhooksDriver, ok := dri.(*sqlhooks.Driver); ok {
+		sql.Register("postgres-proxy", &extendedDriver{sqlhooksDriver})
+		return
+	}
+	panic("sql driver is not a sqlhooks.Driver")
 }
 
 var registerOnce sync.Once
 
 func open(cfg *pgx.ConnConfig) (*sql.DB, error) {
 	registerOnce.Do(registerPostgresProxy)
+	// this function is called once during startup time, and we register the db config
+	// to our own manager, and manager will also register the config to pgx driver by
+	// calling the underlying stdlib.RegisterConnConfig().
+	name := manager.registerConfig(cfg)
 
 	db, err := otelsql.Open(
 		"postgres-proxy",
-		stdlib.RegisterConnConfig(cfg),
+		name,
 		otelsql.WithTracerProvider(otel.GetTracerProvider()),
 		otelsql.WithSQLCommenter(true),
 		otelsql.WithSpanOptions(otelsql.SpanOptions{
 			OmitConnResetSession: true,
-			ArgumentOptions: otelsql.ArgumentOptions{
-				EnableAttributes: true,
-				Skip: func(ctx context.Context, query string, args []any) bool {
-					// Do not decorate span with args as attributes if that's a bulk insertion
-					// or if we have too many args (it's unreadable anyway).
-					return isBulkInsertion(ctx) || len(args) > 24
-				}},
+			OmitConnPrepare:      true,
+			OmitRows:             true,
+			OmitConnectorConnect: true,
+			// Do not include the otesql-generated 'db.statement' attribute so
+			// that we can add our own processed, truncated version of it in
+			// instrumentQuery(...).
+			DisableQuery: true,
 		}),
+		otelsql.WithAttributesGetter(argsAsAttributes),
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "postgresql open")
@@ -260,4 +310,135 @@ func isDatabaseLikelyStartingUp(err error) bool {
 	}
 
 	return false
+}
+
+var (
+	// argsAttributesCountLimit defaults to 24 because the GCP Cloud Trace limit
+	// on number of attributes per span is 30: https://cloud.google.com/trace/docs/quotas
+	argsAttributesCountLimit = env.MustGetInt("SRC_OTELSQL_ARGUMENT_COUNT_LIMIT", 32,
+		"Number of SQL arguments allowed to enable argument instrumentation")
+	// argsAttributesValueLimit defaults to 240 because the GCP Cloud Trace limit
+	// on values is 256 bytes: https://cloud.google.com/trace/docs/quotas
+	argsAttributesValueLimit = env.MustGetInt("SRC_OTELSQL_ARGUMENT_VALUE_LIMIT", 240,
+		"Maximum size to use in heuristics of SQL arguments size in argument instrumentation before they are truncated. This is NOT a hard cap on bytes size of values.")
+)
+
+// argsAsAttributes generates a set of OpenTelemetry trace attributes that represent the
+// argument values used in a query. The query statement itself is instrumented in
+// instrumentQuery(...)
+func argsAsAttributes(ctx context.Context, _ otelsql.Method, _ string, args []driver.NamedValue) []attribute.KeyValue {
+	// Do not decorate span with args as attributes if that's a bulk insertion
+	// or if we have too many args (it's unreadable anyway).
+	if isBulkInsertion(ctx) || len(args) > argsAttributesCountLimit {
+		return []attribute.KeyValue{
+			attribute.Bool("db.args.skipped", true),
+			attribute.Int("db.args.count", len(args)),
+		}
+	}
+
+	attrs := make([]attribute.KeyValue, len(args))
+	for i, arg := range args {
+		key := "db.args.$" + strconv.Itoa(arg.Ordinal)
+
+		// Value is a value that drivers must be able to handle.
+		// It is either nil, a type handled by a database driver's NamedValueChecker
+		// interface, or an instance of one of these types:
+		//
+		//	int/int32/int64
+		//	float32/float64
+		//	bool
+		//	[]byte
+		//	string
+		//	time.Time
+		switch v := arg.Value.(type) {
+		case nil:
+			attrs[i] = attribute.String(key, "nil")
+		case int:
+			attrs[i] = attribute.Int(key, v)
+		case int32:
+			attrs[i] = attribute.Int(key, int(v))
+		case int64:
+			attrs[i] = attribute.Int64(key, v)
+		case float32:
+			attrs[i] = attribute.Float64(key, float64(v))
+		case float64:
+			attrs[i] = attribute.Float64(key, v)
+		case bool:
+			attrs[i] = attribute.Bool(key, v)
+		case []byte:
+			attrs[i] = attribute.String(key, truncateStringValue(string(v)))
+		case string:
+			attrs[i] = attribute.String(key, truncateStringValue(v))
+		case time.Time:
+			attrs[i] = attribute.String(key, v.String())
+
+		// pq.Array types
+		case *pq.BoolArray:
+			attrs[i] = attribute.BoolSlice(key, truncateSliceValue([]bool(*v)))
+		case *pq.Float64Array:
+			attrs[i] = attribute.Float64Slice(key, truncateSliceValue([]float64(*v)))
+		case *pq.Float32Array:
+			vals := truncateSliceValue([]float32(*v))
+			floats := make([]float64, len(vals))
+			for i, v := range vals {
+				floats[i] = float64(v)
+			}
+			attrs[i] = attribute.Float64Slice(key, floats)
+		case *pq.Int64Array:
+			attrs[i] = attribute.Int64Slice(key, truncateSliceValue([]int64(*v)))
+		case *pq.Int32Array:
+			vals := truncateSliceValue([]int32(*v))
+			ints := make([]int, len(vals))
+			for i, v := range vals {
+				ints[i] = int(v)
+			}
+			attrs[i] = attribute.IntSlice(key, ints)
+		case *pq.StringArray:
+			attrs[i] = attribute.StringSlice(key,
+				truncateStringElements(truncateSliceValue([]string(*v))))
+		case *pq.ByteaArray:
+			vals := truncateSliceValue([][]byte(*v))
+			ss := make([]string, len(vals))
+			for i, v := range vals {
+				ss[i] = truncateStringValue(string(v))
+			}
+			attrs[i] = attribute.StringSlice(key, ss) // already truncated
+
+		default: // in case we miss anything
+			attrs[i] = attribute.String(key, fmt.Sprintf("unhandled type %T", v))
+		}
+	}
+	return attrs
+}
+
+// utf8Replace is the same value as used in other strings.ToValidUTF8 callsites
+// in sourcegraph/sourcegraph.
+const utf8Replace = "�"
+
+// truncateStringValue should be used on all string attributes in the otelsql
+// instrumentation. It ensures the length of v is within argsAttributesValueLimit,
+// and ensures v is valid UTF8.
+func truncateStringValue(v string) string {
+	if len(v) > argsAttributesValueLimit {
+		return strings.ToValidUTF8(v[:argsAttributesValueLimit], utf8Replace)
+	}
+	return strings.ToValidUTF8(v, utf8Replace)
+}
+
+// truncateStringElements calls truncateStringValue on each element in s.
+func truncateStringElements(s []string) []string {
+	for i, v := range s {
+		s[i] = truncateStringValue(v)
+	}
+	return s
+}
+
+// truncateSliceValue truncates the number of elements in s to
+// argsAttributesValueLimit only - it does not attempt to manipulate individual
+// elements of s.
+func truncateSliceValue[T any](s []T) []T {
+	if len(s) > argsAttributesValueLimit {
+		return s[:argsAttributesValueLimit]
+	}
+	return s
 }

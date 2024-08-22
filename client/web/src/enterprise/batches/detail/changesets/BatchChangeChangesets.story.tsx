@@ -1,20 +1,20 @@
-import { Story, Meta, DecoratorFn } from '@storybook/react'
+import type { StoryFn, Meta, Decorator } from '@storybook/react'
 import { noop } from 'lodash'
 import { of } from 'rxjs'
 import { WildcardMockLink, MATCH_ANY_PARAMETERS } from 'wildcard-mock-link'
 
 import { getDocumentNode } from '@sourcegraph/http-client'
-import { EMPTY_SETTINGS_CASCADE } from '@sourcegraph/shared/src/settings/settings'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 import { MockedTestProvider } from '@sourcegraph/shared/src/testing/apollo'
 
 import { WebStory } from '../../../../components/WebStory'
 import { BatchChangeState } from '../../../../graphql-operations'
-import { CHANGESETS, queryExternalChangesetWithFileDiffs } from '../backend'
+import { CHANGESETS, type queryExternalChangesetWithFileDiffs } from '../backend'
 
 import { BatchChangeChangesets } from './BatchChangeChangesets'
 import { BATCH_CHANGE_CHANGESETS_RESULT, EMPTY_BATCH_CHANGE_CHANGESETS_RESULT } from './BatchChangeChangesets.mock'
 
-const decorator: DecoratorFn = story => <div className="p-3 container">{story()}</div>
+const decorator: Decorator = story => <div className="p-3 container">{story()}</div>
 
 const config: Meta = {
     title: 'web/batches/BatchChangeChangesets',
@@ -22,8 +22,10 @@ const config: Meta = {
     argTypes: {
         viewerCanAdminister: {
             control: { type: 'boolean' },
-            defaultValue: true,
         },
+    },
+    args: {
+        viewerCanAdminister: true,
     },
 }
 
@@ -51,11 +53,12 @@ const queryEmptyExternalChangesetWithFileDiffs: typeof queryExternalChangesetWit
     switch (externalChangeset) {
         case 'somechangesetCLOSED':
         case 'somechangesetMERGED':
-        case 'somechangesetDELETED':
+        case 'somechangesetDELETED': {
             return of({
                 diff: null,
             })
-        default:
+        }
+        default: {
             return of({
                 diff: {
                     __typename: 'PreviewRepositoryComparison',
@@ -69,10 +72,11 @@ const queryEmptyExternalChangesetWithFileDiffs: typeof queryExternalChangesetWit
                     },
                 },
             })
+        }
     }
 }
 
-export const ListOfChangesets: Story = args => (
+export const ListOfChangesets: StoryFn = args => (
     <WebStory>
         {props => (
             <MockedTestProvider link={mocks}>
@@ -80,13 +84,11 @@ export const ListOfChangesets: Story = args => (
                     {...props}
                     refetchBatchChange={noop}
                     queryExternalChangesetWithFileDiffs={queryEmptyExternalChangesetWithFileDiffs}
-                    extensionsController={undefined as any}
-                    platformContext={undefined as any}
                     batchChangeID="batchid"
                     viewerCanAdminister={args.viewerCanAdminister}
-                    settingsCascade={EMPTY_SETTINGS_CASCADE}
                     batchChangeState={BatchChangeState.OPEN}
                     isExecutionEnabled={false}
+                    telemetryRecorder={noOpTelemetryRecorder}
                 />
             </MockedTestProvider>
         )}
@@ -95,7 +97,7 @@ export const ListOfChangesets: Story = args => (
 
 ListOfChangesets.storyName = 'List of changesets'
 
-export const ListOfExpandedChangesets: Story = args => (
+export const ListOfExpandedChangesets: StoryFn = args => (
     <WebStory>
         {props => (
             <MockedTestProvider link={mocks}>
@@ -103,14 +105,12 @@ export const ListOfExpandedChangesets: Story = args => (
                     {...props}
                     refetchBatchChange={noop}
                     queryExternalChangesetWithFileDiffs={queryEmptyExternalChangesetWithFileDiffs}
-                    extensionsController={undefined as any}
-                    platformContext={undefined as any}
                     batchChangeID="batchid"
                     viewerCanAdminister={args.viewerCanAdminister}
                     expandByDefault={true}
-                    settingsCascade={EMPTY_SETTINGS_CASCADE}
                     batchChangeState={BatchChangeState.OPEN}
                     isExecutionEnabled={false}
+                    telemetryRecorder={noOpTelemetryRecorder}
                 />
             </MockedTestProvider>
         )}
@@ -119,7 +119,7 @@ export const ListOfExpandedChangesets: Story = args => (
 
 ListOfExpandedChangesets.storyName = 'List of expanded changesets'
 
-export const DraftWithoutChangesets: Story = args => {
+export const DraftWithoutChangesets: StoryFn = args => {
     const batchChangeState = args.batchChangeState
 
     return (
@@ -130,14 +130,12 @@ export const DraftWithoutChangesets: Story = args => {
                         {...props}
                         refetchBatchChange={noop}
                         queryExternalChangesetWithFileDiffs={queryEmptyExternalChangesetWithFileDiffs}
-                        extensionsController={undefined as any}
-                        platformContext={undefined as any}
                         batchChangeID="batchid"
                         viewerCanAdminister={true}
                         expandByDefault={true}
-                        settingsCascade={EMPTY_SETTINGS_CASCADE}
                         batchChangeState={batchChangeState as BatchChangeState}
                         isExecutionEnabled={args.isExecutionEnabled}
+                        telemetryRecorder={noOpTelemetryRecorder}
                     />
                 </MockedTestProvider>
             )}
@@ -147,17 +145,19 @@ export const DraftWithoutChangesets: Story = args => {
 DraftWithoutChangesets.argTypes = {
     batchChangeState: {
         control: { type: 'select', options: Object.keys(BatchChangeState) },
-        defaultValue: BatchChangeState.DRAFT,
     },
     isExecutionEnabled: {
         control: { type: 'boolean' },
-        defaultValue: true,
     },
     viewerCanAdminister: {
         table: {
             disable: true,
         },
     },
+}
+DraftWithoutChangesets.args = {
+    batchChangeState: BatchChangeState.DRAFT,
+    isExecutionEnabled: true,
 }
 
 DraftWithoutChangesets.storyName = 'Draft without changesets'

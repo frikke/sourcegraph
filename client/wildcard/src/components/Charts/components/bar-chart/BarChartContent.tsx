@@ -1,16 +1,16 @@
-import { FocusEventHandler, MouseEvent, ReactElement, SVGProps, useRef, useState } from 'react'
+import { type FocusEventHandler, type MouseEvent, type ReactElement, type SVGProps, useRef, useState } from 'react'
 
 import { Group } from '@visx/group'
 import classNames from 'classnames'
-import { ScaleBand, ScaleLinear } from 'd3-scale'
+import type { ScaleBand, ScaleLinear } from 'd3-scale'
 
 import { Tooltip } from '../../core'
 
 import { GroupedBars } from './components/GroupedBars'
 import { StackedBars } from './components/StackedBars'
 import { BarTooltipContent } from './components/TooltipContent'
-import { ActiveSegment } from './types'
-import { Category } from './utils/get-grouped-categories'
+import type { ActiveSegment } from './types'
+import type { Category } from './utils/get-grouped-categories'
 
 import styles from './BarChartContent.module.scss'
 
@@ -32,6 +32,7 @@ interface BarChartContentProps<Datum> extends SVGProps<SVGGElement> {
     getDatumLink: (datum: Datum) => string | undefined | null
     onBarClick: (event: MouseEvent, datum: Datum, index: number) => void
     onBarHover?: (datum: Datum) => void
+    getDatumHoverValueLabel?: (datum: Datum) => string
 }
 
 export function BarChartContent<Datum>(props: BarChartContentProps<Datum>): ReactElement {
@@ -49,6 +50,7 @@ export function BarChartContent<Datum>(props: BarChartContentProps<Datum>): Reac
         getDatumValue,
         getDatumColor,
         getDatumFadeColor,
+        getDatumHoverValueLabel,
         getDatumLink,
         onBarClick,
         onBarHover,
@@ -60,8 +62,8 @@ export function BarChartContent<Datum>(props: BarChartContentProps<Datum>): Reac
 
     const withActiveLink = activeSegment?.datum ? getDatumLink(activeSegment?.datum) : null
 
-    const handleBarHover = (datum: Datum, category: Category<Datum>): void => {
-        setActiveSegment({ datum, category })
+    const handleBarHover = (datum: Datum, category: Category<Datum>, node: Element): void => {
+        setActiveSegment({ datum, category, node })
         onBarHover?.(datum)
     }
 
@@ -119,7 +121,7 @@ export function BarChartContent<Datum>(props: BarChartContentProps<Datum>): Reac
             )}
 
             {activeSegment && rootRef.current && (
-                <Tooltip containerElement={rootRef.current} activeElement={activeSegment.node as HTMLElement}>
+                <Tooltip activeElement={activeSegment.node as HTMLElement}>
                     <BarTooltipContent
                         category={activeSegment.category}
                         activeBar={activeSegment.datum}
@@ -127,6 +129,7 @@ export function BarChartContent<Datum>(props: BarChartContentProps<Datum>): Reac
                         getDatumValue={getDatumValue}
                         getDatumName={getDatumName}
                         getDatumHover={getDatumHover}
+                        getDatumHoverValueLabel={getDatumHoverValueLabel}
                     />
                 </Tooltip>
             )}

@@ -1,36 +1,32 @@
-import React, { MouseEvent, KeyboardEvent, useCallback, useMemo } from 'react'
+import React, { type MouseEvent, type KeyboardEvent, useCallback } from 'react'
 
 import classNames from 'classnames'
-import * as H from 'history'
-import { Observable } from 'rxjs'
-import { map } from 'rxjs/operators'
+import type * as H from 'history'
+import type { Observable } from 'rxjs'
 
-import { HoverMerged } from '@sourcegraph/client-api'
-import { Hoverifier } from '@sourcegraph/codeintellify'
+import { CodeExcerpt } from '@sourcegraph/branded/src/search-ui/components'
+import type { HoverMerged } from '@sourcegraph/client-api'
+import type { Hoverifier } from '@sourcegraph/codeintellify'
+import { SourcegraphURL } from '@sourcegraph/common'
+import type { ActionItemAction } from '@sourcegraph/shared/src/actions/ActionItem'
+import type { FetchFileParameters } from '@sourcegraph/shared/src/backend/file'
+import type { MatchGroup } from '@sourcegraph/shared/src/components/ranking/PerFileResultRanking'
+import type { Controller as ExtensionsController } from '@sourcegraph/shared/src/extensions/controller'
+import type { HoverContext } from '@sourcegraph/shared/src/hover/HoverOverlay.types'
 import {
-    appendLineRangeQueryParameter,
-    appendSubtreeQueryParameter,
-    toPositionOrRangeQueryParameter,
-} from '@sourcegraph/common'
-import {
-    LastSyncedIcon,
-    FileMatchChildrenStyles as styles,
-    CodeExcerpt,
-    FetchFileParameters,
-} from '@sourcegraph/search-ui'
-import { ActionItemAction } from '@sourcegraph/shared/src/actions/ActionItem'
-import { MatchGroup } from '@sourcegraph/shared/src/components/ranking/PerFileResultRanking'
-import { Controller as ExtensionsController } from '@sourcegraph/shared/src/extensions/controller'
-import { HoverContext } from '@sourcegraph/shared/src/hover/HoverOverlay.types'
-import { ContentMatch, SymbolMatch, PathMatch, getFileMatchUrl } from '@sourcegraph/shared/src/search/stream'
-import { SettingsCascadeProps } from '@sourcegraph/shared/src/settings/settings'
-import { SymbolIcon } from '@sourcegraph/shared/src/symbols/SymbolIcon'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { useCodeIntelViewerUpdates } from '@sourcegraph/shared/src/util/useCodeIntelViewerUpdates'
+    type ContentMatch,
+    type SymbolMatch,
+    type PathMatch,
+    getFileMatchUrl,
+} from '@sourcegraph/shared/src/search/stream'
+import { isSettingsValid, type SettingsCascadeProps } from '@sourcegraph/shared/src/settings/settings'
+import { SymbolKind } from '@sourcegraph/shared/src/symbols/SymbolKind'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import { Button, Code } from '@sourcegraph/wildcard'
 
-import { HighlightLineRange } from '../../../graphql-operations'
 import { useOpenSearchResultsContext } from '../MatchHandlersContext'
+
+import styles from './FileMatchChildren.module.scss'
 
 interface FileMatchProps extends SettingsCascadeProps, TelemetryProps {
     location?: H.Location
@@ -145,63 +141,29 @@ function navigateToFileOnMiddleMouseButtonClick(event: MouseEvent<HTMLElement>):
     }
 }
 
+/**
+ * Convert a MatchGroup to a "position", which is just a tuple of line and character.
+ * Supports the "old" way of handling line-based matches without requiring a lot of redesign downstream.
+ * Limitation is that the `line` is taken from the first match in the group; other matches are ignored.
+ * @param group a MatchGroup, which could have multiple matches in it
+ * @returns a tuple of line and character
+ */
+function groupToPosition(group: MatchGroup): { line: number; character: number } {
+    return {
+        line: group.matches.length > 0 ? group.matches[0].startLine : group.startLine,
+        character: group.matches.length > 0 ? group.matches[0].startCharacter : 0,
+    }
+}
+
 export const FileMatchChildren: React.FunctionComponent<React.PropsWithChildren<FileMatchProps>> = props => {
-    const { result, grouped, fetchHighlightedFileLineRanges, telemetryService, extensionsController } = props
+    const { result, grouped } = props
+
+    console.log('FILE_MATCH', { result, grouped })
 
     const { openFile, openSymbol } = useOpenSearchResultsContext()
 
-    const fetchHighlightedFileRangeLines = React.useCallback(
-        (startLine: number, endLine: number) => {
-            const startTime = Date.now()
-            return fetchHighlightedFileLineRanges(
-                {
-                    repoName: result.repository,
-                    commitID: result.commit || '',
-                    filePath: result.path,
-                    disableTimeout: false,
-                    ranges: grouped.map(
-                        (group): HighlightLineRange => ({
-                            startLine: group.startLine,
-                            endLine: group.endLine,
-                        })
-                    ),
-                },
-                false
-            ).pipe(
-                map(lines => {
-                    telemetryService.log(
-                        'search.latencies.frontend.code-load',
-                        { durationMs: Date.now() - startTime },
-                        { durationMs: Date.now() - startTime }
-                    )
-                    return lines[grouped.findIndex(group => group.startLine === startLine && group.endLine === endLine)]
-                })
-            )
-        },
-        [result, fetchHighlightedFileLineRanges, grouped, telemetryService]
-    )
-
-    const createCodeExcerptLink = (group: MatchGroup): string => {
-        const positionOrRangeQueryParameter = toPositionOrRangeQueryParameter({ position: group.position })
-        return appendLineRangeQueryParameter(
-            appendSubtreeQueryParameter(getFileMatchUrl(result)),
-            positionOrRangeQueryParameter
-        )
-    }
-
-    const codeIntelViewerUpdatesProps = useMemo(
-        () =>
-            grouped && result.type === 'content' && extensionsController
-                ? {
-                      extensionsController,
-                      repositoryName: result.repository,
-                      filePath: result.path,
-                      revision: result.commit,
-                  }
-                : undefined,
-        [extensionsController, result, grouped]
-    )
-    const viewerUpdates = useCodeIntelViewerUpdates(codeIntelViewerUpdatesProps)
+    const createCodeExcerptLink = (group: MatchGroup): string =>
+        SourcegraphURL.from(getFileMatchUrl(result)).setLineRange(groupToPosition(group)).toString()
 
     /**
      * This handler implements the logic to simulate the click/keyboard
@@ -252,7 +214,6 @@ export const FileMatchChildren: React.FunctionComponent<React.PropsWithChildren<
 
     return (
         <div className={styles.fileMatchChildren} data-testid="file-match-children">
-            {result.repoLastFetched && <LastSyncedIcon lastSyncedTime={result.repoLastFetched} />}
             {/* Path */}
             {result.type === 'path' && (
                 <div className={styles.item} data-testid="file-match-children-item">
@@ -268,7 +229,14 @@ export const FileMatchChildren: React.FunctionComponent<React.PropsWithChildren<
                     data-testid="file-match-children-item"
                     onClick={() => openSymbol(symbol.url)}
                 >
-                    <SymbolIcon kind={symbol.kind} className="mr-1" />
+                    <SymbolKind
+                        kind={symbol.kind}
+                        className="mr-1"
+                        symbolKindTags={
+                            isSettingsValid(props.settingsCascade) &&
+                            props.settingsCascade.final.experimentalFeatures?.symbolKindTags
+                        }
+                    />
                     <Code>
                         {symbol.name}{' '}
                         {symbol.containerName && <span className="text-muted">{symbol.containerName}</span>}
@@ -281,9 +249,7 @@ export const FileMatchChildren: React.FunctionComponent<React.PropsWithChildren<
                 <div>
                     {grouped.map((group, index) => (
                         <div
-                            key={`linematch:${getFileMatchUrl(result)}${group.position.line}:${
-                                group.position.character
-                            }`}
+                            key={`linematch:${getFileMatchUrl(result)}${group.startLine}:${group.endLine}`}
                             className={classNames('test-file-match-children-item-wrapper', styles.itemCodeWrapper)}
                         >
                             <div
@@ -293,34 +259,22 @@ export const FileMatchChildren: React.FunctionComponent<React.PropsWithChildren<
                                     styles.item,
                                     styles.itemClickable
                                 )}
-                                onClick={event =>
-                                    navigateToFile(event, {
-                                        line: group.position.line,
-                                        character: group.position.character,
-                                    })
-                                }
+                                onClick={event => navigateToFile(event, groupToPosition(group))}
                                 onMouseUp={navigateToFileOnMiddleMouseButtonClick}
-                                onKeyDown={event =>
-                                    navigateToFile(event, {
-                                        line: group.position.line,
-                                        character: group.position.character,
-                                    })
-                                }
+                                onKeyDown={event => navigateToFile(event, groupToPosition(group))}
                                 data-testid="file-match-children-item"
                                 tabIndex={0}
                                 role="link"
                             >
                                 <CodeExcerpt
                                     repoName={result.repository}
-                                    commitID={result.commit || ''}
+                                    commitID={result.commit ?? ''}
                                     filePath={result.path}
                                     startLine={group.startLine}
                                     endLine={group.endLine}
                                     highlightRanges={group.matches}
-                                    fetchHighlightedFileRangeLines={fetchHighlightedFileRangeLines}
-                                    blobLines={group.blobLines}
-                                    viewerUpdates={viewerUpdates}
-                                    hoverifier={props.hoverifier}
+                                    plaintextLines={group.plaintextLines}
+                                    highlightedLines={group.highlightedHTMLRows}
                                 />
                             </div>
                         </div>

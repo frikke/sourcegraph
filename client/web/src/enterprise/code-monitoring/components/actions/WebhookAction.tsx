@@ -5,8 +5,8 @@ import { noop } from 'lodash'
 
 import { Alert, Input, Link, ProductStatusBadge, Label } from '@sourcegraph/wildcard'
 
-import { SendTestWebhookResult, SendTestWebhookVariables } from '../../../../graphql-operations'
-import { ActionProps } from '../FormActionArea'
+import type { SendTestWebhookResult, SendTestWebhookVariables } from '../../../../graphql-operations'
+import type { ActionProps } from '../FormActionArea'
 
 import { ActionEditor } from './ActionEditor'
 
@@ -148,7 +148,7 @@ export const WebhookAction: React.FunctionComponent<React.PropsWithChildren<Acti
                     autoFocus={true}
                     spellCheck={false}
                     status={urlIsValid ? 'valid' : url ? 'error' : undefined /* Don't show error state when empty */}
-                    error={!urlIsValid && url && 'Enter a valid webhook URL.'}
+                    error={!urlIsValid && url ? 'Enter a valid webhook URL.' : undefined}
                 />
             </div>
         </ActionEditor>

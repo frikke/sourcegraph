@@ -1,12 +1,12 @@
-import { DecoratorFn, Meta, Story } from '@storybook/react'
+import type { Decorator, Meta, StoryFn } from '@storybook/react'
 import { noop } from 'lodash'
 
 import { WebStory } from '../../../components/WebStory'
-import { BatchChangesCredentialFields, ExternalServiceKind } from '../../../graphql-operations'
+import { type BatchChangesCredentialFields, ExternalServiceKind } from '../../../graphql-operations'
 
 import { ViewCredentialModal } from './ViewCredentialModal'
 
-const decorator: DecoratorFn = story => <div className="p-3 container">{story()}</div>
+const decorator: Decorator = story => <div className="p-3 container">{story()}</div>
 
 const config: Meta = {
     title: 'web/batches/settings/ViewCredentialModal',
@@ -20,9 +20,10 @@ const credential: BatchChangesCredentialFields = {
     isSiteCredential: false,
     sshPublicKey:
         'ssh-rsa randorandorandorandorandorandorandorandorandorandorandorandorandorandorandorandorandorandorandorandorandorandorandorando',
+    gitHubApp: null,
 }
 
-export const View: Story = () => (
+export const View: StoryFn = () => (
     <WebStory>
         {props => (
             <ViewCredentialModal
@@ -33,6 +34,8 @@ export const View: Story = () => (
                     externalServiceURL: 'https://github.com/',
                     requiresSSH: true,
                     requiresUsername: false,
+                    supportsCommitSigning: false,
+                    commitSigningConfiguration: null,
                 }}
                 credential={credential}
                 onClose={noop}
@@ -40,10 +43,3 @@ export const View: Story = () => (
         )}
     </WebStory>
 )
-
-View.parameters = {
-    chromatic: {
-        // Delay screenshot taking, so the modal has opened by the time the screenshot is taken.
-        delay: 2000,
-    },
-}

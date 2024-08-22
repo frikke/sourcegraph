@@ -1,11 +1,11 @@
 import React, { useCallback, useState } from 'react'
 
-import { useHistory, useLocation } from 'react-router'
-import { delay, repeatWhen, retryWhen, filter, tap } from 'rxjs/operators'
+import { timer } from 'rxjs'
+import { repeat, retry, tap } from 'rxjs/operators'
 
-import { FilteredConnection, FilteredConnectionQueryArguments } from '../../../../../components/FilteredConnection'
+import { FilteredConnection, type FilteredConnectionQueryArguments } from '../../../../../components/FilteredConnection'
 import { ConnectionError } from '../../../../../components/FilteredConnection/ui'
-import {
+import type {
     Scalars,
     VisibleBatchSpecWorkspaceListFields,
     HiddenBatchSpecWorkspaceListFields,
@@ -13,8 +13,8 @@ import {
 import { Header as WorkspacesListHeader } from '../../../workspaces-list'
 import { queryWorkspacesList as _queryWorkspacesList } from '../backend'
 
-import { WorkspaceFilterRow, WorkspaceFilters } from './WorkspacesFilterRow'
-import { WorkspacesListItem, WorkspacesListItemProps } from './WorkspacesListItem'
+import { WorkspaceFilterRow, type WorkspaceFilters } from './WorkspacesFilterRow'
+import { WorkspacesListItem, type WorkspacesListItemProps } from './WorkspacesListItem'
 
 import styles from './Workspaces.module.scss'
 
@@ -34,9 +34,6 @@ export const Workspaces: React.FunctionComponent<React.PropsWithChildren<Workspa
     executionURL,
     queryWorkspacesList = _queryWorkspacesList,
 }) => {
-    const history = useHistory()
-    const location = useLocation()
-
     const [filters, setFilters] = useState<WorkspaceFilters>({ state: null, search: null })
     const [error, setError] = useState<string>()
 
@@ -49,19 +46,15 @@ export const Workspaces: React.FunctionComponent<React.PropsWithChildren<Workspa
                 search: filters.search ?? null,
                 state: filters.state ?? null,
             }).pipe(
-                repeatWhen(notifier => notifier.pipe(delay(2500))),
-                retryWhen(errors =>
-                    errors.pipe(
-                        filter(error => {
-                            // Capture the error, but don't throw it so the data in the
-                            // connection remains visible.
-                            setError(error)
-                            return true
-                        }),
-                        // Retry after 5s.
-                        delay(5000)
-                    )
-                ),
+                repeat({ delay: 2500 }),
+                retry({
+                    delay: error => {
+                        // Capture the error, but don't throw it so the data in the
+                        // connection remains visible.
+                        setError(error)
+                        return timer(5000)
+                    },
+                }),
                 tap(() => {
                     // Reset the error when the query succeeds.
                     setError(undefined)
@@ -90,8 +83,6 @@ export const Workspaces: React.FunctionComponent<React.PropsWithChildren<Workspa
                     }}
                     queryConnection={queryWorkspacesListConnection}
                     hideSearch={true}
-                    history={history}
-                    location={location}
                     defaultFirst={20}
                     noun="workspace"
                     pluralNoun="workspaces"

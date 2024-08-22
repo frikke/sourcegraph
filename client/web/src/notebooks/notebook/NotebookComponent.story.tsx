@@ -1,26 +1,22 @@
-import { DecoratorFn, Meta, Story } from '@storybook/react'
+import type { Decorator, Meta, StoryFn } from '@storybook/react'
 import { NEVER, of } from 'rxjs'
 
+import { SearchPatternType } from '@sourcegraph/shared/src/graphql-operations'
 import { EMPTY_SETTINGS_CASCADE } from '@sourcegraph/shared/src/settings/settings'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 import { NOOP_TELEMETRY_SERVICE } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import {
-    extensionsController,
-    HIGHLIGHTED_FILE_LINES_LONG,
-    NOOP_PLATFORM_CONTEXT,
-} from '@sourcegraph/shared/src/testing/searchTestHelpers'
+import { HIGHLIGHTED_FILE_LINES_LONG, NOOP_PLATFORM_CONTEXT } from '@sourcegraph/shared/src/testing/searchTestHelpers'
 
-import { BlockInit } from '..'
+import type { BlockInit } from '..'
 import { WebStory } from '../../components/WebStory'
 
 import { NotebookComponent } from './NotebookComponent'
 
-const decorator: DecoratorFn = story => <div className="p-3 container">{story()}</div>
+const decorator: Decorator = story => <div className="p-3 container">{story()}</div>
 
 const config: Meta = {
     title: 'web/search/notebooks/notebook/NotebookComponent',
-    parameters: {
-        chromatic: { disableSnapshots: false },
-    },
+    parameters: {},
     decorators: [decorator],
 }
 
@@ -42,32 +38,32 @@ const blocks: BlockInit[] = [
     },
 ]
 
-export const Default: Story = () => (
+export const Default: StoryFn = () => (
     <WebStory>
         {props => (
             <NotebookComponent
                 {...props}
                 isSourcegraphDotCom={true}
                 searchContextsEnabled={true}
-                globbing={true}
+                ownEnabled={true}
                 telemetryService={NOOP_TELEMETRY_SERVICE}
+                telemetryRecorder={noOpTelemetryRecorder}
                 streamSearch={() => NEVER}
-                fetchHighlightedFileLineRanges={() => of(HIGHLIGHTED_FILE_LINES_LONG)}
+                fetchHighlightedFileLineRanges={() => of([HIGHLIGHTED_FILE_LINES_LONG])}
                 onSerializeBlocks={() => {}}
                 blocks={blocks}
                 settingsCascade={EMPTY_SETTINGS_CASCADE}
-                extensionsController={extensionsController}
                 authenticatedUser={null}
-                showSearchContext={true}
                 platformContext={NOOP_PLATFORM_CONTEXT}
                 exportedFileName="notebook.snb.md"
                 onCopyNotebook={() => NEVER}
+                patternType={SearchPatternType.standard}
             />
         )}
     </WebStory>
 )
 
-export const DefaultReadOnly: Story = () => (
+export const DefaultReadOnly: StoryFn = () => (
     <WebStory>
         {props => (
             <NotebookComponent
@@ -75,19 +71,19 @@ export const DefaultReadOnly: Story = () => (
                 isReadOnly={true}
                 isSourcegraphDotCom={true}
                 searchContextsEnabled={true}
-                globbing={true}
+                ownEnabled={true}
                 telemetryService={NOOP_TELEMETRY_SERVICE}
+                telemetryRecorder={noOpTelemetryRecorder}
                 streamSearch={() => NEVER}
-                fetchHighlightedFileLineRanges={() => of(HIGHLIGHTED_FILE_LINES_LONG)}
+                fetchHighlightedFileLineRanges={() => of([HIGHLIGHTED_FILE_LINES_LONG])}
                 onSerializeBlocks={() => {}}
                 blocks={blocks}
                 settingsCascade={EMPTY_SETTINGS_CASCADE}
-                extensionsController={extensionsController}
                 authenticatedUser={null}
-                showSearchContext={true}
                 platformContext={NOOP_PLATFORM_CONTEXT}
                 exportedFileName="notebook.snb.md"
                 onCopyNotebook={() => NEVER}
+                patternType={SearchPatternType.standard}
             />
         )}
     </WebStory>

@@ -1,13 +1,17 @@
-import { Observable } from 'rxjs'
+import type { Observable } from 'rxjs'
 import { map } from 'rxjs/operators'
 
 import { createAggregateError, memoizeObservable } from '@sourcegraph/common'
 import { gql } from '@sourcegraph/http-client'
-import { FetchFileParameters } from '@sourcegraph/search-ui'
 
-import { HighlightedFileResult, HighlightedFileVariables, HighlightResponseFormat } from '../graphql-operations'
-import { PlatformContext } from '../platform/context'
-import { makeRepoURI } from '../util/url'
+import {
+    type HighlightedFileResult,
+    type HighlightedFileVariables,
+    type HighlightLineRange,
+    HighlightResponseFormat,
+} from '../graphql-operations'
+import type { PlatformContext } from '../platform/context'
+import { makeRepoGitURI } from '../util/url'
 
 /*
     Highlighted file result query doesn't support `format` on Sourcegraph versions older than 3.43.
@@ -16,7 +20,7 @@ import { makeRepoURI } from '../util/url'
 */
 type RequestVariables = Omit<HighlightedFileVariables, 'format'> & { format?: HighlightedFileVariables['format'] }
 
-const IS_VSCE = typeof (window as any).acquireVsCodeApi === 'function'
+const IS_VSCE = typeof window !== 'undefined' && typeof (window as any).acquireVsCodeApi === 'function'
 
 const HIGHLIGHTED_FILE_QUERY = gql`
     query HighlightedFile(
@@ -64,6 +68,15 @@ const VSCE_HIGHLIGHTED_FILE_QUERY = gql`
         }
     }
 `
+
+export interface FetchFileParameters {
+    repoName: string
+    commitID: string
+    filePath: string
+    disableTimeout?: boolean
+    ranges: HighlightLineRange[]
+    format?: HighlightResponseFormat
+}
 
 /**
  * Fetches the specified highlighted file line ranges (`FetchFileParameters.ranges`) and returns
@@ -114,7 +127,7 @@ export const fetchHighlightedFileLineRanges = memoizeObservable(
             )
     },
     context =>
-        makeRepoURI(context) +
+        makeRepoGitURI(context) +
         `?disableTimeout=${String(context.disableTimeout)}&ranges=${context.ranges
             .map(range => `${range.startLine}:${range.endLine}`)
             .join(',')}&format=${context.format}`

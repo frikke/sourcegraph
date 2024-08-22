@@ -1,13 +1,12 @@
-import React, { FunctionComponent, ReactNode, useState } from 'react'
+import React, { type FunctionComponent, type ReactNode, useState } from 'react'
 
-import { mdiChevronDown, mdiChevronRight } from '@mdi/js'
+import { mdiChevronDown, mdiChevronUp } from '@mdi/js'
 import VisuallyHidden from '@reach/visually-hidden'
 import classNames from 'classnames'
-import { formatDistance } from 'date-fns/esm'
+import { formatDistance } from 'date-fns'
 
+import { Timestamp } from '@sourcegraph/branded/src/components/Timestamp'
 import { Button, Collapse, CollapseHeader, CollapsePanel, Icon } from '@sourcegraph/wildcard'
-
-import { Timestamp } from './time/Timestamp'
 
 import styles from './Timeline.module.scss'
 
@@ -36,7 +35,7 @@ export const Timeline: FunctionComponent<React.PropsWithChildren<TimelineProps>>
 }) => (
     <div className={classNames('w-100', className)}>
         {stages.map((stage, stageIndex) => (
-            <>
+            <span key={stageIndex}>
                 {stageIndex !== 0 && (
                     <div className="d-flex align-items-center">
                         <div className={styles.separator} />
@@ -49,7 +48,7 @@ export const Timeline: FunctionComponent<React.PropsWithChildren<TimelineProps>>
                     </div>
                 )}
                 <TimelineStage key={`${stage.text}+${stage.date}`} stage={stage} now={now} />
-            </>
+            </span>
         ))}
     </div>
 )
@@ -84,7 +83,7 @@ const TimelineStage: FunctionComponent<React.PropsWithChildren<TimelineStageProp
                 className="p-0 m-0 border-0 w-100 font-weight-normal d-flex justify-content-between align-items-center"
             >
                 {stageLabel}
-                <Icon aria-hidden={true} svgPath={isExpanded ? mdiChevronDown : mdiChevronRight} className="mr-1" />
+                <Icon aria-hidden={true} svgPath={isExpanded ? mdiChevronUp : mdiChevronDown} className="mr-1" />
             </CollapseHeader>
             <CollapsePanel className={styles.details}>{details}</CollapsePanel>
         </Collapse>

@@ -3,9 +3,9 @@ import React from 'react'
 import classNames from 'classnames'
 
 import { useWildcardTheme } from '../../hooks'
-import { ForwardReferenceComponent } from '../../types'
+import type { ForwardReferenceComponent } from '../../types'
 
-import { ALERT_VARIANTS } from './constants'
+import type { ALERT_VARIANTS } from './constants'
 import { getAlertStyle } from './utils'
 
 import styles from './Alert.module.scss'
@@ -14,6 +14,18 @@ type AlertVariant = typeof ALERT_VARIANTS[number]
 
 export interface AlertProps extends React.HTMLAttributes<HTMLDivElement> {
     variant?: AlertVariant
+
+    /**
+     * Setting to control alert icon appearance, has true value
+     * be default.
+     */
+    withIcon?: boolean
+
+    styleOverrides?: {
+        backgroundColor?: string
+        textColor?: string
+        textCentered?: boolean
+    }
 }
 
 const userShouldBeImmediatelyNotified = (variant?: AlertVariant): boolean =>
@@ -27,7 +39,17 @@ const userShouldBeImmediatelyNotified = (variant?: AlertVariant): boolean =>
  * Further details: https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Roles/alert_role
  */
 export const Alert = React.forwardRef(function Alert(
-    { children, as: Component = 'div', variant, className, role = 'alert', ...attributes },
+    {
+        children,
+        withIcon = true,
+        as: Component = 'div',
+        variant,
+        className,
+        role = 'alert',
+        styleOverrides,
+        style,
+        ...attributes
+    },
     reference
 ) {
     const { isBranded } = useWildcardTheme()
@@ -40,12 +62,22 @@ export const Alert = React.forwardRef(function Alert(
      */
     const alertAssertiveness = userShouldBeImmediatelyNotified(variant) ? 'assertive' : 'polite'
 
+    // Merge styles with overrides
+    const { backgroundColor, textColor, textCentered } = styleOverrides || {}
+    const mergedStyles: React.CSSProperties = {
+        ...style,
+        ...(!!backgroundColor && { backgroundColor }),
+        ...(!!textColor && { color: textColor }),
+        ...(!!textCentered && { textAlign: 'center' }),
+    }
+
     return (
         <Component
             ref={reference}
-            className={classNames(brandedClassName, className)}
+            className={classNames(brandedClassName, className, { [styles.alertWithNoIcon]: !withIcon })}
             role={role}
             aria-live={alertAssertiveness}
+            style={mergedStyles}
             {...attributes}
         >
             {children}

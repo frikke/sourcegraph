@@ -1,36 +1,29 @@
 // This file is a fork from SearchBox.tsx and contains JetBrains specific UI changes
-/* eslint-disable no-restricted-imports */
 
 import React, { useCallback, useState } from 'react'
 
 import classNames from 'classnames'
 
-import { QueryState, SearchContextInputProps, SubmitSearchProps } from '@sourcegraph/search'
-import {
-    IEditor,
-    LazyMonacoQueryInput,
-    LazyMonacoQueryInputProps,
-} from '@sourcegraph/search-ui/src/input/LazyMonacoQueryInput'
-import { SearchContextDropdown } from '@sourcegraph/search-ui/src/input/SearchContextDropdown'
-import { AuthenticatedUser } from '@sourcegraph/shared/src/auth'
-import { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
-import { fetchStreamSuggestions as defaultFetchStreamSuggestions } from '@sourcegraph/shared/src/search/suggestions'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
+import { type IEditor, LazyQueryInput } from '@sourcegraph/branded'
+import { SearchContextDropdown } from '@sourcegraph/branded/src/search-ui/input/SearchContextDropdown'
+import type { AuthenticatedUser } from '@sourcegraph/shared/src/auth'
+import type { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
+import type { QueryState, SearchContextInputProps, SubmitSearchProps } from '@sourcegraph/shared/src/search'
+import type { fetchStreamSuggestions as defaultFetchStreamSuggestions } from '@sourcegraph/shared/src/search/suggestions'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 
 import { Search } from '../jetbrains-icons/Search'
 
-import { JetBrainsToggles, JetBrainsTogglesProps } from './JetBrainsToggles'
+import { JetBrainsToggles, type JetBrainsTogglesProps } from './JetBrainsToggles'
 
 import styles from './JetBrainsSearchBox.module.scss'
 
 export interface JetBrainsSearchBoxProps
     extends Omit<JetBrainsTogglesProps, 'navbarSearchQuery' | 'submitSearch' | 'clearSearch'>,
-        ThemeProps,
         SearchContextInputProps,
         TelemetryProps,
-        PlatformContextProps<'requestGraphQL'>,
-        Pick<LazyMonacoQueryInputProps, 'editorComponent'> {
+        PlatformContextProps<'requestGraphQL'> {
     authenticatedUser: AuthenticatedUser | null
     isSourcegraphDotCom: boolean // significant for query suggestions
     showSearchContext: boolean
@@ -42,23 +35,16 @@ export interface JetBrainsSearchBoxProps
     submitSearchOnToggle?: SubmitSearchProps['submitSearch']
     onFocus?: () => void
     fetchStreamSuggestions?: typeof defaultFetchStreamSuggestions // Alternate implementation is used in the VS Code extension.
-    onCompletionItemSelected?: () => void
     onSuggestionsInitialized?: (actions: { trigger: () => void }) => void
     autoFocus?: boolean
     className?: string
     containerClassName?: string
-
-    /** Whether globbing is enabled for filters. */
-    globbing: boolean
 
     /** Whether comments are parsed and highlighted */
     interpretComments?: boolean
 
     /** Don't show search help button */
     hideHelpButton?: boolean
-
-    /** Set in JSContext only available to the web app. */
-    isExternalServicesUserModeAll?: boolean
 
     /** Called with the underlying editor instance on creation. */
     onEditorCreated?: (editor: IEditor) => void
@@ -96,21 +82,23 @@ export const JetBrainsSearchBox: React.FunctionComponent<React.PropsWithChildren
                     <>
                         <SearchContextDropdown
                             authenticatedUser={props.authenticatedUser}
+                            // This is only used to render the CTA which we do not want on JetBrains
+                            isSourcegraphDotCom={false}
                             searchContextsEnabled={props.searchContextsEnabled}
                             showSearchContextManagement={props.showSearchContextManagement}
-                            defaultSearchContextSpec={props.defaultSearchContextSpec}
                             setSelectedSearchContextSpec={props.setSelectedSearchContextSpec}
                             selectedSearchContextSpec={props.selectedSearchContextSpec}
                             fetchSearchContexts={props.fetchSearchContexts}
-                            fetchAutoDefinedSearchContexts={props.fetchAutoDefinedSearchContexts}
                             getUserSearchContextNamespaces={props.getUserSearchContextNamespaces}
                             telemetryService={props.telemetryService}
+                            telemetryRecorder={noOpTelemetryRecorder}
                             platformContext={props.platformContext}
                             query={queryState.query}
                             submitSearch={props.submitSearchOnSearchContextChange}
                             className={classNames(styles.searchBoxContextDropdown, 'jb-search-context-dropdown')}
                             menuClassName={styles.searchBoxContextMenu}
                             onEscapeMenuClose={focusEditor}
+                            ignoreDefaultContextDoesNotExistError={true}
                         />
                         <div className={styles.searchBoxSeparator} />
                     </>
@@ -123,13 +111,11 @@ export const JetBrainsSearchBox: React.FunctionComponent<React.PropsWithChildren
                     <div className={styles.searchBoxFocusContainerIcon}>
                         <Search />
                     </div>
-                    <LazyMonacoQueryInput
+                    <LazyQueryInput
                         preventNewLine={true}
                         autoFocus={props.autoFocus}
                         caseSensitive={props.caseSensitive}
                         fetchStreamSuggestions={props.fetchStreamSuggestions}
-                        globbing={props.globbing}
-                        isLightTheme={props.isLightTheme}
                         isSourcegraphDotCom={props.isSourcegraphDotCom}
                         onChange={props.onChange}
                         onSubmit={props.onSubmit}
@@ -139,7 +125,6 @@ export const JetBrainsSearchBox: React.FunctionComponent<React.PropsWithChildren
                         className={styles.searchBoxInput}
                         onEditorCreated={onEditorCreated}
                         placeholder="Enter search query..."
-                        editorComponent="codemirror6"
                     />
                     <JetBrainsToggles
                         patternType={props.patternType}

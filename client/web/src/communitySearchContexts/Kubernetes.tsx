@@ -2,8 +2,8 @@ import React from 'react'
 
 import { SearchPatternType } from '../graphql-operations'
 
-import { CommunitySearchContextPage, CommunitySearchContextPageProps } from './CommunitySearchContextPage'
-import { CommunitySearchContextMetadata } from './types'
+import { CommunitySearchContextPage, type CommunitySearchContextPageProps } from './CommunitySearchContextPage'
+import type { CommunitySearchContextMetadata } from './types'
 
 export const kubernetes: CommunitySearchContextMetadata = {
     title: 'Kubernetes',
@@ -12,8 +12,7 @@ export const kubernetes: CommunitySearchContextMetadata = {
     description: 'Explore Kubernetes repositories on GitHub. Search with examples below.',
     examples: [
         {
-            title:
-                'Use a ReplicationController configuration to ensure specified number of pod replicas are running at any one time',
+            title: 'Use a ReplicationController configuration to ensure specified number of pod replicas are running at any one time',
             query: 'file:pod.yaml content:"kind: ReplicationController"',
             patternType: SearchPatternType.standard,
         },

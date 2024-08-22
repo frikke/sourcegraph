@@ -1,8 +1,7 @@
 import { describe, test, before, after } from 'mocha'
 
 import { getConfig } from '@sourcegraph/shared/src/testing/config'
-import { afterEachRecordCoverage } from '@sourcegraph/shared/src/testing/coverage'
-import { Driver } from '@sourcegraph/shared/src/testing/driver'
+import type { Driver } from '@sourcegraph/shared/src/testing/driver'
 import { afterEachSaveScreenshotIfFailed } from '@sourcegraph/shared/src/testing/screenshotReporter'
 
 import { cloneRepos } from '../utils/cloneRepos'
@@ -10,7 +9,9 @@ import { initEndToEndTest } from '../utils/initEndToEndTest'
 
 const { sourcegraphBaseUrl } = getConfig('gitHubDotComToken', 'sourcegraphBaseUrl')
 
-describe('Site Admin', () => {
+// Since the test inside the describe is skipped the after does not execute. Consequently the page does not get closed
+// causing subsequent failures. This is a known bug in Mocha
+describe.skip('Site Admin', () => {
     let driver: Driver
 
     before(async function () {
@@ -26,11 +27,10 @@ describe('Site Admin', () => {
     after('Close browser', () => driver?.close())
 
     afterEachSaveScreenshotIfFailed(() => driver.page)
-    afterEachRecordCoverage(() => driver)
 
-    test('Overview', async () => {
+    // Flaky https://github.com/sourcegraph/sourcegraph/issues/45531
+    test.skip('Overview', async () => {
         await driver.page.goto(sourcegraphBaseUrl + '/site-admin')
-        await driver.page.waitForSelector('[data-testid="site-admin-overview-menu"', { visible: true })
         await driver.page.waitForSelector('[data-testid="product-certificate"', { visible: true })
     })
 

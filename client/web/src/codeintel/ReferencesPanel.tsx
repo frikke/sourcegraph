@@ -1,42 +1,28 @@
-import React, { KeyboardEvent, MouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
+import React, { type MouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
 
-import { mdiArrowCollapseRight, mdiChevronDown, mdiChevronRight, mdiFilterOutline } from '@mdi/js'
+import { mdiArrowCollapseRight, mdiChevronDown, mdiChevronRight, mdiFilterOutline, mdiOpenInNew } from '@mdi/js'
 import classNames from 'classnames'
-import * as H from 'history'
+import type * as H from 'history'
 import { capitalize } from 'lodash'
-import { MemoryRouter, useLocation } from 'react-router'
-import { Observable, of } from 'rxjs'
-import { map } from 'rxjs/operators'
+import { useNavigate, useLocation } from 'react-router-dom'
+import VisibilitySensor from 'react-visibility-sensor'
+import type { Observable } from 'rxjs'
 
-import { HoveredToken } from '@sourcegraph/codeintellify'
-import {
-    addLineRangeQueryParameter,
-    ErrorLike,
-    formatSearchParameters,
-    logger,
-    lprToRange,
-    pluralize,
-    toPositionOrRangeQueryParameter,
-} from '@sourcegraph/common'
+import { CodeExcerpt } from '@sourcegraph/branded'
+import { type ErrorLike, logger, pluralize, SourcegraphURL } from '@sourcegraph/common'
 import { Position } from '@sourcegraph/extension-api-classes'
-import { useQuery } from '@sourcegraph/http-client'
-import { CodeExcerpt, FetchFileParameters, onClickCodeExcerptHref } from '@sourcegraph/search-ui'
-import { LanguageSpec } from '@sourcegraph/shared/src/codeintel/legacy-extensions/language-specs/language-spec'
-import { findLanguageSpec } from '@sourcegraph/shared/src/codeintel/legacy-extensions/language-specs/languages'
+import type { FetchFileParameters } from '@sourcegraph/shared/src/backend/file'
 import { displayRepoName } from '@sourcegraph/shared/src/components/RepoLink'
-import { ExtensionsControllerProps } from '@sourcegraph/shared/src/extensions/controller'
 import { HighlightResponseFormat } from '@sourcegraph/shared/src/graphql-operations'
-import { getModeFromPath } from '@sourcegraph/shared/src/languages'
-import { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
-import { SettingsCascadeProps } from '@sourcegraph/shared/src/settings/settings'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
+import type { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
+import type { SettingsCascadeProps } from '@sourcegraph/shared/src/settings/settings'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import {
-    RepoSpec,
-    RevisionSpec,
-    FileSpec,
-    ResolvedRevisionSpec,
-    parseQueryAndHash,
+    type RepoSpec,
+    type RevisionSpec,
+    type FileSpec,
+    type ResolvedRevisionSpec,
     toPrettyBlobURL,
 } from '@sourcegraph/shared/src/util/url'
 import {
@@ -51,31 +37,27 @@ import {
     Collapse,
     CollapseHeader,
     CollapsePanel,
-    Code,
     H4,
     Text,
     Tooltip,
     useSessionStorage,
 } from '@sourcegraph/wildcard'
 
-import { ReferencesPanelHighlightedBlobResult, ReferencesPanelHighlightedBlobVariables } from '../graphql-operations'
-import { Blob } from '../repo/blob/Blob'
-import { Blob as CodeMirrorBlob } from '../repo/blob/CodeMirrorBlob'
-import { HoverThresholdProps } from '../repo/RepoContainer'
-import { useExperimentalFeatures } from '../stores'
+import { blobPropsFacet } from '../repo/blob/codemirror'
+import * as BlobAPI from '../repo/blob/use-blob-store'
+import type { HoverThresholdProps } from '../repo/RepoContainer'
 import { parseBrowserRepoURL } from '../util/url'
 
-import { Location, LocationGroup, locationGroupQuality, buildRepoLocationGroups, RepoLocationGroup } from './location'
-import { FETCH_HIGHLIGHTED_BLOB } from './ReferencesPanelQueries'
+import type { CodeIntelligenceProps } from '.'
+import type { Location, LocationsGroup, LocationsGroupedByRepo, LocationsGroupedByFile } from './location'
 import { newSettingsGetter } from './settings'
-import { findSearchToken } from './token'
-import { useCodeIntel } from './useCodeIntel'
+import { SideBlob, type SideBlobProps } from './SideBlob'
+import { findSearchToken, type ZeroBasedPosition } from './token'
 import { useRepoAndBlob } from './useRepoAndBlob'
-import { isDefined } from './util/helpers'
 
 import styles from './ReferencesPanel.module.scss'
 
-type Token = HoveredToken & RepoSpec & RevisionSpec & FileSpec & ResolvedRevisionSpec
+type Token = { range: State['range'] } & RepoSpec & RevisionSpec & FileSpec & ResolvedRevisionSpec
 
 interface HighlightedFileLineRangesProps {
     fetchHighlightedFileLineRanges: (parameters: FetchFileParameters, force?: boolean) => Observable<string[][]>
@@ -83,41 +65,48 @@ interface HighlightedFileLineRangesProps {
 
 export interface ReferencesPanelProps
     extends SettingsCascadeProps,
-        PlatformContextProps<'urlToFile' | 'requestGraphQL' | 'settings'>,
+        PlatformContextProps,
+        Pick<CodeIntelligenceProps, 'useCodeIntel'>,
         TelemetryProps,
+        TelemetryV2Props,
         HoverThresholdProps,
-        ExtensionsControllerProps,
-        ThemeProps,
         HighlightedFileLineRangesProps {
     /** Whether to show the first loaded reference in mini code view */
     jumpToFirst?: boolean
 
     /**
-     * The panel runs inside its own MemoryRouter, we keep track of externalHistory
-     * so that we're still able to actually navigate within the browser when required
+     * Used to overwrite the initial active URL
      */
-    externalHistory: H.History
-    externalLocation: H.Location
+    initialActiveURL?: string
+}
+interface State {
+    repoName: string
+    revision?: string
+    filePath: string
+    range: {
+        start: OneBasedPosition
+        end?: OneBasedPosition
+    }
+    jumpToFirst: boolean
+    collapsedState: {
+        references: boolean
+        definitions: boolean
+        implementations: boolean
+        prototypes: boolean
+    }
 }
 
-export const ReferencesPanelWithMemoryRouter: React.FunctionComponent<
-    React.PropsWithChildren<ReferencesPanelProps>
-> = props => (
-    // TODO: this won't be working with Router V6
-    <MemoryRouter
-        // Force router to remount the Panel when external location changes
-        key={`${props.externalLocation.pathname}${props.externalLocation.search}${props.externalLocation.hash}`}
-        initialEntries={[props.externalLocation]}
-    >
-        <ReferencesPanel {...props} />
-    </MemoryRouter>
-)
+interface OneBasedPosition {
+    line: number
+    character: number
+}
 
-const ReferencesPanel: React.FunctionComponent<React.PropsWithChildren<ReferencesPanelProps>> = props => {
-    const location = useLocation()
-
-    const { hash, pathname, search } = location
-    const { line, character } = parseQueryAndHash(search, hash)
+function createStateFromLocation(location: H.Location): null | State {
+    const { pathname, search } = location
+    const {
+        lineRange: { line, character, endLine, endCharacter },
+        viewState,
+    } = SourcegraphURL.from(location)
     const { filePath, repoName, revision } = parseBrowserRepoURL(pathname)
 
     // If we don't have enough information in the URL, we can't render the panel
@@ -128,23 +117,69 @@ const ReferencesPanel: React.FunctionComponent<React.PropsWithChildren<Reference
     const searchParameters = new URLSearchParams(search)
     const jumpToFirst = searchParameters.get('jumpToFirst') === 'true'
 
-    const token = { repoName, line, character, filePath }
+    const collapsedState: State['collapsedState'] = {
+        references: viewState === 'references',
+        definitions: viewState === 'definitions',
+        implementations: viewState?.startsWith('implementations_') ?? false,
+        prototypes: viewState?.startsWith('implementations_') ?? false,
+    }
+    // If the URL doesn't contain tab=<tab>, we open it (likely because the
+    // user clicked on a link in the preview code blob) to show definitions.
+    if (
+        !collapsedState.references &&
+        !collapsedState.definitions &&
+        !collapsedState.implementations &&
+        !collapsedState.prototypes
+    ) {
+        collapsedState.definitions = true
+    }
 
-    return <RevisionResolvingReferencesList {...props} {...token} revision={revision} jumpToFirst={jumpToFirst} />
+    const range = {
+        start: { line, character },
+        end: endLine && endCharacter ? { line: endLine, character: endCharacter } : undefined,
+    }
+    return { repoName, revision, filePath, range, jumpToFirst, collapsedState }
 }
 
-export const RevisionResolvingReferencesList: React.FunctionComponent<
+export const ReferencesPanel: React.FunctionComponent<React.PropsWithChildren<ReferencesPanelProps>> = props => {
+    const location = useLocation()
+    const state = useMemo(() => createStateFromLocation(location), [location])
+
+    if (state === null) {
+        return null
+    }
+
+    return (
+        <RevisionResolvingReferencesList
+            {...props}
+            repoName={state.repoName}
+            revision={state.revision}
+            filePath={state.filePath}
+            range={state.range}
+            jumpToFirst={state.jumpToFirst}
+            collapsedState={state.collapsedState}
+        />
+    )
+}
+
+const RevisionResolvingReferencesList: React.FunctionComponent<
     React.PropsWithChildren<
         ReferencesPanelProps & {
             repoName: string
-            line: number
-            character: number
+            range: State['range']
             filePath: string
             revision?: string
+            collapsedState: State['collapsedState']
         }
     >
 > = props => {
     const { data, loading, error } = useRepoAndBlob(props.repoName, props.filePath, props.revision)
+
+    // Scroll blob UI to the selected symbol right after the reference panel is rendered
+    // and shifted the blob UI (scroll into view is needed because there are a few cases
+    // when ref panel may overlap with current symbol)
+    useEffect(() => BlobAPI.scrollIntoView({ line: props.range.start.line }), [props.range.start.line])
+
     if (loading && !data) {
         return <LoadingCodeIntel />
     }
@@ -157,10 +192,14 @@ export const RevisionResolvingReferencesList: React.FunctionComponent<
         return <>Nothing found</>
     }
 
+    const useCodeIntel = props.useCodeIntel
+    if (!useCodeIntel) {
+        return <>Code intelligence is not available</>
+    }
+
     const token = {
         repoName: props.repoName,
-        line: props.line,
-        character: props.character,
+        range: props.range,
         filePath: props.filePath,
         revision: data.revision,
         commitID: data.commitID,
@@ -169,6 +208,7 @@ export const RevisionResolvingReferencesList: React.FunctionComponent<
     return (
         <SearchTokenFindingReferencesList
             {...props}
+            useCodeIntel={useCodeIntel}
             token={token}
             isFork={data.isFork}
             isArchived={data.isArchived}
@@ -182,58 +222,83 @@ interface ReferencesPanelPropsWithToken extends ReferencesPanelProps {
     isFork: boolean
     isArchived: boolean
     fileContent: string
+    useCodeIntel: NonNullable<ReferencesPanelProps['useCodeIntel']>
+    collapsedState: State['collapsedState']
+}
+
+function oneBasedPositionToZeroBased(p: OneBasedPosition): ZeroBasedPosition {
+    return {
+        line: p.line - 1,
+        character: p.character - 1,
+    }
 }
 
 const SearchTokenFindingReferencesList: React.FunctionComponent<
     React.PropsWithChildren<ReferencesPanelPropsWithToken>
 > = props => {
-    const languageId = getModeFromPath(props.token.filePath)
-    const spec = findLanguageSpec(languageId)
+    const tokenRange = props.token.range
     const tokenResult = findSearchToken({
         text: props.fileContent,
-        position: {
-            line: props.token.line - 1,
-            character: props.token.character - 1,
-        },
-        lineRegexes: spec.commentStyles.map(style => style.lineRegex).filter(isDefined),
-        blockCommentStyles: spec.commentStyles.map(style => style.block).filter(isDefined),
-        identCharPattern: spec.identCharPattern,
+        start: oneBasedPositionToZeroBased(tokenRange.start),
+        end: tokenRange.end ? oneBasedPositionToZeroBased(tokenRange.end) : undefined,
     })
+    const shouldMixPreciseAndSearchBasedReferences: boolean = newSettingsGetter(props.settingsCascade)<boolean>(
+        'codeIntel.mixPreciseAndSearchBasedReferences',
+        false
+    )
 
-    if (!tokenResult?.searchToken) {
+    if (tokenResult === undefined) {
         return (
             <div>
-                <Text className="text-danger">Could not find hovered token.</Text>
+                <Text className="text-danger">Could not find token.</Text>
             </div>
         )
     }
 
+    const blobView = BlobAPI.getBlobEditView()
+    const languages = blobView?.state.facet(blobPropsFacet).blobInfo.languages ?? []
+
     return (
         <ReferencesList
+            // Force the references list to recreate when the user settings
+            // change. This way we avoid showing stale results.
+            key={shouldMixPreciseAndSearchBasedReferences.toString()}
             {...props}
-            token={props.token}
-            searchToken={tokenResult?.searchToken}
-            spec={spec}
-            fileContent={props.fileContent}
-            isFork={props.isFork}
-            isArchived={props.isArchived}
+            searchToken={tokenResult}
+            mainBlobLanguages={languages}
         />
     )
 }
 
 const SHOW_SPINNER_DELAY_MS = 100
 
-export const ReferencesList: React.FunctionComponent<
+const useSpinner = (loading: boolean): boolean => {
+    // We only show the inline loading message if loading takes longer than
+    // SHOW_SPINNER_DELAY_MS milliseconds.
+    const [canShowSpinner, setCanShowSpinner] = useState(false)
+    useEffect(() => {
+        const handle = setTimeout(() => setCanShowSpinner(loading), SHOW_SPINNER_DELAY_MS)
+        // In case the component un-mounts before
+        return () => clearTimeout(handle)
+        // Make sure this effect only runs once
+    }, [loading])
+    return canShowSpinner
+}
+
+const ReferencesList: React.FunctionComponent<
     React.PropsWithChildren<
         ReferencesPanelPropsWithToken & {
             searchToken: string
-            spec: LanguageSpec
+            mainBlobLanguages: string[]
             fileContent: string
+            collapsedState: State['collapsedState']
         }
     >
 > = props => {
     const [filter, setFilter] = useState<string>()
     const debouncedFilter = useDebounce(filter, 150)
+
+    const navigate = useNavigate()
 
     useEffect(() => {
         setFilter(undefined)
@@ -247,46 +312,39 @@ export const ReferencesList: React.FunctionComponent<
         loading,
         referencesHasNextPage,
         implementationsHasNextPage,
+        prototypesHasNextPage,
         fetchMoreReferences,
         fetchMoreImplementations,
+        fetchMorePrototypes,
         fetchMoreReferencesLoading,
         fetchMoreImplementationsLoading,
-    } = useCodeIntel({
+        fetchMorePrototypesLoading,
+    } = props.useCodeIntel({
         variables: {
             repository: props.token.repoName,
             commit: props.token.commitID,
             path: props.token.filePath,
             // On the backend the line/character are 0-indexed, but what we
             // get from hoverifier is 1-indexed.
-            line: props.token.line - 1,
-            character: props.token.character - 1,
+            line: props.token.range.start.line - 1,
+            character: props.token.range.start.character - 1,
             filter: debouncedFilter || null,
             firstReferences: 100,
             afterReferences: null,
             firstImplementations: 100,
             afterImplementations: null,
+            firstPrototypes: 100,
+            afterPrototypes: null,
         },
         fileContent: props.fileContent,
         searchToken: props.searchToken,
-        spec: props.spec,
+        languages: props.mainBlobLanguages,
         isFork: props.isFork,
         isArchived: props.isArchived,
         getSetting,
     })
 
-    // We only show the inline loading message if loading takes longer than
-    // SHOW_SPINNER_DELAY_MS milliseconds.
-    const [canShowSpinner, setCanShowSpinner] = useState(false)
-    useEffect(() => {
-        const handle = setTimeout(() => setCanShowSpinner(loading), SHOW_SPINNER_DELAY_MS)
-        // In case the component un-mounts before
-        return () => clearTimeout(handle)
-        // Make sure this effect only runs once
-    }, [loading])
-
-    const references = useMemo(() => data?.references.nodes ?? [], [data])
-    const definitions = useMemo(() => data?.definitions.nodes ?? [], [data])
-    const implementations = useMemo(() => data?.implementations.nodes ?? [], [data])
+    const showSpinner = useSpinner(loading)
 
     // The "active URL" is the URL of the highlighted line number in SideBlob,
     // which also influences which item gets highlighted inside
@@ -295,7 +353,7 @@ export const ReferencesList: React.FunctionComponent<
     // in the browser history.
     const [activeURL, setActiveURL] = useSessionStorage<string | undefined>(
         'sideblob-active-url' + sessionStorageKeyFromToken(props.token),
-        undefined
+        props.initialActiveURL
     )
     const setActiveLocation = useCallback(
         (location: Location | undefined): void => {
@@ -303,31 +361,24 @@ export const ReferencesList: React.FunctionComponent<
                 setActiveURL(undefined)
                 return
             }
-            // Reconstruct the URL instead of using `location.url` to ensure that
-            // the commitID is included even when `location.url` doesn't include the
-            // commitID (because it's the default revision '').
-            const absoluteURL = toPrettyBlobURL({
-                filePath: location.file,
-                revision: location.commitID,
-                repoName: location.repo,
-                commitID: location.commitID,
-                range: location.range
-                    ? {
-                          start: {
-                              line: location.range.start.line + 1,
-                              character: location.range.start.character + 1,
-                          },
-                          end: {
-                              line: location.range.end.line + 1,
-                              character: location.range.end.character + 1,
-                          },
-                      }
-                    : undefined,
-            })
+            const absoluteURL = locationToUrl(location)
             setActiveURL(absoluteURL)
         },
         [setActiveURL]
     )
+
+    const definitions = data?.definitions.nodes
+    // If props.jumpToFirst is true and we finished loading (and have
+    // definitions) we select the first definition. We set it as activeLocation
+    // and push it to the blobMemoryHistory so the code blob is open.
+    useEffect(() => {
+        if (props.jumpToFirst) {
+            const firstDef = definitions?.first
+            if (firstDef) {
+                setActiveLocation(firstDef)
+            }
+        }
+    }, [setActiveLocation, props.jumpToFirst, definitions?.first])
 
     const sideblob = useMemo(() => parseSideBlobProps(activeURL), [activeURL])
 
@@ -343,48 +394,19 @@ export const ReferencesList: React.FunctionComponent<
         return result
     }
 
-    // If props.jumpToFirst is true and we finished loading (and have
-    // definitions) we select the first definition. We set it as activeLocation
-    // and push it to the blobMemoryHistory so the code blob is open.
-    useEffect(() => {
-        if (props.jumpToFirst && definitions.length > 0) {
-            setActiveLocation(definitions[0])
-        }
-    }, [setActiveLocation, props.jumpToFirst, definitions, setActiveURL])
-
     const onBlobNav = (url: string): void => {
         // Store the URL that the user promoted even if no definition/reference
         // points to the same line. In case they press "back" in the browser history,
         // the promoted line should be highlighted.
         setActiveURL(url)
-        props.externalHistory.push(url)
+        navigate(url)
     }
 
-    const navigateToUrl = (url: string): void => {
-        props.externalHistory.push(url)
-    }
-
-    // Manual management of the open/closed state of collapsible lists so they
-    // stay open/closed across re-renders and re-mounts.
-    const location = useLocation()
-    const initialCollapseState = useMemo((): Record<string, boolean> => {
-        const { viewState } = parseQueryAndHash(location.search, location.hash)
-        const state = {
-            references: viewState === 'references',
-            definitions: viewState === 'definitions',
-            implementations: viewState?.startsWith('implementations_') ?? false,
-        }
-        // If the URL doesn't contain tab=<tab>, we open it (likely because the
-        // user clicked on a link in the preview code blob) to show definitions.
-        if (!state.references && !state.definitions && !state.implementations) {
-            state.definitions = true
-        }
-        return state
-    }, [location])
     const [collapsed, setCollapsed] = useSessionStorage<Record<string, boolean>>(
         'sideblob-collapse-state-' + sessionStorageKeyFromToken(props.token),
-        initialCollapseState
+        props.collapsedState
     )
+
     const handleOpenChange = (id: string, isOpen: boolean): void =>
         setCollapsed(previous => ({ ...previous, [id]: isOpen }))
 
@@ -411,8 +433,8 @@ export const ReferencesList: React.FunctionComponent<
                     <small>
                         <Icon
                             aria-hidden={true}
-                            as={canShowSpinner ? LoadingSpinner : undefined}
-                            svgPath={!canShowSpinner ? mdiFilterOutline : undefined}
+                            as={showSpinner ? LoadingSpinner : undefined}
+                            svgPath={!showSpinner ? mdiFilterOutline : undefined}
                             size="md"
                             className={styles.filterIcon}
                         />
@@ -429,12 +451,11 @@ export const ReferencesList: React.FunctionComponent<
                     <CollapsibleLocationList
                         {...props}
                         name="definitions"
-                        locations={definitions}
+                        locationsGroup={data.definitions.nodes}
                         hasMore={false}
                         loadingMore={false}
                         filter={debouncedFilter}
                         activeURL={activeURL || ''}
-                        navigateToUrl={navigateToUrl}
                         isActiveLocation={isActiveLocation}
                         setActiveLocation={setActiveLocation}
                         handleOpenChange={handleOpenChange}
@@ -443,35 +464,45 @@ export const ReferencesList: React.FunctionComponent<
                     <CollapsibleLocationList
                         {...props}
                         name="references"
-                        locations={references}
+                        locationsGroup={data.references.nodes}
                         hasMore={referencesHasNextPage}
                         fetchMore={fetchMoreReferences}
                         loadingMore={fetchMoreReferencesLoading}
                         filter={debouncedFilter}
                         activeURL={activeURL || ''}
-                        navigateToUrl={navigateToUrl}
                         setActiveLocation={setActiveLocation}
                         isActiveLocation={isActiveLocation}
                         handleOpenChange={handleOpenChange}
                         isOpen={isOpen}
                     />
-                    {implementations.length > 0 && (
-                        <CollapsibleLocationList
-                            {...props}
-                            name="implementations"
-                            locations={implementations}
-                            hasMore={implementationsHasNextPage}
-                            fetchMore={fetchMoreImplementations}
-                            loadingMore={fetchMoreImplementationsLoading}
-                            setActiveLocation={setActiveLocation}
-                            filter={debouncedFilter}
-                            isActiveLocation={isActiveLocation}
-                            activeURL={activeURL || ''}
-                            navigateToUrl={navigateToUrl}
-                            handleOpenChange={handleOpenChange}
-                            isOpen={isOpen}
-                        />
-                    )}
+                    <CollapsibleLocationList
+                        {...props}
+                        name="implementations"
+                        locationsGroup={data.implementations.nodes}
+                        hasMore={implementationsHasNextPage}
+                        fetchMore={fetchMoreImplementations}
+                        loadingMore={fetchMoreImplementationsLoading}
+                        setActiveLocation={setActiveLocation}
+                        filter={debouncedFilter}
+                        isActiveLocation={isActiveLocation}
+                        activeURL={activeURL || ''}
+                        handleOpenChange={handleOpenChange}
+                        isOpen={isOpen}
+                    />
+                    <CollapsibleLocationList
+                        {...props}
+                        name="prototypes"
+                        locationsGroup={data.prototypes.nodes}
+                        hasMore={prototypesHasNextPage}
+                        fetchMore={fetchMorePrototypes}
+                        loadingMore={fetchMorePrototypesLoading}
+                        setActiveLocation={setActiveLocation}
+                        filter={debouncedFilter}
+                        isActiveLocation={isActiveLocation}
+                        activeURL={activeURL || ''}
+                        handleOpenChange={handleOpenChange}
+                        isOpen={isOpen}
+                    />
                 </div>
             </div>
             {sideblob && (
@@ -499,7 +530,7 @@ export const ReferencesList: React.FunctionComponent<
                                     to={activeURL}
                                     onClick={event => {
                                         event.preventDefault()
-                                        navigateToUrl(activeURL)
+                                        navigate(activeURL)
                                     }}
                                     className={styles.sideBlobFilename}
                                 >
@@ -535,12 +566,11 @@ interface CollapsibleLocationListProps
         SearchTokenProps,
         HighlightedFileLineRangesProps {
     name: string
-    locations: Location[]
+    locationsGroup: LocationsGroup
     filter: string | undefined
     hasMore: boolean
     fetchMore?: () => void
     loadingMore: boolean
-    navigateToUrl: (url: string) => void
     activeURL: string
 }
 
@@ -548,6 +578,12 @@ const CollapsibleLocationList: React.FunctionComponent<
     React.PropsWithChildren<CollapsibleLocationListProps>
 > = props => {
     const isOpen = props.isOpen(props.name) ?? true
+
+    const repoCount = props.locationsGroup.repoCount
+    const locationsCount = props.locationsGroup.locationsCount
+    const quantityLabel = `(${locationsCount} ${pluralize('item', locationsCount)}${
+        repoCount > 1 ? ` from ${repoCount} repositories` : ''
+    } displayed${props.hasMore ? ', more available' : ''})`
 
     return (
         <Collapse isOpen={isOpen} onOpenChange={isOpen => props.handleOpenChange(props.name, isOpen)}>
@@ -566,27 +602,32 @@ const CollapsibleLocationList: React.FunctionComponent<
                         )}{' '}
                         <H4 className="mb-0">{capitalize(props.name)}</H4>
                         <span className={classNames('ml-2 text-muted small', styles.cardHeaderSmallText)}>
-                            ({props.locations.length} displayed{props.hasMore ? ', more available)' : ')'}
+                            {quantityLabel}
                         </span>
                     </CollapseHeader>
                 </CardHeader>
 
                 <CollapsePanel id={props.name} data-testid={props.name}>
-                    {props.locations.length > 0 ? (
-                        <LocationsList
-                            searchToken={props.searchToken}
-                            locations={props.locations}
-                            isActiveLocation={props.isActiveLocation}
-                            setActiveLocation={props.setActiveLocation}
-                            filter={props.filter}
-                            activeURL={props.activeURL}
-                            navigateToUrl={props.navigateToUrl}
-                            handleOpenChange={(id, isOpen) => props.handleOpenChange(props.name + id, isOpen)}
-                            isOpen={id => props.isOpen(props.name + id)}
-                            fetchHighlightedFileLineRanges={props.fetchHighlightedFileLineRanges}
-                        />
+                    {locationsCount > 0 ? (
+                        <>
+                            {props.locationsGroup.map((locations, index) => (
+                                <CollapsibleRepoLocationGroup
+                                    key={locations.repoName}
+                                    activeURL={props.activeURL}
+                                    searchToken={props.searchToken}
+                                    locations={locations}
+                                    openByDefault={index === 0}
+                                    isActiveLocation={props.isActiveLocation}
+                                    setActiveLocation={props.setActiveLocation}
+                                    filter={props.filter}
+                                    handleOpenChange={(id, isOpen) => props.handleOpenChange(props.name + id, isOpen)}
+                                    isOpen={id => props.isOpen(props.name + id)}
+                                    fetchHighlightedFileLineRanges={props.fetchHighlightedFileLineRanges}
+                                />
+                            ))}
+                        </>
                     ) : (
-                        <Text className="text-muted pl-2">
+                        <Text className="text-muted pl-4 pb-0">
                             {props.filter ? (
                                 <i>
                                     No {props.name} matching <strong>{props.filter}</strong> found
@@ -617,15 +658,6 @@ const CollapsibleLocationList: React.FunctionComponent<
     )
 }
 
-interface SideBlobProps extends ReferencesPanelProps {
-    activeURL: string
-    repository: string
-    commitID: string
-    file: string
-    position?: Position
-    blobNav: (url: string) => void
-}
-
 function parseSideBlobProps(
     activeURL: string | undefined
 ): Pick<SideBlobProps, 'activeURL' | 'repository' | 'commitID' | 'file' | 'position'> | undefined {
@@ -648,142 +680,7 @@ function parseSideBlobProps(
     }
 }
 
-const SideBlob: React.FunctionComponent<React.PropsWithChildren<SideBlobProps>> = props => {
-    const useCodeMirror = useExperimentalFeatures(features => features.enableCodeMirrorFileView ?? false)
-    const BlobComponent = useCodeMirror ? CodeMirrorBlob : Blob
-
-    const highlightFormat = useCodeMirror ? HighlightResponseFormat.JSON_SCIP : HighlightResponseFormat.HTML_HIGHLIGHT
-    const { data, error, loading } = useQuery<
-        ReferencesPanelHighlightedBlobResult,
-        ReferencesPanelHighlightedBlobVariables
-    >(FETCH_HIGHLIGHTED_BLOB, {
-        variables: {
-            repository: props.repository,
-            commit: props.commitID,
-            path: props.file,
-            format: highlightFormat,
-            html: highlightFormat === HighlightResponseFormat.HTML_HIGHLIGHT,
-        },
-        // Cache this data but always re-request it in the background when we revisit
-        // this page to pick up newer changes.
-        fetchPolicy: 'cache-and-network',
-        nextFetchPolicy: 'network-only',
-    })
-
-    const history = useMemo(() => H.createMemoryHistory(), [])
-    const location = useMemo(() => {
-        history.replace(props.activeURL)
-        return history.location
-    }, [history, props.activeURL])
-
-    // If we're loading and haven't received any data yet
-    if (loading && !data) {
-        return (
-            <>
-                <LoadingSpinner inline={false} className="mx-auto my-4" />
-                <Text alignment="center" className="text-muted">
-                    <i>
-                        Loading <Code>{props.file}</Code>...
-                    </i>
-                </Text>
-            </>
-        )
-    }
-
-    // If we received an error before we had received any data
-    if (error && !data) {
-        return (
-            <div>
-                <Text className="text-danger">
-                    Loading <Code>{props.file}</Code> failed:
-                </Text>
-                <pre>{error.message}</pre>
-            </div>
-        )
-    }
-
-    // If there weren't any errors and we just didn't receive any data
-    if (!data?.repository?.commit?.blob?.highlight) {
-        return <>Nothing found</>
-    }
-
-    const { html, lsif } = data?.repository?.commit?.blob?.highlight
-
-    // TODO: display a helpful message if syntax highlighting aborted, see https://github.com/sourcegraph/sourcegraph/issues/40841
-
-    return (
-        <BlobComponent
-            {...props}
-            nav={props.blobNav}
-            history={history}
-            location={location}
-            disableStatusBar={true}
-            disableDecorations={true}
-            wrapCode={true}
-            className={styles.sideBlobCode}
-            navigateToLineOnAnyClick={true}
-            blobInfo={{
-                html: html ?? '',
-                lsif: lsif ?? '',
-                content: data?.repository?.commit?.blob?.content ?? '',
-                filePath: props.file,
-                repoName: props.repository,
-                commitID: props.commitID,
-                revision: props.commitID,
-                mode: 'lspmode',
-            }}
-        />
-    )
-}
-
-interface LocationsListProps
-    extends ActiveLocationProps,
-        CollapseProps,
-        SearchTokenProps,
-        HighlightedFileLineRangesProps {
-    locations: Location[]
-    filter: string | undefined
-    navigateToUrl: (url: string) => void
-    activeURL: string
-}
-
-const LocationsList: React.FunctionComponent<React.PropsWithChildren<LocationsListProps>> = ({
-    locations,
-    isActiveLocation,
-    setActiveLocation,
-    filter,
-    navigateToUrl,
-    handleOpenChange,
-    isOpen,
-    searchToken,
-    fetchHighlightedFileLineRanges,
-    activeURL,
-}) => {
-    const repoLocationGroups = useMemo(() => buildRepoLocationGroups(locations), [locations])
-    const openByDefault = repoLocationGroups.length === 1
-
-    return (
-        <>
-            {repoLocationGroups.map(group => (
-                <CollapsibleRepoLocationGroup
-                    key={group.repoName}
-                    activeURL={activeURL}
-                    searchToken={searchToken}
-                    repoLocationGroup={group}
-                    openByDefault={openByDefault}
-                    isActiveLocation={isActiveLocation}
-                    setActiveLocation={setActiveLocation}
-                    filter={filter}
-                    navigateToUrl={navigateToUrl}
-                    handleOpenChange={handleOpenChange}
-                    isOpen={isOpen}
-                    fetchHighlightedFileLineRanges={fetchHighlightedFileLineRanges}
-                />
-            ))}
-        </>
-    )
-}
-
+/** Component to display the Locations for a single repo */
 const CollapsibleRepoLocationGroup: React.FunctionComponent<
     React.PropsWithChildren<
         ActiveLocationProps &
@@ -791,17 +688,15 @@ const CollapsibleRepoLocationGroup: React.FunctionComponent<
             SearchTokenProps &
             HighlightedFileLineRangesProps & {
                 filter: string | undefined
-                navigateToUrl: (url: string) => void
-                repoLocationGroup: RepoLocationGroup
+                locations: LocationsGroupedByRepo
                 openByDefault: boolean
                 activeURL: string
             }
     >
 > = ({
-    repoLocationGroup,
+    locations,
     isActiveLocation,
     setActiveLocation,
-    navigateToUrl,
     filter,
     openByDefault,
     isOpen,
@@ -810,39 +705,40 @@ const CollapsibleRepoLocationGroup: React.FunctionComponent<
     fetchHighlightedFileLineRanges,
     activeURL,
 }) => {
-    const open = isOpen(repoLocationGroup.repoName) ?? openByDefault
+    const repoName = locations.repoName
+    const open = isOpen(repoName) ?? openByDefault
 
     return (
-        <Collapse isOpen={open} onOpenChange={isOpen => handleOpenChange(repoLocationGroup.repoName, isOpen)}>
+        <Collapse isOpen={open} onOpenChange={isOpen => handleOpenChange(repoName, isOpen)}>
             <div className={styles.repoLocationGroup}>
                 <CollapseHeader
                     as={Button}
                     aria-expanded={open}
-                    aria-label={`Repository ${repoLocationGroup.repoName}`}
+                    aria-label={`Repository ${repoName}`}
                     type="button"
                     className={classNames('d-flex justify-content-start w-100', styles.repoLocationGroupHeader)}
                 >
                     <Icon aria-hidden="true" svgPath={open ? mdiChevronDown : mdiChevronRight} />
                     <small>
                         <span className={classNames('text-small', styles.repoLocationGroupHeaderRepoName)}>
-                            {displayRepoName(repoLocationGroup.repoName)}
+                            {displayRepoName(repoName)}
                         </span>
                     </small>
                 </CollapseHeader>
 
-                <CollapsePanel id={repoLocationGroup.repoName}>
-                    {repoLocationGroup.referenceGroups.map(group => (
+                <CollapsePanel id={repoName}>
+                    {locations.perFileGroups.map(group => (
                         <CollapsibleLocationGroup
-                            key={group.path + group.repoName}
+                            key={group.path + repoName}
                             activeURL={activeURL}
                             searchToken={searchToken}
+                            repoName={repoName}
                             group={group}
                             isActiveLocation={isActiveLocation}
                             setActiveLocation={setActiveLocation}
                             filter={filter}
-                            handleOpenChange={(id, isOpen) => handleOpenChange(repoLocationGroup.repoName + id, isOpen)}
-                            isOpen={id => isOpen(repoLocationGroup.repoName + id)}
-                            navigateToUrl={navigateToUrl}
+                            handleOpenChange={(id, isOpen) => handleOpenChange(repoName + id, isOpen)}
+                            isOpen={id => isOpen(repoName + id)}
                             fetchHighlightedFileLineRanges={fetchHighlightedFileLineRanges}
                         />
                     ))}
@@ -858,13 +754,14 @@ const CollapsibleLocationGroup: React.FunctionComponent<
             CollapseProps &
             SearchTokenProps &
             HighlightedFileLineRangesProps & {
-                group: LocationGroup
+                repoName: string
+                group: LocationsGroupedByFile
                 filter: string | undefined
-                navigateToUrl: (url: string) => void
                 activeURL: string
             }
     >
 > = ({
+    repoName,
     group,
     setActiveLocation,
     isActiveLocation,
@@ -872,8 +769,6 @@ const CollapsibleLocationGroup: React.FunctionComponent<
     isOpen,
     handleOpenChange,
     fetchHighlightedFileLineRanges,
-    navigateToUrl,
-    activeURL,
 }) => {
     // On the first load, update the scroll position towards the active
     // location.  Without this behavior, the scroll position points at the top
@@ -890,7 +785,7 @@ const CollapsibleLocationGroup: React.FunctionComponent<
         highlighted = group.path.split(filter)
     }
 
-    const { repo, commitID, file } = useMemo(() => group.locations[0], [group])
+    const { repo, commitID, file } = group.locations[0]
     const ranges = useMemo(
         () =>
             group.locations.map(location => ({
@@ -900,39 +795,29 @@ const CollapsibleLocationGroup: React.FunctionComponent<
         [group.locations]
     )
 
-    const fetchHighlightedFileRangeLines = useCallback(
-        (startLine: number, endLine: number): Observable<string[]> =>
-            fetchHighlightedFileLineRanges(
-                {
-                    repoName: repo,
-                    commitID,
-                    filePath: file,
-                    disableTimeout: false,
-                    format: HighlightResponseFormat.HTML_HIGHLIGHT,
-                    ranges,
-                },
-                false
-            ).pipe(
-                map(
-                    lines =>
-                        lines[ranges.findIndex(group => group.startLine === startLine && group.endLine === endLine + 1)]
-                )
-            ),
-        [fetchHighlightedFileLineRanges, repo, commitID, file, ranges]
-    )
-
-    const fetchPlainTextFileRangeLines = (location: Location): Observable<string[]> => {
-        const range = location.range
-        if (range !== undefined) {
-            const lineNumber = range.start.line + 1
-            const lineContent = location.lines[range.start.line]
-            const tableLine = `<tr><td class="line" data-line="${lineNumber}"></td><td class="code">${lineContent}</td></tr>`
-            return of([tableLine])
+    const [highlightedRanges, setHighlightedRanges] = useState<string[][] | undefined>(undefined)
+    const [hasBeenVisible, setHasBeenVisible] = useState(false)
+    const onVisible = useCallback(() => {
+        if (hasBeenVisible) {
+            return
         }
-        return of([])
-    }
+        setHasBeenVisible(true)
+        const subscription = fetchHighlightedFileLineRanges(
+            {
+                repoName: repo,
+                commitID,
+                filePath: file,
+                disableTimeout: false,
+                format: HighlightResponseFormat.HTML_HIGHLIGHT,
+                ranges,
+            },
+            false
+        ).subscribe(setHighlightedRanges)
+        return () => subscription.unsubscribe()
+    }, [fetchHighlightedFileLineRanges, repo, commitID, file, ranges, hasBeenVisible])
 
     const open = isOpen(group.path) ?? true
+    const navigate = useNavigate()
 
     return (
         <Collapse isOpen={open} onOpenChange={isOpen => handleOpenChange(group.path, isOpen)}>
@@ -973,71 +858,107 @@ const CollapsibleLocationGroup: React.FunctionComponent<
                             </span>
                         </span>
                         <Badge small={true} variant="secondary" className="ml-4">
-                            {locationGroupQuality(group)}
+                            {group.quality}
                         </Badge>
                     </small>
                 </CollapseHeader>
 
-                <CollapsePanel id={group.repoName + group.path} className="ml-0">
-                    <div className={styles.locationContainer}>
-                        <ul className="list-unstyled mb-0">
-                            {group.locations.map((reference, index) => {
-                                const isActive = isActiveLocation(reference)
-                                const locationActive = isActive ? styles.locationActive : ''
-                                const selectReference = (
-                                    event: KeyboardEvent<HTMLElement> | MouseEvent<HTMLElement>
-                                ): void => {
-                                    onClickCodeExcerptHref(event, () => {
-                                        if (isActive && activeURL) {
-                                            navigateToUrl(activeURL)
+                <CollapsePanel id={repoName + group.path} className="ml-0">
+                    <VisibilitySensor
+                        onChange={(visible: boolean) => visible && onVisible()}
+                        partialVisibility={true}
+                        offset={{ bottom: -500 }}
+                    >
+                        <div className={styles.locationContainer}>
+                            <ul className="list-unstyled mb-0">
+                                {group.locations.map((reference, index) => {
+                                    const isActive = isActiveLocation(reference)
+                                    const isFirstInActive =
+                                        isActive && !(index > 0 && isActiveLocation(group.locations[index - 1]))
+                                    const locationActive = isActive ? styles.locationActive : ''
+                                    const clickReference = (event: MouseEvent<HTMLElement>): void => {
+                                        // If anything other than a normal primary click is detected,
+                                        // treat this as a normal link click and let the browser handle
+                                        // it.
+                                        if (
+                                            event.button !== 0 ||
+                                            event.altKey ||
+                                            event.ctrlKey ||
+                                            event.metaKey ||
+                                            event.shiftKey
+                                        ) {
+                                            return
+                                        }
+
+                                        event.preventDefault()
+                                        if (isActive) {
+                                            navigate(locationToUrl(reference))
                                         } else {
                                             setActiveLocation(reference)
                                         }
-                                    })
-                                }
+                                    }
+                                    const doubleClickReference = (event: MouseEvent<HTMLElement>): void => {
+                                        event.preventDefault()
+                                        navigate(locationToUrl(reference))
+                                    }
 
-                                return (
-                                    <li
-                                        key={reference.url}
-                                        className={classNames('border-0 rounded-0 mb-0', styles.location)}
-                                    >
-                                        <div
-                                            role="link"
-                                            data-testid={`reference-item-${group.path}-${index}`}
-                                            tabIndex={0}
-                                            onClick={selectReference}
-                                            onKeyDown={selectReference}
-                                            data-href={reference.url}
-                                            className={classNames(styles.locationLink, locationActive)}
+                                    const plaintextLines = reference.range
+                                        ? [reference.lines[reference.range.start.line]]
+                                        : []
+
+                                    return (
+                                        <li
+                                            key={reference.url}
+                                            className={classNames('border-0 rounded-0 mb-0', styles.location)}
                                         >
-                                            <CodeExcerpt
-                                                className={styles.locationLinkCodeExcerpt}
-                                                commitID={reference.commitID}
-                                                filePath={reference.file}
-                                                repoName={reference.repo}
-                                                highlightRanges={[
-                                                    {
-                                                        line: reference.range?.start.line ?? 0,
-                                                        character: reference.range?.start.character ?? 0,
-                                                        highlightLength:
-                                                            (reference.range?.end.character ?? 0) -
-                                                            (reference.range?.start.character ?? 0),
-                                                    },
-                                                ]}
-                                                startLine={reference.range?.start.line ?? 0}
-                                                endLine={reference.range?.end.line ?? 0}
-                                                fetchHighlightedFileRangeLines={fetchHighlightedFileRangeLines}
-                                                visibilityOffset={{ bottom: 0 }}
-                                                fetchPlainTextFileRangeLines={(): Observable<string[]> =>
-                                                    fetchPlainTextFileRangeLines(reference)
-                                                }
-                                            />
-                                        </div>
-                                    </li>
-                                )
-                            })}
-                        </ul>
-                    </div>
+                                            {/* eslint-disable-next-line react/forbid-elements */}
+                                            <a
+                                                data-testid={`reference-item-${group.path}-${index}`}
+                                                tabIndex={0}
+                                                onClick={clickReference}
+                                                onDoubleClick={doubleClickReference}
+                                                href={reference.url}
+                                                className={classNames(styles.locationLink, locationActive)}
+                                            >
+                                                <CodeExcerpt
+                                                    className={styles.locationLinkCodeExcerpt}
+                                                    commitID={reference.commitID}
+                                                    filePath={reference.file}
+                                                    repoName={reference.repo}
+                                                    highlightRanges={[
+                                                        {
+                                                            startLine: reference.range?.start.line ?? 0,
+                                                            startCharacter: reference.range?.start.character ?? 0,
+                                                            endLine: reference.range?.end.line ?? 0,
+                                                            endCharacter: reference.range?.end.character ?? 0,
+                                                        },
+                                                    ]}
+                                                    startLine={reference.range?.start.line ?? 0}
+                                                    endLine={reference.range?.end.line ?? 0}
+                                                    plaintextLines={plaintextLines}
+                                                    highlightedLines={highlightedRanges?.[index]}
+                                                />
+                                                {isFirstInActive ? (
+                                                    <span className={classNames('ml-2', styles.locationActiveIcon)}>
+                                                        <Tooltip
+                                                            content="Click again to open line in full view"
+                                                            placement="left"
+                                                        >
+                                                            <Icon
+                                                                aria-label="Open line in full view"
+                                                                size="sm"
+                                                                svgPath={mdiOpenInNew}
+                                                            />
+                                                        </Tooltip>
+                                                    </span>
+                                                ) : null}
+                                            </a>
+                                        </li>
+                                    )
+                                })}
+                            </ul>
+                        </div>
+                    </VisibilitySensor>
                 </CollapsePanel>
             </div>
         </Collapse>
@@ -1062,26 +983,31 @@ const LoadingCodeIntelFailed: React.FunctionComponent<React.PropsWithChildren<{ 
     </>
 )
 
-export function locationWithoutViewState(location: H.Location): H.LocationDescriptorObject {
-    const parsedQuery = parseQueryAndHash(location.search, location.hash)
-    delete parsedQuery.viewState
-
-    const lineRangeQueryParameter = toPositionOrRangeQueryParameter({ range: lprToRange(parsedQuery) })
-    const result = {
-        search: formatSearchParameters(
-            addLineRangeQueryParameter(new URLSearchParams(location.search), lineRangeQueryParameter)
-        ),
-        hash: '',
-    }
-    return result
-}
-
-export const appendJumpToFirstQueryParameter = (url: string): string => {
-    const newUrl = new URL(url, window.location.href)
-    newUrl.searchParams.set('jumpToFirst', 'true')
-    return newUrl.pathname + `?${formatSearchParameters(newUrl.searchParams)}` + newUrl.hash
-}
-
 function sessionStorageKeyFromToken(token: Token): string {
-    return `${token.repoName}@${token.commitID}/${token.filePath}?L${token.line}:${token.character}`
+    const start = token.range.start
+    return `${token.repoName}@${token.commitID}/${token.filePath}?L${start.line}:${start.character}`
+}
+
+function locationToUrl(location: Location): string {
+    // Reconstruct the URL instead of using `location.url` to ensure that
+    // the commitID is included even when `location.url` doesn't include the
+    // commitID (because it's the default revision '').
+    return toPrettyBlobURL({
+        filePath: location.file,
+        revision: location.commitID,
+        repoName: location.repo,
+        commitID: location.commitID,
+        range: location.range
+            ? {
+                  start: {
+                      line: location.range.start.line + 1,
+                      character: location.range.start.character + 1,
+                  },
+                  end: {
+                      line: location.range.end.line + 1,
+                      character: location.range.end.character + 1,
+                  },
+              }
+            : undefined,
+    })
 }

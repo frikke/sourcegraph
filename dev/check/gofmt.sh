@@ -16,7 +16,7 @@ DIFF=$(
   find . \( \
     -path ./vendor \
     -o -path ./vendored \
-    -o -path ./docker-images/syntax-highlighter/crates/sg-syntax/languages/tree-sitter-go \
+    -o -path ./docker-images/syntax-highlighter/crates \
     \) -prune -o -name '*.go' -exec gofmt -s -w -d {} +
 )
 if [ -z "$DIFF" ]; then
@@ -24,7 +24,7 @@ if [ -z "$DIFF" ]; then
   exit 0
 else
   echo "ERROR: gofmt check failed:"
-  echo -e "$DIFF" >./annotations/gofmt
+  echo -e "\`\`\`term\n$DIFF\n\`\`\`" >./annotations/gofmt
   echo "^^^ +++"
   exit 1
 fi

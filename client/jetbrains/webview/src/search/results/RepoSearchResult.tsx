@@ -2,8 +2,8 @@ import React from 'react'
 
 import SourceRepositoryIcon from 'mdi-react/SourceRepositoryIcon'
 
-import { formatRepositoryStarCount, SearchResultStar } from '@sourcegraph/search-ui'
-import { RepositoryMatch } from '@sourcegraph/shared/src/search/stream'
+import { formatRepositoryStarCount, SearchResultStar } from '@sourcegraph/branded'
+import type { RepositoryMatch } from '@sourcegraph/shared/src/search/stream'
 
 import { RepoName } from './RepoName'
 import { SearchResultLayout } from './SearchResultLayout'

@@ -13,8 +13,10 @@ import (
 	"github.com/sourcegraph/sourcegraph/internal/actor"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/database/basestore"
+	"github.com/sourcegraph/sourcegraph/internal/database/dbutil"
 	"github.com/sourcegraph/sourcegraph/internal/encryption"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc/auth"
+	ghauth "github.com/sourcegraph/sourcegraph/internal/github_apps/auth"
 	"github.com/sourcegraph/sourcegraph/internal/timeutil"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
@@ -26,6 +28,7 @@ type UserCredential struct {
 	UserID              int32
 	ExternalServiceType string
 	ExternalServiceID   string
+	GitHubAppID         int
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 
@@ -36,22 +39,15 @@ type UserCredential struct {
 	Credential *EncryptableCredential
 }
 
-type EncryptableCredential = encryption.Encryptable
-
-func NewEmptyCredential() *EncryptableCredential {
-	return NewUnencryptedCredential(nil)
-}
-
-func NewUnencryptedCredential(value []byte) *EncryptableCredential {
-	return encryption.NewUnencrypted(string(value))
-}
-
-func NewEncryptedCredential(cipher, keyID string, key encryption.Key) *EncryptableCredential {
-	return encryption.NewEncrypted(cipher, keyID, key)
-}
+// IsGitHubApp returns true if the user credential is a GitHub App.
+func (uc *UserCredential) IsGitHubApp() bool { return uc.GitHubAppID > 0 }
 
 // Authenticator decrypts and creates the authenticator associated with the user credential.
-func (uc *UserCredential) Authenticator(ctx context.Context) (auth.Authenticator, error) {
+func (uc *UserCredential) Authenticator(ctx context.Context, opts ghauth.CreateAuthenticatorForCredentialOpts) (auth.Authenticator, error) {
+	if uc.IsGitHubApp() {
+		return ghauth.CreateAuthenticatorForCredential(ctx, uc.GitHubAppID, opts)
+	}
+
 	decrypted, err := uc.Credential.Decrypt(ctx)
 	if err != nil {
 		return nil, err
@@ -80,6 +76,20 @@ func (uc *UserCredential) SetAuthenticator(ctx context.Context, a auth.Authentic
 	return nil
 }
 
+type EncryptableCredential = encryption.Encryptable
+
+func NewEmptyCredential() *EncryptableCredential {
+	return NewUnencryptedCredential(nil)
+}
+
+func NewUnencryptedCredential(value []byte) *EncryptableCredential {
+	return encryption.NewUnencrypted(string(value))
+}
+
+func NewEncryptedCredential(cipher, keyID string, key encryption.Key) *EncryptableCredential {
+	return encryption.NewEncrypted(cipher, keyID, key)
+}
+
 const (
 	// Valid domain values for user credentials.
 	UserCredentialDomainBatches = "batches"
@@ -100,7 +110,7 @@ func (UserCredentialNotFoundErr) NotFound() bool {
 type UserCredentialsStore interface {
 	basestore.ShareableStore
 	With(basestore.ShareableStore) UserCredentialsStore
-	Transact(context.Context) (UserCredentialsStore, error)
+	WithTransact(context.Context, func(UserCredentialsStore) error) error
 	Create(ctx context.Context, scope UserCredentialScope, credential auth.Authenticator) (*UserCredential, error)
 	Update(context.Context, *UserCredential) error
 	Delete(ctx context.Context, id int64) error
@@ -133,13 +143,14 @@ func (s *userCredentialsStore) With(other basestore.ShareableStore) UserCredenti
 	}
 }
 
-func (s *userCredentialsStore) Transact(ctx context.Context) (UserCredentialsStore, error) {
-	txBase, err := s.Store.Transact(ctx)
-	return &userCredentialsStore{
-		logger: s.logger,
-		Store:  txBase,
-		key:    s.key,
-	}, err
+func (s *userCredentialsStore) WithTransact(ctx context.Context, f func(UserCredentialsStore) error) error {
+	return s.Store.WithTransact(ctx, func(tx *basestore.Store) error {
+		return f(&userCredentialsStore{
+			logger: s.logger,
+			Store:  tx,
+			key:    s.key,
+		})
+	})
 }
 
 // UserCredentialScope represents the unique scope for a credential. Only one
@@ -149,6 +160,7 @@ type UserCredentialScope struct {
 	UserID              int32
 	ExternalServiceType string
 	ExternalServiceID   string
+	GitHubAppID         int
 }
 
 // Create creates a new user credential based on the given scope and
@@ -174,6 +186,7 @@ func (s *userCredentialsStore) Create(ctx context.Context, scope UserCredentialS
 		scope.ExternalServiceID,
 		encryptedCredential, // N.B.: is already a []byte
 		keyID,
+		dbutil.NewNullInt(scope.GitHubAppID),
 		sqlf.Join(userCredentialsColumns, ", "),
 	)
 
@@ -189,10 +202,7 @@ func (s *userCredentialsStore) Create(ctx context.Context, scope UserCredentialS
 // Update updates a user credential in the database. If the credential cannot be found,
 // an error is returned.
 func (s *userCredentialsStore) Update(ctx context.Context, credential *UserCredential) error {
-	authz, err := userCredentialsAuthzQueryConds(ctx)
-	if err != nil {
-		return err
-	}
+	authz := userCredentialsAuthzQueryConds(ctx)
 
 	credential.UpdatedAt = timeutil.Now()
 	encryptedCredential, keyID, err := credential.Credential.Encrypt(ctx, s.key)
@@ -208,6 +218,7 @@ func (s *userCredentialsStore) Update(ctx context.Context, credential *UserCrede
 		credential.ExternalServiceID,
 		[]byte(encryptedCredential),
 		keyID,
+		dbutil.NewNullInt(credential.GitHubAppID),
 		credential.UpdatedAt,
 		credential.SSHMigrationApplied,
 		credential.ID,
@@ -227,10 +238,7 @@ func (s *userCredentialsStore) Update(ctx context.Context, credential *UserCrede
 // soft delete with user credentials: once deleted, the relevant records are
 // _gone_, so that we don't hold any sensitive data unexpectedly. 💀
 func (s *userCredentialsStore) Delete(ctx context.Context, id int64) error {
-	authz, err := userCredentialsAuthzQueryConds(ctx)
-	if err != nil {
-		return err
-	}
+	authz := userCredentialsAuthzQueryConds(ctx)
 
 	q := sqlf.Sprintf("DELETE FROM user_credentials WHERE id = %s AND %s", id, authz)
 	res, err := s.ExecResult(ctx, q)
@@ -250,10 +258,7 @@ func (s *userCredentialsStore) Delete(ctx context.Context, id int64) error {
 // GetByID returns the user credential matching the given ID, or
 // UserCredentialNotFoundErr if no such credential exists.
 func (s *userCredentialsStore) GetByID(ctx context.Context, id int64) (*UserCredential, error) {
-	authz, err := userCredentialsAuthzQueryConds(ctx)
-	if err != nil {
-		return nil, err
-	}
+	authz := userCredentialsAuthzQueryConds(ctx)
 
 	q := sqlf.Sprintf(
 		"SELECT %s FROM user_credentials WHERE id = %s AND %s",
@@ -276,10 +281,7 @@ func (s *userCredentialsStore) GetByID(ctx context.Context, id int64) (*UserCred
 // GetByScope returns the user credential matching the given scope, or
 // UserCredentialNotFoundErr if no such credential exists.
 func (s *userCredentialsStore) GetByScope(ctx context.Context, scope UserCredentialScope) (*UserCredential, error) {
-	authz, err := userCredentialsAuthzQueryConds(ctx)
-	if err != nil {
-		return nil, err
-	}
+	authz := userCredentialsAuthzQueryConds(ctx)
 
 	q := sqlf.Sprintf(
 		userCredentialsGetByScopeQueryFmtstr,
@@ -326,10 +328,7 @@ func (opts *UserCredentialsListOpts) sql() *sqlf.Query {
 
 // List returns all user credentials matching the given options.
 func (s *userCredentialsStore) List(ctx context.Context, opts UserCredentialsListOpts) ([]*UserCredential, int, error) {
-	authz, err := userCredentialsAuthzQueryConds(ctx)
-	if err != nil {
-		return nil, 0, err
-	}
+	authz := userCredentialsAuthzQueryConds(ctx)
 
 	preds := []*sqlf.Query{authz}
 	if opts.Scope.Domain != "" {
@@ -401,6 +400,7 @@ var userCredentialsColumns = []*sqlf.Query{
 	sqlf.Sprintf("external_service_id"),
 	sqlf.Sprintf("credential"),
 	sqlf.Sprintf("encryption_key_id"),
+	sqlf.Sprintf("github_app_id"),
 	sqlf.Sprintf("created_at"),
 	sqlf.Sprintf("updated_at"),
 	sqlf.Sprintf("ssh_migration_applied"),
@@ -410,7 +410,6 @@ var userCredentialsColumns = []*sqlf.Query{
 // in a vain attempt to improve their readability.
 
 const userCredentialsGetByScopeQueryFmtstr = `
--- source: internal/database/user_credentials.go:GetByScope
 SELECT %s
 FROM user_credentials
 WHERE
@@ -422,7 +421,6 @@ WHERE
 `
 
 const userCredentialsListQueryFmtstr = `
--- source: internal/database/user_credentials.go:List
 SELECT %s
 FROM user_credentials
 WHERE %s
@@ -432,7 +430,6 @@ ORDER BY created_at ASC, domain ASC, user_id ASC, external_service_id ASC
 `
 
 const userCredentialsCreateQueryFmtstr = `
--- source: internal/database/user_credentials.go:Create
 INSERT INTO
 	user_credentials (
 		domain,
@@ -441,11 +438,13 @@ INSERT INTO
 		external_service_id,
 		credential,
 		encryption_key_id,
+	    github_app_id,
 		created_at,
 		updated_at,
 		ssh_migration_applied
 	)
 	VALUES (
+		%s,
 		%s,
 		%s,
 		%s,
@@ -460,7 +459,6 @@ INSERT INTO
 `
 
 const userCredentialsUpdateQueryFmtstr = `
--- source: internal/database/user_credentials.go:Update
 UPDATE user_credentials
 SET
 	domain = %s,
@@ -469,6 +467,7 @@ SET
 	external_service_id = %s,
 	credential = %s,
 	encryption_key_id = %s,
+	github_app_id = %s,
 	updated_at = %s,
 	ssh_migration_applied = %s
 WHERE
@@ -482,9 +481,7 @@ RETURNING %s
 //
 // s is inspired by the BatchChange scanner type, but also matches sql.Row, which
 // is generally used directly in this module.
-func scanUserCredential(cred *UserCredential, key encryption.Key, s interface {
-	Scan(...any) error
-}) error {
+func scanUserCredential(cred *UserCredential, key encryption.Key, s dbutil.Scanner) error {
 	var (
 		credential []byte
 		keyID      string
@@ -498,6 +495,7 @@ func scanUserCredential(cred *UserCredential, key encryption.Key, s interface {
 		&cred.ExternalServiceID,
 		&credential,
 		&keyID,
+		&dbutil.NullInt{N: &cred.GitHubAppID},
 		&cred.CreatedAt,
 		&cred.UpdatedAt,
 		&cred.SSHMigrationApplied,
@@ -532,10 +530,10 @@ func userCredentialsAuthzScope(ctx context.Context, db DB, scope UserCredentialS
 	return nil
 }
 
-func userCredentialsAuthzQueryConds(ctx context.Context) (*sqlf.Query, error) {
+func userCredentialsAuthzQueryConds(ctx context.Context) *sqlf.Query {
 	a := actor.FromContext(ctx)
 	if a.IsInternal() {
-		return sqlf.Sprintf("(TRUE)"), nil
+		return sqlf.Sprintf("(TRUE)")
 	}
 
 	return sqlf.Sprintf(
@@ -543,7 +541,7 @@ func userCredentialsAuthzQueryConds(ctx context.Context) (*sqlf.Query, error) {
 		a.UID,
 		!conf.Get().AuthzEnforceForSiteAdmins,
 		a.UID,
-	), nil
+	)
 }
 
 const userCredentialsAuthzQueryCondsFmtstr = `

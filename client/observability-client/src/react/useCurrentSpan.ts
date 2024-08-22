@@ -1,6 +1,6 @@
 import { useContext } from 'react'
 
-import { trace, Span } from '@opentelemetry/api'
+import { trace, type Span } from '@opentelemetry/api'
 
 import { IS_OPEN_TELEMETRY_TRACING_ENABLED, noopSpan } from '../constants'
 
@@ -15,7 +15,7 @@ interface UseCurrentSpanResult {
  * Returns `noopSpan` if OpenTelemetry tracing is disabled.
  */
 let useCurrentSpan = (): UseCurrentSpanResult => {
-    const span = trace.getSpan(useContext(TraceContext).context)
+    const span = trace.getSpan(useContext(TraceContext).current.context)
 
     return {
         span,

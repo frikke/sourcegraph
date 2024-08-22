@@ -1,10 +1,9 @@
 import React, { useCallback } from 'react'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { Button, Modal, Text } from '@sourcegraph/wildcard'
+import { Button, Modal, Text, ErrorAlert } from '@sourcegraph/wildcard'
 
 import { LoaderButton } from '../../../components/LoaderButton'
-import { BatchChangesCodeHostFields, BatchChangesCredentialFields } from '../../../graphql-operations'
+import type { BatchChangesCodeHostFields, BatchChangesCredentialFields } from '../../../graphql-operations'
 
 import { useDeleteBatchChangesCredential } from './backend'
 import { CodeHostSshPublicKey } from './CodeHostSshPublicKey'

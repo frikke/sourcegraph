@@ -1,17 +1,19 @@
-import { MockedResponse } from '@apollo/client/testing'
-import { cleanup, fireEvent } from '@testing-library/react'
+import type { MockedResponse } from '@apollo/client/testing'
+import { act, cleanup, fireEvent, within } from '@testing-library/react'
+import delay from 'delay'
 import { escapeRegExp } from 'lodash'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { getDocumentNode } from '@sourcegraph/http-client'
 import { SymbolKind } from '@sourcegraph/shared/src/graphql-operations'
-import { renderWithBrandedContext, RenderWithBrandedContextResult } from '@sourcegraph/shared/src/testing'
 import { MockedTestProvider, waitForNextApolloResponse } from '@sourcegraph/shared/src/testing/apollo'
+import { type RenderWithBrandedContextResult, renderWithBrandedContext } from '@sourcegraph/wildcard/src/testing'
 
-import { SymbolsResult } from '../graphql-operations'
+import type { SymbolsResult } from '../graphql-operations'
 
 import {
     RepoRevisionSidebarSymbols,
-    RepoRevisionSidebarSymbolsProps,
+    type RepoRevisionSidebarSymbolsProps,
     SYMBOLS_QUERY,
 } from './RepoRevisionSidebarSymbols'
 
@@ -27,49 +29,79 @@ const sidebarProps: RepoRevisionSidebarSymbolsProps = {
     onHandleSymbolClick: () => {},
 }
 
-const symbolsMock: MockedResponse<SymbolsResult> = {
-    request: {
-        query: getDocumentNode(SYMBOLS_QUERY),
-        variables: {
-            query: '',
-            first: 100,
-            repo: sidebarProps.repoID,
-            revision: sidebarProps.revision,
-            includePatterns: ['^' + escapeRegExp(sidebarProps.activePath)],
+const symbolsMocks: MockedResponse<SymbolsResult>[] = [
+    {
+        request: {
+            query: getDocumentNode(SYMBOLS_QUERY),
+            variables: {
+                query: '',
+                first: 100,
+                repo: sidebarProps.repoID,
+                revision: sidebarProps.revision,
+                includePatterns: ['^' + escapeRegExp(sidebarProps.activePath)],
+            },
         },
-    },
-    result: {
-        data: {
-            node: {
-                __typename: 'Repository',
-                commit: {
-                    symbols: {
-                        __typename: 'SymbolConnection',
-                        nodes: [
-                            {
-                                __typename: 'Symbol',
-                                kind: SymbolKind.CONSTANT,
-                                language: 'TypeScript',
-                                name: 'firstSymbol',
-                                url: `${location.pathname}?L13:14`,
-                                containerName: null,
-                                location: {
-                                    resource: {
-                                        path: 'src/index.js',
+        result: {
+            data: {
+                node: {
+                    __typename: 'Repository',
+                    commit: {
+                        symbols: {
+                            __typename: 'SymbolConnection',
+                            nodes: [
+                                {
+                                    __typename: 'Symbol',
+                                    kind: SymbolKind.CONSTANT,
+                                    language: 'TypeScript',
+                                    name: 'firstSymbol',
+                                    url: `${location.pathname}?L13:14`,
+                                    containerName: null,
+                                    location: {
+                                        resource: {
+                                            path: 'src/index.js',
+                                        },
+                                        range: null,
                                     },
-                                    range: null,
                                 },
+                            ],
+                            pageInfo: {
+                                hasNextPage: false,
                             },
-                        ],
-                        pageInfo: {
-                            hasNextPage: false,
                         },
                     },
                 },
             },
         },
     },
-}
+    {
+        request: {
+            query: getDocumentNode(SYMBOLS_QUERY),
+            variables: {
+                query: 'some query',
+                first: 100,
+                repo: sidebarProps.repoID,
+                revision: sidebarProps.revision,
+                includePatterns: ['^' + escapeRegExp(sidebarProps.activePath)],
+            },
+        },
+        result: {
+            data: {
+                node: {
+                    __typename: 'Repository',
+                    commit: {
+                        symbols: {
+                            __typename: 'SymbolConnection',
+                            nodes: [],
+                            pageInfo: {
+                                hasNextPage: false,
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+]
 
 describe('RepoRevisionSidebarSymbols', () => {
     let renderResult: RenderWithBrandedContextResult
@@ -77,7 +109,7 @@ describe('RepoRevisionSidebarSymbols', () => {
 
     beforeEach(async () => {
         renderResult = renderWithBrandedContext(
-            <MockedTestProvider mocks={[symbolsMock]} addTypename={true}>
+            <MockedTestProvider mocks={symbolsMocks} addTypename={true}>
                 <RepoRevisionSidebarSymbols {...sidebarProps} />
             </MockedTestProvider>,
             { route }
@@ -106,16 +138,29 @@ describe('RepoRevisionSidebarSymbols', () => {
         expect(symbol).toBeVisible()
     })
 
-    it('renders summary correctly', () => {
-        expect(renderResult.getByText('1 symbol total')).toBeVisible()
+    it('renders no-query-matches correctly', async () => {
+        const searchInput = within(renderResult.container).getByRole('searchbox')
+        fireEvent.change(searchInput, { target: { value: 'some query' } })
+
+        await waitForInputDebounce()
+        await waitForNextApolloResponse()
+
+        expect(renderResult.getByTestId('summary')).toHaveTextContent('No symbols matching some query')
     })
 
-    it('clicking symbol updates route', () => {
-        expect(renderResult.history.location.search).toEqual('')
+    it('clicking symbol updates route', async () => {
+        expect(renderResult.locationRef.current?.search).toEqual('')
 
         const symbol = renderResult.getByText('firstSymbol')
         fireEvent.click(symbol)
 
-        expect(renderResult.history.location.search).toEqual('?L13:14')
+        // We need to synchronously flush inside the event handler and since this is warning in
+        // React 18, we've moved it to a setTimeout. This test needs to wait for this timeout to be
+        // flushed
+        await delay(0)
+
+        expect(renderResult.locationRef.current?.search).toEqual('?L13:14')
     })
 })
+
+const waitForInputDebounce = () => act(() => new Promise(resolve => setTimeout(resolve, 200)))

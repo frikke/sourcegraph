@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/inconshreveable/log15"
+	"github.com/inconshreveable/log15" //nolint:logging // TODO move all logging to sourcegraph/log
 
 	"github.com/sourcegraph/sourcegraph/internal/diskcache"
 	"github.com/sourcegraph/sourcegraph/internal/goroutine"
@@ -30,11 +30,17 @@ var (
 )
 
 func NewCacheEvicter(interval time.Duration, cache diskcache.Store, maxCacheSizeBytes int64, metrics *Metrics) goroutine.BackgroundRoutine {
-	return goroutine.NewPeriodicGoroutine(context.Background(), interval, &cacheEvicter{
-		cache:             cache,
-		maxCacheSizeBytes: maxCacheSizeBytes,
-		metrics:           metrics,
-	})
+	return goroutine.NewPeriodicGoroutine(
+		context.Background(),
+		&cacheEvicter{
+			cache:             cache,
+			maxCacheSizeBytes: maxCacheSizeBytes,
+			metrics:           metrics,
+		},
+		goroutine.WithName("codeintel.symbols-cache-evictor"),
+		goroutine.WithDescription("evicts entries from the symbols cache"),
+		goroutine.WithInterval(interval),
+	)
 }
 
 // Handle periodically checks the size of the cache and evicts/deletes items.

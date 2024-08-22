@@ -1,0 +1,11 @@
+{
+  "extends": ["../../.stylelintrc.json"],
+  "overrides": [
+    {
+      "files": ["src/**/*.scss"],
+      "rules": {
+        "@sourcegraph/filenames-match-regex": null
+      }
+    }
+  ]
+}

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"sync"
 
-	gh "github.com/google/go-github/v43/github"
+	gh "github.com/google/go-github/v55/github"
 	"github.com/gorilla/mux"
 	"github.com/sourcegraph/log"
 
@@ -38,10 +38,10 @@ type handler struct {
 
 func NewHandler(logger log.Logger) http.Handler {
 	ctx := context.Background()
-	logger = logger.Scoped("srcclicache", "src-cli release cache")
+	logger = logger.Scoped("srcclicache")
 
 	handler := &handler{
-		logger: logger.Scoped("handler", "src-cli release cache HTTP handler"),
+		logger: logger.Scoped("handler"),
 	}
 
 	// We'll build all the state up in a conf watcher, since the behaviour of
@@ -58,7 +58,10 @@ func NewHandler(logger log.Logger) http.Handler {
 
 		// If we already have an updater goroutine running, we need to stop it.
 		if handler.updater != nil {
-			handler.updater.Stop()
+			err := handler.updater.Stop(ctx)
+			if err != nil {
+				logger.Error("failed to stop updater routine", log.Error(err))
+			}
 			handler.updater = nil
 		}
 
@@ -71,8 +74,19 @@ func NewHandler(logger log.Logger) http.Handler {
 
 		// Otherwise, let's build a new release cache and start a fresh updater.
 		rc := config.NewReleaseCache(logger)
-		handler.updater = goroutine.NewPeriodicGoroutine(ctx, config.interval, rc)
-		go goroutine.MonitorBackgroundRoutines(ctx, handler.updater)
+		handler.updater = goroutine.NewPeriodicGoroutine(
+			ctx,
+			rc,
+			goroutine.WithName("srccli.github-release-cache"),
+			goroutine.WithDescription("caches src-cli versions polled periodically"),
+			goroutine.WithInterval(config.interval),
+		)
+		go func() {
+			err := goroutine.MonitorBackgroundRoutines(ctx, handler.updater)
+			if err != nil {
+				logger.Error("error monitoring updater routine", log.Error(err))
+			}
+		}()
 
 		handler.rc = rc
 		handler.webhookSecret = config.webhookSecret
@@ -129,7 +143,7 @@ func (h *handler) handleBranch(w http.ResponseWriter, branch string) {
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Write(raw)
+	_, _ = w.Write(raw)
 }
 
 func (h *handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +153,7 @@ func (h *handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 type signatureValidator func(signature string, payload []byte, secret []byte) error
 
 func (h *handler) doHandleWebhook(w http.ResponseWriter, r *http.Request, signatureValidator signatureValidator) {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	payload, err := io.ReadAll(r.Body)
 	if err != nil {
 		h.logger.Warn("error reading payload", log.Error(err))

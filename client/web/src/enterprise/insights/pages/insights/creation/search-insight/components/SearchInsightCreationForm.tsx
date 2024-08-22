@@ -1,32 +1,28 @@
-import { FC, FormEventHandler, ReactNode } from 'react'
+import type { FC, FormEventHandler, ReactNode, FormHTMLAttributes } from 'react'
 
-import { Checkbox, Input, Link } from '@sourcegraph/wildcard'
+import { Input, FormGroup, getDefaultInputProps, type useFieldAPI, type SubmissionErrors } from '@sourcegraph/wildcard'
 
 import {
     FormSeries,
     CodeInsightDashboardsVisibility,
     CodeInsightTimeStepPicker,
-    RepositoriesField,
-    FormGroup,
-    getDefaultInputProps,
-    useFieldAPI,
-    SubmissionErrors,
+    RepoSettingSection,
 } from '../../../../../components'
 import { useUiFeatures } from '../../../../../hooks'
-import { CreateInsightFormFields } from '../types'
+import type { CreateInsightFormFields } from '../types'
 
-interface CreationSearchInsightFormProps {
+interface CreationSearchInsightFormProps extends Omit<FormHTMLAttributes<HTMLFormElement>, 'title' | 'children'> {
     handleSubmit: FormEventHandler
     submitErrors: SubmissionErrors
     submitting: boolean
     submitted: boolean
-    className?: string
     isFormClearActive: boolean
     dashboardReferenceCount?: number
 
     title: useFieldAPI<CreateInsightFormFields['title']>
     repositories: useFieldAPI<CreateInsightFormFields['repositories']>
-    allReposMode: useFieldAPI<CreateInsightFormFields['allRepos']>
+    repoQuery: useFieldAPI<CreateInsightFormFields['repoQuery']>
+    repoMode: useFieldAPI<CreateInsightFormFields['repoMode']>
 
     series: useFieldAPI<CreateInsightFormFields['series']>
     step: useFieldAPI<CreateInsightFormFields['step']>
@@ -54,63 +50,26 @@ export const SearchInsightCreationForm: FC<CreationSearchInsightFormProps> = pro
         submitted,
         title,
         repositories,
-        allReposMode,
+        repoQuery,
+        repoMode,
         series,
         stepValue,
         step,
-        className,
         isFormClearActive,
         dashboardReferenceCount,
         children,
         onFormReset,
+        ...attributes
     } = props
 
     const { licensed } = useUiFeatures()
 
     return (
         // eslint-disable-next-line react/forbid-elements
-        <form noValidate={true} onSubmit={handleSubmit} onReset={onFormReset} className={className}>
-            <FormGroup
-                name="insight repositories"
-                title="Targeted repositories"
-                subtitle="Create a list of repositories to run your search over"
-            >
-                <Input
-                    as={RepositoriesField}
-                    autoFocus={true}
-                    required={true}
-                    label="Repositories"
-                    message="Separate repositories with commas"
-                    placeholder={
-                        allReposMode.input.value ? 'All repositories' : 'Example: github.com/sourcegraph/sourcegraph'
-                    }
-                    className="mb-0 d-flex flex-column"
-                    {...getDefaultInputProps(repositories)}
-                />
+        <form {...attributes} noValidate={true} onSubmit={handleSubmit} onReset={onFormReset}>
+            <RepoSettingSection repositories={repositories} repoQuery={repoQuery} repoMode={repoMode} />
 
-                <Checkbox
-                    {...allReposMode.input}
-                    type="checkbox"
-                    id="RunInsightsOnAllRepoCheck"
-                    wrapperClassName="mb-1 mt-3 font-weight-normal"
-                    value="all-repos-mode"
-                    checked={allReposMode.input.value}
-                    label="Run your insight over all your repositories"
-                />
-
-                <small className="w-100 mt-2 text-muted">
-                    This feature is actively in development. Read about the{' '}
-                    <Link
-                        to="/help/code_insights/explanations/current_limitations_of_code_insights"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                    >
-                        limitations here.
-                    </Link>
-                </small>
-
-                <hr className="my-4 w-100" />
-            </FormGroup>
+            <hr aria-hidden={true} className="my-4 w-100" />
 
             <FormGroup
                 name="data series group"
@@ -118,17 +77,19 @@ export const SearchInsightCreationForm: FC<CreationSearchInsightFormProps> = pro
                 subtitle={
                     licensed ? 'Add any number of data series to your chart' : 'Add up to 10 data series to your chart'
                 }
-                error={series.meta.touched && series.meta.error}
+                error={(series.meta.touched && series.meta.error) || undefined}
                 innerRef={series.input.ref}
             >
                 <FormSeries
                     seriesField={series}
+                    // Set repo query to preview only when search query mode is activated
+                    repoQuery={repoMode.input.value === 'search-query' ? repoQuery.input.value.query : null}
                     repositories={repositories.input.value}
                     showValidationErrorsOnMount={submitted}
                 />
             </FormGroup>
 
-            <hr className="my-4 w-100" />
+            <hr aria-hidden={true} className="my-4 w-100" />
 
             <FormGroup name="chart settings group" title="Chart settings">
                 <Input
@@ -143,11 +104,11 @@ export const SearchInsightCreationForm: FC<CreationSearchInsightFormProps> = pro
                 <CodeInsightTimeStepPicker
                     {...stepValue.input}
                     valid={stepValue.meta.touched && stepValue.meta.validState === 'VALID'}
-                    error={stepValue.meta.touched && stepValue.meta.error}
+                    error={(stepValue.meta.touched && stepValue.meta.error) || undefined}
                     errorInputState={stepValue.meta.touched && stepValue.meta.validState === 'INVALID'}
                     stepType={step.input.value}
                     onStepTypeChange={step.input.onChange}
-                    numberOfPoints={allReposMode.input.value ? 12 : 7}
+                    numberOfPoints={12}
                 />
             </FormGroup>
 
@@ -155,7 +116,7 @@ export const SearchInsightCreationForm: FC<CreationSearchInsightFormProps> = pro
                 <CodeInsightDashboardsVisibility className="mt-5 mb-n1" dashboardCount={dashboardReferenceCount} />
             )}
 
-            <hr className="my-4 w-100" />
+            <hr aria-hidden={true} className="my-4 w-100" />
 
             {children({ submitting, submitErrors, isFormClearActive })}
         </form>

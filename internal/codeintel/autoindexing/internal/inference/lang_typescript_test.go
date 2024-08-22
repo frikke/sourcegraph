@@ -2,71 +2,27 @@ package inference
 
 import (
 	"testing"
-
-	"github.com/sourcegraph/sourcegraph/lib/codeintel/autoindex/config"
 )
 
 func TestTypeScriptGenerator(t *testing.T) {
 	testGenerators(t,
 		generatorTestCase{
-			description: "javascript project with no tsconfig",
+			description: "javascript project with no tsconfig 1",
 			repositoryContents: map[string]string{
 				"package.json": "",
-			},
-			expected: []config.IndexJob{
-				{
-					Steps: []config.DockerStep{
-						{
-							Root:     "",
-							Image:    "sourcegraph/scip-typescript:autoindex",
-							Commands: []string{"npm install --ignore-scripts"},
-						},
-					},
-					LocalSteps:  nil,
-					Root:        "",
-					Indexer:     "sourcegraph/scip-typescript:autoindex",
-					IndexerArgs: []string{"scip-typescript", "index", "--infer-tsconfig"},
-					Outfile:     "index.scip",
-				},
 			},
 		},
 		generatorTestCase{
-			description: "javascript project with no tsconfig",
+			description: "javascript project with no tsconfig 2",
 			repositoryContents: map[string]string{
 				"package.json": "",
 				"yarn.lock":    "",
-			},
-			expected: []config.IndexJob{
-				{
-					Steps: []config.DockerStep{
-						{
-							Root:     "",
-							Image:    "sourcegraph/scip-typescript:autoindex",
-							Commands: []string{"yarn --ignore-engines --ignore-scripts"},
-						},
-					},
-					LocalSteps:  nil,
-					Root:        "",
-					Indexer:     "sourcegraph/scip-typescript:autoindex",
-					IndexerArgs: []string{"scip-typescript", "index", "--infer-tsconfig"},
-					Outfile:     "index.scip",
-				},
 			},
 		},
 		generatorTestCase{
 			description: "simple tsconfig",
 			repositoryContents: map[string]string{
 				"tsconfig.json": "",
-			},
-			expected: []config.IndexJob{
-				{
-					Steps:       nil,
-					LocalSteps:  nil,
-					Root:        "",
-					Indexer:     "sourcegraph/scip-typescript:autoindex",
-					IndexerArgs: []string{"scip-typescript", "index"},
-					Outfile:     "index.scip",
-				},
 			},
 		},
 		generatorTestCase{
@@ -75,32 +31,6 @@ func TestTypeScriptGenerator(t *testing.T) {
 				"a/tsconfig.json": "",
 				"b/tsconfig.json": "",
 				"c/tsconfig.json": "",
-			},
-			expected: []config.IndexJob{
-				{
-					Steps:       nil,
-					LocalSteps:  nil,
-					Root:        "a",
-					Indexer:     "sourcegraph/scip-typescript:autoindex",
-					IndexerArgs: []string{"scip-typescript", "index"},
-					Outfile:     "index.scip",
-				},
-				{
-					Steps:       nil,
-					LocalSteps:  nil,
-					Root:        "b",
-					Indexer:     "sourcegraph/scip-typescript:autoindex",
-					IndexerArgs: []string{"scip-typescript", "index"},
-					Outfile:     "index.scip",
-				},
-				{
-					Steps:       nil,
-					LocalSteps:  nil,
-					Root:        "c",
-					Indexer:     "sourcegraph/scip-typescript:autoindex",
-					IndexerArgs: []string{"scip-typescript", "index"},
-					Outfile:     "index.scip",
-				},
 			},
 		},
 		generatorTestCase{
@@ -115,79 +45,6 @@ func TestTypeScriptGenerator(t *testing.T) {
 				"foo/bar/bonk/package.json":  "",
 				"foo/baz/tsconfig.json":      "",
 			},
-			expected: []config.IndexJob{
-				{
-					Steps: []config.DockerStep{
-						{
-							Root:     "",
-							Image:    "sourcegraph/scip-typescript:autoindex",
-							Commands: []string{"npm install"},
-						},
-					},
-					LocalSteps:  nil,
-					Root:        "",
-					Indexer:     "sourcegraph/scip-typescript:autoindex",
-					IndexerArgs: []string{"scip-typescript", "index"},
-					Outfile:     "index.scip",
-				},
-				{
-					Steps: []config.DockerStep{
-						{
-							Root:     "",
-							Image:    "sourcegraph/scip-typescript:autoindex",
-							Commands: []string{"npm install"},
-						},
-						{
-							Root:     "foo/bar",
-							Image:    "sourcegraph/scip-typescript:autoindex",
-							Commands: []string{"yarn --ignore-engines"},
-						},
-					},
-					LocalSteps:  nil,
-					Root:        "foo/bar/baz",
-					Indexer:     "sourcegraph/scip-typescript:autoindex",
-					IndexerArgs: []string{"scip-typescript", "index"},
-					Outfile:     "index.scip",
-				},
-				{
-					Steps: []config.DockerStep{
-						{
-							Root:     "",
-							Image:    "sourcegraph/scip-typescript:autoindex",
-							Commands: []string{"npm install"},
-						},
-						{
-							Root:     "foo/bar",
-							Image:    "sourcegraph/scip-typescript:autoindex",
-							Commands: []string{"yarn --ignore-engines"},
-						},
-						{
-							Root:     "foo/bar/bonk",
-							Image:    "sourcegraph/scip-typescript:autoindex",
-							Commands: []string{"npm install"},
-						},
-					},
-					LocalSteps:  nil,
-					Root:        "foo/bar/bonk",
-					Indexer:     "sourcegraph/scip-typescript:autoindex",
-					IndexerArgs: []string{"scip-typescript", "index"},
-					Outfile:     "index.scip",
-				},
-				{
-					Steps: []config.DockerStep{
-						{
-							Root:     "",
-							Image:    "sourcegraph/scip-typescript:autoindex",
-							Commands: []string{"npm install"},
-						},
-					},
-					LocalSteps:  nil,
-					Root:        "foo/baz",
-					Indexer:     "sourcegraph/scip-typescript:autoindex",
-					IndexerArgs: []string{"scip-typescript", "index"},
-					Outfile:     "index.scip",
-				},
-			},
 		},
 		generatorTestCase{
 			description: "typescript with lerna configuration",
@@ -196,22 +53,6 @@ func TestTypeScriptGenerator(t *testing.T) {
 				"lerna.json":    `{"npmClient": "yarn"}`,
 				"tsconfig.json": "",
 			},
-			expected: []config.IndexJob{
-				{
-					Steps: []config.DockerStep{
-						{
-							Root:     "",
-							Image:    "sourcegraph/scip-typescript:autoindex",
-							Commands: []string{"yarn --ignore-engines"},
-						},
-					},
-					LocalSteps:  nil,
-					Root:        "",
-					Indexer:     "sourcegraph/scip-typescript:autoindex",
-					IndexerArgs: []string{"scip-typescript", "index"},
-					Outfile:     "index.scip",
-				},
-			},
 		},
 		generatorTestCase{
 			description: "typescript with node version",
@@ -219,22 +60,6 @@ func TestTypeScriptGenerator(t *testing.T) {
 				"package.json":  `{"engines": {"node": "42"}}`,
 				"tsconfig.json": "",
 				".nvmrc":        "",
-			},
-			expected: []config.IndexJob{
-				{
-					Steps: []config.DockerStep{
-						{
-							Root:     "",
-							Image:    "sourcegraph/scip-typescript:autoindex",
-							Commands: []string{"N_NODE_MIRROR=https://unofficial-builds.nodejs.org/download/release n --arch x64-musl auto", "npm install"},
-						},
-					},
-					LocalSteps:  []string{"N_NODE_MIRROR=https://unofficial-builds.nodejs.org/download/release n --arch x64-musl auto"},
-					Root:        "",
-					Indexer:     "sourcegraph/scip-typescript:autoindex",
-					IndexerArgs: []string{"scip-typescript", "index"},
-					Outfile:     "index.scip",
-				},
 			},
 		},
 	)

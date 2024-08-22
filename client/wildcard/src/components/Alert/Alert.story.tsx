@@ -1,21 +1,18 @@
 import React from 'react'
 
 import { action } from '@storybook/addon-actions'
-import { Story, Meta } from '@storybook/react'
+import type { StoryFn, Meta } from '@storybook/react'
 import classNames from 'classnames'
 import { flow } from 'lodash'
 
-import { BrandedStory } from '@sourcegraph/branded/src/components/BrandedStory'
-import webStyles from '@sourcegraph/web/src/SourcegraphWebApp.scss'
-
-import 'storybook-addon-designs'
+import '@storybook/addon-designs'
 
 import { H1, H4, Text } from '..'
-
-import { Alert } from './Alert'
-import { ALERT_VARIANTS } from './constants'
+import { BrandedStory } from '../../stories/BrandedStory'
 
 import { AlertLink } from '.'
+import { Alert } from './Alert'
+import { ALERT_VARIANTS } from './constants'
 
 const preventDefault = <E extends React.SyntheticEvent>(event: E): E => {
     event.preventDefault()
@@ -24,29 +21,20 @@ const preventDefault = <E extends React.SyntheticEvent>(event: E): E => {
 
 const config: Meta = {
     title: 'wildcard/Alert',
-    decorators: [
-        story => (
-            <BrandedStory styles={webStyles}>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>
-        ),
-    ],
+    decorators: [story => <BrandedStory>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>],
     parameters: {
         component: Alert,
-        chromatic: {
-            enableDarkMode: true,
-            disableSnapshot: false,
-        },
+
         design: [
             {
                 type: 'figma',
                 name: 'Figma Light',
-                url:
-                    'https://www.figma.com/file/NIsN34NH7lPu04olBzddTw/Design-Refresh-Systemization-source-of-truth?node-id=1563%3A196',
+                url: 'https://www.figma.com/file/NIsN34NH7lPu04olBzddTw/Design-Refresh-Systemization-source-of-truth?node-id=1563%3A196',
             },
             {
                 type: 'figma',
                 name: 'Figma Dark',
-                url:
-                    'https://www.figma.com/file/NIsN34NH7lPu04olBzddTw/Design-Refresh-Systemization-source-of-truth?node-id=1563%3A525',
+                url: 'https://www.figma.com/file/NIsN34NH7lPu04olBzddTw/Design-Refresh-Systemization-source-of-truth?node-id=1563%3A525',
             },
         ],
     },
@@ -54,7 +42,7 @@ const config: Meta = {
 
 export default config
 
-export const Alerts: Story = () => (
+export const Alerts: StoryFn = () => (
     <>
         <H1>Alerts</H1>
         <Text>
@@ -69,6 +57,16 @@ export const Alerts: Story = () => (
                 </Alert>
             ))}
             <Alert variant="info" className="d-flex align-items-center">
+                <div className="flex-grow-1">
+                    <H4>Too many matching repositories</H4>
+                    Use a 'repo:' filter to narrow your search.
+                </div>
+                <AlertLink className="mr-2" to="/" onClick={flow(preventDefault, action(classNames('link clicked')))}>
+                    Dismiss
+                </AlertLink>
+            </Alert>
+
+            <Alert variant="secondary" withIcon={false} className="d-flex align-items-center">
                 <div className="flex-grow-1">
                     <H4>Too many matching repositories</H4>
                     Use a 'repo:' filter to narrow your search.

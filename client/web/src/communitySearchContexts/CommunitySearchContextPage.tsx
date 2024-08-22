@@ -1,71 +1,72 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { mdiSourceRepositoryMultiple, mdiGithub, mdiGitlab, mdiBitbucket } from '@mdi/js'
 import classNames from 'classnames'
-import * as H from 'history'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { catchError, startWith } from 'rxjs/operators'
 
+import { SyntaxHighlightedSearchQuery } from '@sourcegraph/branded'
 import { asError, isErrorLike } from '@sourcegraph/common'
-import { QueryState, SearchContextInputProps, SearchContextProps } from '@sourcegraph/search'
-import { SyntaxHighlightedSearchQuery } from '@sourcegraph/search-ui'
-import { ActivationProps } from '@sourcegraph/shared/src/components/activation/Activation'
 import { displayRepoName } from '@sourcegraph/shared/src/components/RepoLink'
-import { ExtensionsControllerProps } from '@sourcegraph/shared/src/extensions/controller'
-import { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
-import { SettingsCascadeProps, Settings } from '@sourcegraph/shared/src/settings/settings'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
+import type { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
+import type { QueryState, SearchContextInputProps, SearchContextProps } from '@sourcegraph/shared/src/search'
+import type { SettingsCascadeProps, Settings } from '@sourcegraph/shared/src/settings/settings'
 import { Button, useObservable, Link, Card, Icon, Code, H2, H3, Text } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../auth'
+import type { AuthenticatedUser } from '../auth'
 import { PageTitle } from '../components/PageTitle'
-import { SearchPatternType } from '../graphql-operations'
+import type { SearchPatternType } from '../graphql-operations'
 import { submitSearch } from '../search/helpers'
-import { SearchPageInput } from '../search/home/SearchPageInput'
 import { useNavbarQueryState } from '../stores'
-import { ThemePreferenceProps } from '../theme'
-import { eventLogger } from '../tracking/eventLogger'
+import { SearchPageInput } from '../storm/pages/SearchPage/SearchPageInput'
 
-import { CommunitySearchContextMetadata } from './types'
+import type { CommunitySearchContextMetadata, CommunitySearchContextSpecs } from './types'
 
 import styles from './CommunitySearchContextPage.module.scss'
 
+// Unique number identifier for telemetry
+const specTypes: { [k in CommunitySearchContextSpecs]: number } = {
+    backstage: 0,
+    chakraui: 1,
+    cncf: 2,
+    temporalio: 3,
+    o3de: 4,
+    stackstorm: 5,
+    kubernetes: 6,
+    stanford: 7,
+    julia: 8,
+}
+
 export interface CommunitySearchContextPageProps
     extends SettingsCascadeProps<Settings>,
-        ThemeProps,
-        ThemePreferenceProps,
-        ActivationProps,
-        TelemetryProps,
-        ExtensionsControllerProps<'executeCommand'>,
-        PlatformContextProps<'settings' | 'sourcegraphURL' | 'requestGraphQL'>,
+        PlatformContextProps<'settings' | 'sourcegraphURL' | 'requestGraphQL' | 'telemetryRecorder'>,
         SearchContextInputProps,
         Pick<SearchContextProps, 'fetchSearchContextBySpec'> {
     authenticatedUser: AuthenticatedUser | null
-    location: H.Location
-    history: H.History
     isSourcegraphDotCom: boolean
 
     // CommunitySearchContext page metadata
     communitySearchContextMetadata: CommunitySearchContextMetadata
-
-    /** Whether globbing is enabled for filters. */
-    globbing: boolean
 }
 
 export const CommunitySearchContextPage: React.FunctionComponent<
     React.PropsWithChildren<CommunitySearchContextPageProps>
 > = (props: CommunitySearchContextPageProps) => {
+    const location = useLocation()
+    const navigate = useNavigate()
     const LOADING = 'loading' as const
 
     const [queryState, setQueryState] = useState<QueryState>({
         query: '',
     })
 
-    useEffect(
-        () =>
-            props.telemetryService.logViewEvent(`CommunitySearchContext:${props.communitySearchContextMetadata.spec}`),
-        [props.communitySearchContextMetadata.spec, props.telemetryService]
-    )
+    const telemetryRecorder = props.platformContext.telemetryRecorder
+
+    useEffect(() => {
+        telemetryRecorder.recordEvent('communitySearchContext', 'view', {
+            metadata: { spec: specTypes[props.communitySearchContextMetadata.spec] },
+        })
+    }, [props.communitySearchContextMetadata.spec, telemetryRecorder])
     const caseSensitive = useNavbarQueryState(state => state.searchCaseSensitivity)
 
     const contextQuery = `context:${props.communitySearchContextMetadata.spec}`
@@ -82,13 +83,33 @@ export const CommunitySearchContextPage: React.FunctionComponent<
         )
     )
 
-    const onSubmitExample = (query: string, patternType: SearchPatternType) => (
-        event?: React.MouseEvent<HTMLButtonElement>
-    ): void => {
-        eventLogger.log('CommunitySearchContextSuggestionClicked')
-        event?.preventDefault()
-        submitSearch({ ...props, query, caseSensitive, patternType, source: 'communitySearchContextPage' })
-    }
+    const { selectedSearchContextSpec } = props
+    const onSubmitExample = useCallback(
+        (query: string, patternType: SearchPatternType) =>
+            (event?: React.MouseEvent<HTMLButtonElement>): void => {
+                telemetryRecorder.recordEvent('communitySearchContext.suggestion', 'click')
+                event?.preventDefault()
+                submitSearch({
+                    historyOrNavigate: navigate,
+                    location,
+                    query,
+                    caseSensitive,
+                    patternType,
+                    selectedSearchContextSpec,
+                    source: 'communitySearchContextPage',
+                    telemetryRecorder,
+                })
+            },
+        [telemetryRecorder, caseSensitive, location, navigate, selectedSearchContextSpec]
+    )
+
+    const onRepoLinkClicked = useCallback(() => {
+        telemetryRecorder.recordEvent('communitySearchContext.repoLink', 'click')
+    }, [telemetryRecorder])
+
+    const onExternalRepoLinkClicked = useCallback(() => {
+        telemetryRecorder.recordEvent('communitySearchContext.repoLink.external', 'click')
+    }, [telemetryRecorder])
 
     return (
         <div className={styles.communitySearchContextsPage}>
@@ -114,23 +135,13 @@ export const CommunitySearchContextPage: React.FunctionComponent<
                 )}
             </div>
             <div className={styles.container}>
-                {props.communitySearchContextMetadata.lowProfile ? (
-                    <SearchPageInput
-                        {...props}
-                        queryState={queryState}
-                        setQueryState={setQueryState}
-                        selectedSearchContextSpec={props.communitySearchContextMetadata.spec}
-                        source="communitySearchContextPage"
-                    />
-                ) : (
-                    <SearchPageInput
-                        {...props}
-                        queryState={queryState}
-                        setQueryState={setQueryState}
-                        selectedSearchContextSpec={props.communitySearchContextMetadata.spec}
-                        source="communitySearchContextPage"
-                    />
-                )}
+                <SearchPageInput
+                    {...props}
+                    queryState={queryState}
+                    setQueryState={setQueryState}
+                    hardCodedSearchContextSpec={props.communitySearchContextMetadata.spec}
+                    simpleSearch={false}
+                />
             </div>
             {!props.communitySearchContextMetadata.lowProfile && (
                 <div className="row">
@@ -197,6 +208,8 @@ export const CommunitySearchContextPage: React.FunctionComponent<
                                                         <RepoLink
                                                             key={repo.repository.name}
                                                             repo={repo.repository.name}
+                                                            onRepoLinkClicked={onRepoLinkClicked}
+                                                            onExternalRepoLinkClicked={onExternalRepoLinkClicked}
                                                         />
                                                     ))}
                                             </div>
@@ -207,6 +220,8 @@ export const CommunitySearchContextPage: React.FunctionComponent<
                                                         <RepoLink
                                                             key={repo.repository.name}
                                                             repo={repo.repository.name}
+                                                            onRepoLinkClicked={onRepoLinkClicked}
+                                                            onExternalRepoLinkClicked={onExternalRepoLinkClicked}
                                                         />
                                                     ))}
                                             </div>
@@ -221,37 +236,55 @@ export const CommunitySearchContextPage: React.FunctionComponent<
     )
 }
 
-const RepoLinkClicked = (repoName: string) => (): void =>
-    eventLogger.log('CommunitySearchContextPageRepoLinkClicked', { repo_name: repoName }, { repo_name: repoName })
-
-const RepoLink: React.FunctionComponent<React.PropsWithChildren<{ repo: string }>> = ({ repo }) => (
+const RepoLink: React.FunctionComponent<
+    React.PropsWithChildren<{
+        repo: string
+        onRepoLinkClicked: () => void
+        onExternalRepoLinkClicked: () => void
+    }>
+> = ({ repo, onRepoLinkClicked, onExternalRepoLinkClicked }) => (
     <li className={classNames('list-unstyled mb-3', styles.repoItem)} key={repo}>
         {repo.startsWith('github.com') && (
             <>
-                <Link to={`https://${repo}`} target="_blank" rel="noopener noreferrer" onClick={RepoLinkClicked(repo)}>
+                <Link
+                    to={`https://${repo}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={onExternalRepoLinkClicked}
+                >
                     <Icon className={styles.repoListIcon} aria-hidden={true} svgPath={mdiGithub} />
                 </Link>
-                <Link to={`/${repo}`} className="text-monospace search-filter-keyword">
+                <Link to={`/${repo}`} className="text-monospace search-filter-keyword" onClick={onRepoLinkClicked}>
                     {displayRepoName(repo)}
                 </Link>
             </>
         )}
         {repo.startsWith('gitlab.com') && (
             <>
-                <Link to={`https://${repo}`} target="_blank" rel="noopener noreferrer" onClick={RepoLinkClicked(repo)}>
+                <Link
+                    to={`https://${repo}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={onExternalRepoLinkClicked}
+                >
                     <Icon className={styles.repoListIcon} aria-hidden={true} svgPath={mdiGitlab} />
                 </Link>
-                <Link to={`/${repo}`} className="text-monospace search-filter-keyword">
+                <Link to={`/${repo}`} className="text-monospace search-filter-keyword" onClick={onRepoLinkClicked}>
                     {displayRepoName(repo)}
                 </Link>
             </>
         )}
         {repo.startsWith('bitbucket.org') && (
             <>
-                <Link to={`https://${repo}`} target="_blank" rel="noopener noreferrer" onClick={RepoLinkClicked(repo)}>
+                <Link
+                    to={`https://${repo}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={onExternalRepoLinkClicked}
+                >
                     <Icon className={styles.repoListIcon} aria-hidden={true} svgPath={mdiBitbucket} />
                 </Link>
-                <Link to={`/${repo}`} className="text-monospace search-filter-keyword">
+                <Link to={`/${repo}`} className="text-monospace search-filter-keyword" onClick={onRepoLinkClicked}>
                     {displayRepoName(repo)}
                 </Link>
             </>

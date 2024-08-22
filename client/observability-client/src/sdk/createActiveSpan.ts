@@ -1,9 +1,18 @@
-import { context, trace, Tracer, ROOT_CONTEXT, SpanOptions, Context, Span } from '@opentelemetry/api'
+import {
+    context,
+    trace,
+    type Tracer,
+    ROOT_CONTEXT,
+    type SpanOptions,
+    type Context,
+    type Span,
+    type TimeInput,
+} from '@opentelemetry/api'
 
 export interface ActiveSpanConfig extends SpanOptions {
     name: string
-    startTime?: number
-    endTime?: number
+    startTime?: TimeInput
+    endTime?: TimeInput
     parentSpan?: Span
     context?: Context
 }

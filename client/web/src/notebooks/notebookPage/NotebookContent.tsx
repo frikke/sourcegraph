@@ -1,33 +1,30 @@
 import React, { useMemo } from 'react'
 
 import { noop } from 'lodash'
-import { Observable } from 'rxjs'
+import type { Observable } from 'rxjs'
 
-import { StreamingSearchResultsListProps } from '@sourcegraph/search-ui'
-import { AuthenticatedUser } from '@sourcegraph/shared/src/auth'
-import { ExtensionsControllerProps } from '@sourcegraph/shared/src/extensions/controller'
-import { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
+import type { StreamingSearchResultsListProps } from '@sourcegraph/branded'
+import type { AuthenticatedUser } from '@sourcegraph/shared/src/auth'
+import type { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 
-import { Block, BlockInit } from '..'
-import { NotebookFields } from '../../graphql-operations'
-import { SearchStreamingProps } from '../../search'
-import { CopyNotebookProps } from '../notebook'
+import type { Block, BlockInit } from '..'
+import type { NotebookFields } from '../../graphql-operations'
+import { SearchPatternType } from '../../graphql-operations'
+import type { OwnConfigProps } from '../../own/OwnConfigProps'
+import type { SearchStreamingProps } from '../../search'
+import type { CopyNotebookProps } from '../notebook'
 import { NotebookComponent } from '../notebook/NotebookComponent'
 
 export interface NotebookContentProps
     extends SearchStreamingProps,
-        ThemeProps,
         TelemetryProps,
-        Omit<
-            StreamingSearchResultsListProps,
-            'allExpanded' | 'extensionsController' | 'platformContext' | 'executedQuery'
-        >,
+        TelemetryV2Props,
+        Omit<StreamingSearchResultsListProps, 'allExpanded' | 'platformContext' | 'executedQuery'>,
         PlatformContextProps<'sourcegraphURL' | 'requestGraphQL' | 'urlToFile' | 'settings'>,
-        ExtensionsControllerProps<'extHostAPI' | 'executeCommand'> {
+        OwnConfigProps {
     authenticatedUser: AuthenticatedUser | null
-    globbing: boolean
     viewerCanManage: boolean
     blocks: NotebookFields['blocks']
     exportedFileName: string
@@ -35,6 +32,7 @@ export interface NotebookContentProps
     outlineContainerElement?: HTMLElement | null
     onUpdateBlocks: (blocks: Block[]) => void
     onCopyNotebook: (props: Omit<CopyNotebookProps, 'title'>) => Observable<NotebookFields>
+    patternType: SearchPatternType
 }
 
 export const NotebookContent: React.FunctionComponent<React.PropsWithChildren<NotebookContentProps>> = React.memo(
@@ -44,47 +42,44 @@ export const NotebookContent: React.FunctionComponent<React.PropsWithChildren<No
         exportedFileName,
         onCopyNotebook,
         onUpdateBlocks,
-        globbing,
         streamSearch,
-        isLightTheme,
         telemetryService,
+        telemetryRecorder,
         searchContextsEnabled,
+        ownEnabled,
         isSourcegraphDotCom,
         fetchHighlightedFileLineRanges,
         authenticatedUser,
-        showSearchContext,
         settingsCascade,
         platformContext,
-        extensionsController,
         outlineContainerElement,
         isEmbedded,
+        patternType,
     }) => {
         const initializerBlocks: BlockInit[] = useMemo(
             () =>
                 blocks.map(block => {
                     switch (block.__typename) {
-                        case 'MarkdownBlock':
+                        case 'MarkdownBlock': {
                             return { id: block.id, type: 'md', input: { text: block.markdownInput } }
-                        case 'QueryBlock':
+                        }
+                        case 'QueryBlock': {
                             return { id: block.id, type: 'query', input: { query: block.queryInput } }
-                        case 'FileBlock':
+                        }
+                        case 'FileBlock': {
                             return {
                                 id: block.id,
                                 type: 'file',
                                 input: { ...block.fileInput, revision: block.fileInput.revision ?? '' },
                             }
-                        case 'SymbolBlock':
+                        }
+                        case 'SymbolBlock': {
                             return {
                                 id: block.id,
                                 type: 'symbol',
                                 input: { ...block.symbolInput, revision: block.symbolInput.revision ?? '' },
                             }
-                        case 'ComputeBlock':
-                            return {
-                                id: block.id,
-                                type: 'compute',
-                                input: block.computeInput,
-                            }
+                        }
                     }
                 }),
             [blocks]
@@ -92,18 +87,16 @@ export const NotebookContent: React.FunctionComponent<React.PropsWithChildren<No
 
         return (
             <NotebookComponent
-                globbing={globbing}
                 streamSearch={streamSearch}
-                isLightTheme={isLightTheme}
                 telemetryService={telemetryService}
+                telemetryRecorder={telemetryRecorder}
                 searchContextsEnabled={searchContextsEnabled}
+                ownEnabled={ownEnabled}
                 isSourcegraphDotCom={isSourcegraphDotCom}
                 fetchHighlightedFileLineRanges={fetchHighlightedFileLineRanges}
                 authenticatedUser={authenticatedUser}
-                showSearchContext={showSearchContext}
                 settingsCascade={settingsCascade}
                 platformContext={platformContext}
-                extensionsController={extensionsController}
                 isReadOnly={!viewerCanManage}
                 blocks={initializerBlocks}
                 onSerializeBlocks={viewerCanManage ? onUpdateBlocks : noop}
@@ -111,7 +104,10 @@ export const NotebookContent: React.FunctionComponent<React.PropsWithChildren<No
                 onCopyNotebook={onCopyNotebook}
                 outlineContainerElement={outlineContainerElement}
                 isEmbedded={isEmbedded}
+                patternType={patternType}
             />
         )
     }
 )
+
+NotebookContent.displayName = 'NotebookContent'

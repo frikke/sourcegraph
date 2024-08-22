@@ -8,29 +8,31 @@ import (
 )
 
 type operations struct {
-	// Configurations
-	getConfigurationPolicies      *observation.Operation
-	getConfigurationPolicyByID    *observation.Operation
-	createConfigurationPolicy     *observation.Operation
-	updateConfigurationPolicy     *observation.Operation
-	deleteConfigurationPolicyByID *observation.Operation
-
-	// Repositories
+	repoCount                                   *observation.Operation
+	getConfigurationPolicies                    *observation.Operation
+	getConfigurationPolicyByID                  *observation.Operation
+	createConfigurationPolicy                   *observation.Operation
+	updateConfigurationPolicy                   *observation.Operation
+	deleteConfigurationPolicyByID               *observation.Operation
 	getRepoIDsByGlobPatterns                    *observation.Operation
 	updateReposMatchingPatterns                 *observation.Operation
 	selectPoliciesForRepositoryMembershipUpdate *observation.Operation
 }
 
-func newOperations(observationContext *observation.Context) *operations {
-	m := metrics.NewREDMetrics(
-		observationContext.Registerer,
-		"codeintel_policies_store",
-		metrics.WithLabels("op"),
-		metrics.WithCountHelp("Total number of method invocations."),
-	)
+var m = new(metrics.SingletonREDMetrics)
+
+func newOperations(observationCtx *observation.Context) *operations {
+	m := m.Get(func() *metrics.REDMetrics {
+		return metrics.NewREDMetrics(
+			observationCtx.Registerer,
+			"codeintel_policies_store",
+			metrics.WithLabels("op"),
+			metrics.WithCountHelp("Total number of method invocations."),
+		)
+	})
 
 	op := func(name string) *observation.Operation {
-		return observationContext.Operation(observation.Op{
+		return observationCtx.Operation(observation.Op{
 			Name:              fmt.Sprintf("codeintel.policies.store.%s", name),
 			MetricLabelValues: []string{name},
 			Metrics:           m,
@@ -38,16 +40,14 @@ func newOperations(observationContext *observation.Context) *operations {
 	}
 
 	return &operations{
-		// Configurations
-		getConfigurationPolicies:      op("GetConfigurationPolicies"),
-		getConfigurationPolicyByID:    op("GetConfigurationPolicyByID"),
-		createConfigurationPolicy:     op("CreateConfigurationPolicy"),
-		updateConfigurationPolicy:     op("UpdateConfigurationPolicy"),
-		deleteConfigurationPolicyByID: op("DeleteConfigurationPolicyByID"),
-
-		// Repositories
-		updateReposMatchingPatterns:                 op("UpdateReposMatchingPatterns"),
+		repoCount:                                   op("RepoCount"),
+		getConfigurationPolicies:                    op("GetConfigurationPolicies"),
+		getConfigurationPolicyByID:                  op("GetConfigurationPolicyByID"),
+		createConfigurationPolicy:                   op("CreateConfigurationPolicy"),
+		updateConfigurationPolicy:                   op("UpdateConfigurationPolicy"),
+		deleteConfigurationPolicyByID:               op("DeleteConfigurationPolicyByID"),
 		getRepoIDsByGlobPatterns:                    op("GetRepoIDsByGlobPatterns"),
+		updateReposMatchingPatterns:                 op("UpdateReposMatchingPatterns"),
 		selectPoliciesForRepositoryMembershipUpdate: op("SelectPoliciesForRepositoryMembershipUpdate"),
 	}
 }

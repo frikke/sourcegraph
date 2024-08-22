@@ -1,6 +1,8 @@
 package definitions
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sourcegraph/sourcegraph/monitoring/definitions/shared"
@@ -10,8 +12,16 @@ import (
 )
 
 func Frontend() *monitoring.Dashboard {
-	// frontend is sometimes called sourcegraph-frontend in various contexts
-	const containerName = "(frontend|sourcegraph-frontend)"
+	const (
+		// frontend is sometimes called sourcegraph-frontend in various contexts
+		containerName = "(frontend|sourcegraph-frontend)"
+
+		grpcZoektConfigurationServiceName = "sourcegraph.zoekt.configuration.v1.ZoektConfigurationService"
+		grpcInternalAPIServiceName        = "api.internalapi.v1.ConfigService"
+
+		scrapeJobRegex              = `(sourcegraph-)?frontend`
+		httpRequestHostVariableName = "httpRequestHost"
+	)
 
 	var sentinelSamplingIntervals []string
 	for _, d := range []time.Duration{
@@ -27,29 +37,47 @@ func Frontend() *monitoring.Dashboard {
 	}
 
 	defaultSamplingInterval := (90 * time.Minute).Round(time.Second)
-
-	orgMetricSpec := []struct{ name, route, description string }{
-		{"org_members", "OrganizationMembers", "API requests to list organisation members"},
-		{"create_org", "CreateOrganization", "API requests to create an organisation"},
-		{"remove_org_member", "RemoveUserFromOrganization", "API requests to remove organisation member"},
-		{"invite_org_member", "InviteUserToOrganization", "API requests to invite a new organisation member"},
-		{"org_invite_respond", "RespondToOrganizationInvitation", "API requests to respond to an org invitation"},
-		{"org_repositories", "OrgRepositories", "API requests to list repositories owned by an org"},
-	}
+	grpcMethodVariableFrontendZoektConfiguration := shared.GRPCMethodVariable("zoekt_configuration", grpcZoektConfigurationServiceName)
+	grpcMethodVariableFrontendInternalAPI := shared.GRPCMethodVariable("internal_api", grpcInternalAPIServiceName)
 
 	return &monitoring.Dashboard{
 		Name:        "frontend",
 		Title:       "Frontend",
 		Description: "Serves all end-user browser and API requests.",
-		Variables: []monitoring.ContainerVariable{{
-			Name:  "sentinel_sampling_duration",
-			Label: "Sentinel query sampling duration",
-			Options: monitoring.ContainerVariableOptions{
-				Type:          monitoring.OptionTypeInterval,
-				Options:       sentinelSamplingIntervals,
-				DefaultOption: defaultSamplingInterval.String(),
+		Variables: []monitoring.ContainerVariable{
+			{
+				Name:  "sentinel_sampling_duration",
+				Label: "Sentinel query sampling duration",
+				Options: monitoring.ContainerVariableOptions{
+					Type:          monitoring.OptionTypeInterval,
+					Options:       sentinelSamplingIntervals,
+					DefaultOption: defaultSamplingInterval.String(),
+				},
 			},
-		}},
+			{
+				Label: "Internal instance",
+				Name:  "internalInstance",
+				OptionsLabelValues: monitoring.ContainerVariableOptionsLabelValues{
+					Query:         "src_updatecheck_client_duration_seconds_sum",
+					LabelName:     "instance",
+					ExampleOption: "sourcegraph-frontend:3090",
+				},
+				Multi: true,
+			},
+			{
+				Label: "HTTP request hostname",
+				Name:  httpRequestHostVariableName,
+				OptionsLabelValues: monitoring.ContainerVariableOptionsLabelValues{
+					Query:         "src_http_client_external_request_count",
+					LabelName:     "host",
+					ExampleOption: "pings.sourcegraph.com",
+				},
+				Multi: true,
+			},
+			grpcMethodVariableFrontendZoektConfiguration,
+			grpcMethodVariableFrontendInternalAPI,
+		},
+
 		Groups: []monitoring.Group{
 			{
 				Title: "Search at a glance",
@@ -84,6 +112,8 @@ func Frontend() *monitoring.Dashboard {
 								- **Kubernetes:** Check CPU usage of zoekt-webserver in the indexed-search pod, consider increasing CPU limits in the 'indexed-search.Deployment.yaml' if regularly hitting max CPU utilization.
 								- **Docker Compose:** Check CPU usage on the Zoekt Web Server dashboard, consider increasing 'cpus:' of the zoekt-webserver container in 'docker-compose.yml' if regularly hitting max CPU utilization.
 							`,
+
+							MultiInstance: true,
 						},
 					},
 					{
@@ -137,24 +167,11 @@ func Frontend() *monitoring.Dashboard {
 							Query:       `histogram_quantile(0.9, sum by(le) (rate(src_http_request_duration_seconds_bucket{route!="raw",route!="blob",route!~"graphql.*"}[10m])))`,
 							Warning:     monitoring.Alert().GreaterOrEqual(2),
 							Panel:       monitoring.Panel().LegendFormat("latency").Unit(monitoring.Seconds),
-							Owner:       monitoring.ObservableOwnerIAM,
+							Owner:       monitoring.ObservableOwnerSource,
 							NextSteps: `
 								- Confirm that the Sourcegraph frontend has enough CPU/memory using the provisioning panels.
 								- Investigate potential sources of latency by selecting Explore and modifying the 'sum by(le)' section to include additional labels: for example, 'sum by(le, job)' or 'sum by (le, instance)'.
-								- Trace a request to see what the slowest part is: https://docs.sourcegraph.com/admin/observability/tracing
-							`,
-						},
-						{
-							Name:        "blob_load_latency",
-							Description: "90th percentile blob load latency over 10m",
-							Query:       `histogram_quantile(0.9, sum by(le) (rate(src_http_request_duration_seconds_bucket{route="blob"}[10m])))`,
-							Critical:    monitoring.Alert().GreaterOrEqual(5),
-							Panel:       monitoring.Panel().LegendFormat("latency").Unit(monitoring.Seconds),
-							Owner:       monitoring.ObservableOwnerRepoManagement,
-							NextSteps: `
-								- Confirm that the Sourcegraph frontend has enough CPU/memory using the provisioning panels.
-								- Trace a request to see what the slowest part is: https://docs.sourcegraph.com/admin/observability/tracing
-								- Check that gitserver containers have enough CPU/memory and are not getting throttled.
+								- Trace a request to see what the slowest part is: https://sourcegraph.com/docs/admin/observability/tracing
 							`,
 						},
 					},
@@ -317,15 +334,22 @@ func Frontend() *monitoring.Dashboard {
 				},
 			},
 
+			shared.NewSiteConfigurationClientMetricsGroup(shared.SiteConfigurationMetricsOptions{
+				HumanServiceName:    "frontend",
+				InstanceFilterRegex: `${internalInstance:regex}`,
+				JobFilterRegex:      scrapeJobRegex,
+			}, monitoring.ObservableOwnerInfraOrg),
+
 			shared.CodeIntelligence.NewResolversGroup(containerName),
 			shared.CodeIntelligence.NewAutoIndexEnqueuerGroup(containerName),
 			shared.CodeIntelligence.NewDBStoreGroup(containerName),
 			shared.CodeIntelligence.NewIndexDBWorkerStoreGroup(containerName),
 			shared.CodeIntelligence.NewLSIFStoreGroup(containerName),
 			shared.CodeIntelligence.NewGitserverClientGroup(containerName),
-			shared.CodeIntelligence.NewRepoUpdaterClientGroup(containerName),
 			shared.CodeIntelligence.NewUploadStoreGroup(containerName),
 			shared.CodeIntelligence.NewDependencyServiceGroup(containerName),
+			shared.CodeIntelligence.NewDependencyStoreGroup(containerName),
+			shared.CodeIntelligence.NewDependencyBackgroundJobGroup(containerName),
 			shared.CodeIntelligence.NewLockfilesGroup(containerName),
 
 			shared.GitServer.NewClientGroup(containerName),
@@ -383,6 +407,58 @@ func Frontend() *monitoring.Dashboard {
 				},
 			}),
 
+			shared.NewGRPCServerMetricsGroup(
+				shared.GRPCServerMetricsOptions{
+					HumanServiceName:   "zoekt_configuration",
+					RawGRPCServiceName: grpcZoektConfigurationServiceName,
+
+					MethodFilterRegex:    fmt.Sprintf("${%s:regex}", grpcMethodVariableFrontendZoektConfiguration.Name),
+					InstanceFilterRegex:  `${internalInstance:regex}`,
+					MessageSizeNamespace: "src",
+				}, monitoring.ObservableOwnerSearchCore),
+			shared.NewGRPCInternalErrorMetricsGroup(
+				shared.GRPCInternalErrorMetricsOptions{
+					HumanServiceName:   "zoekt_configuration",
+					RawGRPCServiceName: grpcZoektConfigurationServiceName,
+					Namespace:          "", // intentionally empty
+
+					MethodFilterRegex: fmt.Sprintf("${%s:regex}", grpcMethodVariableFrontendZoektConfiguration.Name),
+				}, monitoring.ObservableOwnerSearchCore),
+			shared.NewGRPCRetryMetricsGroup(
+				shared.GRPCRetryMetricsOptions{
+					HumanServiceName:   "zoekt_configuration",
+					RawGRPCServiceName: grpcZoektConfigurationServiceName,
+					Namespace:          "src",
+
+					MethodFilterRegex: fmt.Sprintf("${%s:regex}", grpcMethodVariableFrontendZoektConfiguration.Name),
+				}, monitoring.ObservableOwnerSearchCore),
+
+			shared.NewGRPCServerMetricsGroup(
+				shared.GRPCServerMetricsOptions{
+					HumanServiceName:   "internal_api",
+					RawGRPCServiceName: grpcInternalAPIServiceName,
+
+					MethodFilterRegex:    fmt.Sprintf("${%s:regex}", grpcMethodVariableFrontendInternalAPI.Name),
+					InstanceFilterRegex:  `${internalInstance:regex}`,
+					MessageSizeNamespace: "src",
+				}, monitoring.ObservableOwnerSearchCore),
+			shared.NewGRPCInternalErrorMetricsGroup(
+				shared.GRPCInternalErrorMetricsOptions{
+					HumanServiceName:   "internal_api",
+					RawGRPCServiceName: grpcInternalAPIServiceName,
+					Namespace:          "src",
+
+					MethodFilterRegex: fmt.Sprintf("${%s:regex}", grpcMethodVariableFrontendInternalAPI.Name),
+				}, monitoring.ObservableOwnerSearchCore),
+			shared.NewGRPCRetryMetricsGroup(
+				shared.GRPCRetryMetricsOptions{
+					HumanServiceName:   "internal_api",
+					RawGRPCServiceName: grpcInternalAPIServiceName,
+					Namespace:          "src",
+
+					MethodFilterRegex: fmt.Sprintf("${%s:regex}", grpcMethodVariableFrontendInternalAPI.Name),
+				}, monitoring.ObservableOwnerSearchCore),
+
 			{
 				Title:  "Internal service requests",
 				Hidden: true,
@@ -410,35 +486,24 @@ func Frontend() *monitoring.Dashboard {
 								- Check the Searcher dashboard for indications it might be unhealthy.
 							`,
 						},
-						{
-							Name:        "internalapi_error_responses",
-							Description: "internal API error responses every 5m by route",
-							Query:       `sum by(category) (increase(src_frontend_internal_request_duration_seconds_count{code!~"2.."}[5m])) / ignoring(code) group_left sum(increase(src_frontend_internal_request_duration_seconds_count[5m])) * 100`,
-							Warning:     monitoring.Alert().GreaterOrEqual(5).For(15 * time.Minute),
-							Panel:       monitoring.Panel().LegendFormat("{{category}}").Unit(monitoring.Percentage),
-							Owner:       monitoring.ObservableOwnerIAM,
-							NextSteps: `
-								- May not be a substantial issue, check the 'frontend' logs for potential causes.
-							`,
-						},
 					},
 					{
 						{
 							Name:        "99th_percentile_gitserver_duration",
 							Description: "99th percentile successful gitserver query duration over 5m",
-							Query:       `histogram_quantile(0.99, sum by (le,category)(rate(src_gitserver_request_duration_seconds_bucket{job=~"(sourcegraph-)?frontend"}[5m])))`,
+							Query:       fmt.Sprintf(`histogram_quantile(0.99, sum by (le,category)(rate(src_gitserver_request_duration_seconds_bucket{job=~%q}[5m])))`, scrapeJobRegex),
 							Warning:     monitoring.Alert().GreaterOrEqual(20),
 							Panel:       monitoring.Panel().LegendFormat("{{category}}").Unit(monitoring.Seconds),
-							Owner:       monitoring.ObservableOwnerRepoManagement,
+							Owner:       monitoring.ObservableOwnerSource,
 							NextSteps:   "none",
 						},
 						{
 							Name:        "gitserver_error_responses",
 							Description: "gitserver error responses every 5m",
-							Query:       `sum by (category)(increase(src_gitserver_request_duration_seconds_count{job=~"(sourcegraph-)?frontend",code!~"2.."}[5m])) / ignoring(code) group_left sum by (category)(increase(src_gitserver_request_duration_seconds_count{job=~"(sourcegraph-)?frontend"}[5m])) * 100`,
+							Query:       fmt.Sprintf(`sum by (category)(increase(src_gitserver_request_duration_seconds_count{job=~%q,code!~"2.."}[5m])) / ignoring(code) group_left sum by (category)(increase(src_gitserver_request_duration_seconds_count{job=~%q}[5m])) * 100`, scrapeJobRegex, scrapeJobRegex),
 							Warning:     monitoring.Alert().GreaterOrEqual(5).For(15 * time.Minute),
 							Panel:       monitoring.Panel().LegendFormat("{{category}}").Unit(monitoring.Percentage),
-							Owner:       monitoring.ObservableOwnerRepoManagement,
+							Owner:       monitoring.ObservableOwnerSource,
 							NextSteps:   "none",
 						},
 					},
@@ -449,7 +514,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:       `max by(owner) (observability_test_metric_warning)`,
 							Warning:     monitoring.Alert().GreaterOrEqual(1),
 							Panel:       monitoring.Panel().Max(1),
-							Owner:       monitoring.ObservableOwnerDevOps,
+							Owner:       monitoring.ObservableOwnerInfraOrg,
 							NextSteps:   "This alert is triggered via the `triggerObservabilityTestAlert` GraphQL endpoint, and will automatically resolve itself.",
 						},
 						{
@@ -458,7 +523,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:       `max by(owner) (observability_test_metric_critical)`,
 							Critical:    monitoring.Alert().GreaterOrEqual(1),
 							Panel:       monitoring.Panel().Max(1),
-							Owner:       monitoring.ObservableOwnerDevOps,
+							Owner:       monitoring.ObservableOwnerInfraOrg,
 							NextSteps:   "This alert is triggered via the `triggerObservabilityTestAlert` GraphQL endpoint, and will automatically resolve itself.",
 						},
 					},
@@ -475,7 +540,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:          `sum(irate(src_http_request_duration_seconds_count{route="sign-in",method="post"}[5m]))`,
 							NoAlert:        true,
 							Panel:          monitoring.Panel().Unit(monitoring.RequestsPerSecond),
-							Owner:          monitoring.ObservableOwnerIAM,
+							Owner:          monitoring.ObservableOwnerSource,
 							Interpretation: `Rate (QPS) of requests to sign-in`,
 						},
 						{
@@ -484,7 +549,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:          `histogram_quantile(0.99, sum(rate(src_http_request_duration_seconds_bucket{route="sign-in",method="post"}[5m])) by (le))`,
 							NoAlert:        true,
 							Panel:          monitoring.Panel().Unit(monitoring.Milliseconds),
-							Owner:          monitoring.ObservableOwnerIAM,
+							Owner:          monitoring.ObservableOwnerSource,
 							Interpretation: `99% percentile of sign-in latency`,
 						},
 						{
@@ -493,7 +558,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:          `sum by (code)(irate(src_http_request_duration_seconds_count{route="sign-in",method="post"}[5m]))/ ignoring (code) group_left sum(irate(src_http_request_duration_seconds_count{route="sign-in",method="post"}[5m]))*100`,
 							NoAlert:        true,
 							Panel:          monitoring.Panel().Unit(monitoring.Percentage),
-							Owner:          monitoring.ObservableOwnerIAM,
+							Owner:          monitoring.ObservableOwnerSource,
 							Interpretation: `Percentage of sign-in requests grouped by http code`,
 						},
 					},
@@ -505,7 +570,7 @@ func Frontend() *monitoring.Dashboard {
 
 							NoAlert:        true,
 							Panel:          monitoring.Panel().Unit(monitoring.RequestsPerSecond),
-							Owner:          monitoring.ObservableOwnerIAM,
+							Owner:          monitoring.ObservableOwnerSource,
 							Interpretation: `Rate (QPS) of requests to sign-up`,
 						},
 						{
@@ -515,7 +580,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:          `histogram_quantile(0.99, sum(rate(src_http_request_duration_seconds_bucket{route="sign-up",method="post"}[5m])) by (le))`,
 							NoAlert:        true,
 							Panel:          monitoring.Panel().Unit(monitoring.Milliseconds),
-							Owner:          monitoring.ObservableOwnerIAM,
+							Owner:          monitoring.ObservableOwnerSource,
 							Interpretation: `99% percentile of sign-up latency`,
 						},
 						{
@@ -524,7 +589,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:          `sum by (code)(irate(src_http_request_duration_seconds_count{route="sign-up",method="post"}[5m]))/ ignoring (code) group_left sum(irate(src_http_request_duration_seconds_count{route="sign-out"}[5m]))*100`,
 							NoAlert:        true,
 							Panel:          monitoring.Panel().Unit(monitoring.Percentage),
-							Owner:          monitoring.ObservableOwnerIAM,
+							Owner:          monitoring.ObservableOwnerSource,
 							Interpretation: `Percentage of sign-up requests grouped by http code`,
 						},
 					},
@@ -535,7 +600,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:          `sum(irate(src_http_request_duration_seconds_count{route="sign-out"}[5m]))`,
 							NoAlert:        true,
 							Panel:          monitoring.Panel().Unit(monitoring.RequestsPerSecond),
-							Owner:          monitoring.ObservableOwnerIAM,
+							Owner:          monitoring.ObservableOwnerSource,
 							Interpretation: `Rate (QPS) of requests to sign-out`,
 						},
 						{
@@ -544,7 +609,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:          `histogram_quantile(0.99, sum(rate(src_http_request_duration_seconds_bucket{route="sign-out"}[5m])) by (le))`,
 							NoAlert:        true,
 							Panel:          monitoring.Panel().Unit(monitoring.Milliseconds),
-							Owner:          monitoring.ObservableOwnerIAM,
+							Owner:          monitoring.ObservableOwnerSource,
 							Interpretation: `99% percentile of sign-out latency`,
 						},
 						{
@@ -553,7 +618,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:          ` sum by (code)(irate(src_http_request_duration_seconds_count{route="sign-out"}[5m]))/ ignoring (code) group_left sum(irate(src_http_request_duration_seconds_count{route="sign-out"}[5m]))*100`,
 							NoAlert:        true,
 							Panel:          monitoring.Panel().Unit(monitoring.Percentage),
-							Owner:          monitoring.ObservableOwnerIAM,
+							Owner:          monitoring.ObservableOwnerSource,
 							Interpretation: `Percentage of sign-out requests grouped by http code`,
 						},
 					},
@@ -564,7 +629,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:          `sum(rate(src_frontend_account_failed_sign_in_attempts_total[1m]))`,
 							NoAlert:        true,
 							Panel:          monitoring.Panel().Unit(monitoring.Number),
-							Owner:          monitoring.ObservableOwnerIAM,
+							Owner:          monitoring.ObservableOwnerSource,
 							Interpretation: `Failed sign-in attempts per minute`,
 						},
 						{
@@ -573,16 +638,59 @@ func Frontend() *monitoring.Dashboard {
 							Query:          `sum(rate(src_frontend_account_lockouts_total[1m]))`,
 							NoAlert:        true,
 							Panel:          monitoring.Panel().Unit(monitoring.Number),
-							Owner:          monitoring.ObservableOwnerIAM,
+							Owner:          monitoring.ObservableOwnerSource,
 							Interpretation: `Account lockouts per minute`,
 						},
 					},
 				},
 			},
 			{
-				Title:  "Organisation GraphQL API requests",
+				Title:  "External HTTP Request Rate",
 				Hidden: true,
-				Rows:   orgMetricRows(orgMetricSpec),
+				Rows: []monitoring.Row{
+					{
+						{
+							Name:        "external_http_request_rate_by_host",
+							Description: "rate of external HTTP requests by host over 1m",
+							Query:       fmt.Sprintf("sum by (host) (rate(src_http_client_external_request_count{host=~`%s`}[1m]))", fmt.Sprintf("${%s:regex}", httpRequestHostVariableName)),
+							NoAlert:     true,
+							Panel: monitoring.Panel().Unit(monitoring.RequestsPerSecond).LegendFormat("{{host}}").
+								With(monitoring.PanelOptions.ZeroIfNoData()).
+								With(monitoring.PanelOptions.LegendOnRight()),
+							Owner: monitoring.ObservableOwnerSource,
+							Interpretation: strings.TrimSpace(`
+							Shows the rate of external HTTP requests made by Sourcegraph to other services, broken down by host.
+`),
+						},
+					},
+					{
+						{
+							Name:        "external_http_request_rate_by_host_by_code",
+							Description: "rate of external HTTP requests by host and response code over 1m",
+							Query:       fmt.Sprintf("sum by (host, status_code) (rate(src_http_client_external_request_count{host=~`%s`}[1m]))", fmt.Sprintf("${%s:regex}", httpRequestHostVariableName)),
+							NoAlert:     true,
+							Panel: monitoring.Panel().Unit(monitoring.RequestsPerSecond).LegendFormat("{{host}}:{{status_code}}").
+								With(monitoring.PanelOptions.ZeroIfNoData()).
+								With(monitoring.PanelOptions.LegendOnRight()),
+							Owner: monitoring.ObservableOwnerSource,
+							Interpretation: strings.TrimSpace(`
+							Shows the rate of external HTTP requests made by Sourcegraph to other services, broken down by host and response code.
+`),
+						},
+					},
+				},
+			},
+			{
+				Title:  "Cody API requests",
+				Hidden: true,
+				Rows: []monitoring.Row{{{
+					Name:           "cody_api_rate",
+					Description:    "rate of API requests to cody endpoints (excluding GraphQL)",
+					Query:          `sum by (route, code)(irate(src_http_request_duration_seconds_count{route=~"^completions.*"}[5m]))`,
+					NoAlert:        true,
+					Panel:          monitoring.Panel().Unit(monitoring.RequestsPerSecond),
+					Interpretation: `Rate (QPS) of requests to cody related endpoints. completions.stream is for the conversational endpoints. completions.code is for the code auto-complete endpoints.`,
+				}}},
 			},
 			{
 				Title:  "Cloud KMS and cache",
@@ -596,7 +704,7 @@ func Frontend() *monitoring.Dashboard {
 							Warning:     monitoring.Alert().GreaterOrEqual(15000).For(5 * time.Minute),
 							Critical:    monitoring.Alert().GreaterOrEqual(30000).For(5 * time.Minute),
 							Panel:       monitoring.Panel().Unit(monitoring.Number),
-							Owner:       monitoring.ObservableOwnerRepoManagement,
+							Owner:       monitoring.ObservableOwnerSource,
 							NextSteps: `
 								- Revert recent commits that cause extensive listing from "external_services" and/or "user_external_accounts" tables.
 							`,
@@ -607,7 +715,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:       `min by (kubernetes_name) (src_encryption_cache_hit_total/(src_encryption_cache_hit_total+src_encryption_cache_miss_total))`,
 							NoAlert:     true,
 							Panel:       monitoring.Panel().Unit(monitoring.Number),
-							Owner:       monitoring.ObservableOwnerRepoManagement,
+							Owner:       monitoring.ObservableOwnerSource,
 							Interpretation: `
 								- Encryption cache hit ratio (hits/(hits+misses)) - minimum across all instances of a workload.
 							`,
@@ -618,7 +726,7 @@ func Frontend() *monitoring.Dashboard {
 							Query:       `sum by (kubernetes_name) (irate(src_encryption_cache_eviction_total[5m]))`,
 							NoAlert:     true,
 							Panel:       monitoring.Panel().Unit(monitoring.Number),
-							Owner:       monitoring.ObservableOwnerRepoManagement,
+							Owner:       monitoring.ObservableOwnerSource,
 							Interpretation: `
 								- Rate of encryption cache evictions (caused by cache exceeding its maximum size) - sum across all instances of a workload
 							`,
@@ -628,65 +736,142 @@ func Frontend() *monitoring.Dashboard {
 			},
 
 			// Resource monitoring
-			shared.NewDatabaseConnectionsMonitoringGroup("frontend"),
-			shared.NewContainerMonitoringGroup(containerName, monitoring.ObservableOwnerDevOps, nil),
-			shared.NewProvisioningIndicatorsGroup(containerName, monitoring.ObservableOwnerDevOps, nil),
-			shared.NewGolangMonitoringGroup(containerName, monitoring.ObservableOwnerDevOps, nil),
-			shared.NewKubernetesMonitoringGroup(containerName, monitoring.ObservableOwnerDevOps, nil),
+			shared.NewDatabaseConnectionsMonitoringGroup("frontend", monitoring.ObservableOwnerInfraOrg),
+			shared.NewContainerMonitoringGroup(containerName, monitoring.ObservableOwnerInfraOrg, nil),
+			shared.NewProvisioningIndicatorsGroup(containerName, monitoring.ObservableOwnerInfraOrg, nil),
+			shared.NewGolangMonitoringGroup(containerName, monitoring.ObservableOwnerInfraOrg, nil),
+			shared.NewKubernetesMonitoringGroup(containerName, monitoring.ObservableOwnerInfraOrg, nil),
 			{
-				Title:  "Ranking",
+				Title:  "Search: Ranking",
 				Hidden: true,
 				Rows: []monitoring.Row{
 					{
 						{
-							Name:        "mean_position_of_clicked_search_result_6h",
-							Description: "mean position of clicked search result over 6h",
-							Query:       "sum by (type) (rate(src_search_ranking_result_clicked_sum[6h]))/sum by (type) (rate(src_search_ranking_result_clicked_count[6h]))",
-							NoAlert:     true,
-							Panel: monitoring.Panel().With(
-								monitoring.PanelOptions.LegendOnRight(),
-								func(o monitoring.Observable, p *sdk.Panel) {
-									p.GraphPanel.Legend.Current = true
-									p.GraphPanel.Targets = []sdk.Target{{
-										Expr:         o.Query,
-										LegendFormat: "{{type}}",
-									}, {
-										Expr:         "sum by (app) (rate(src_search_ranking_result_clicked_sum[6h]))/sum by (app) (rate(src_search_ranking_result_clicked_count[6h]))",
-										LegendFormat: "all",
-									}}
-									p.GraphPanel.Tooltip.Shared = true
-								}),
+							Name:           "total_search_clicks",
+							Description:    "total number of search clicks over 6h",
+							Query:          "sum by (ranked) (increase(src_search_ranking_result_clicked_count[6h]))",
+							NoAlert:        true,
+							Panel:          monitoring.Panel().LegendFormat("ranked={{ranked}}"),
 							Owner:          monitoring.ObservableOwnerSearchCore,
-							Interpretation: "The top-most result on the search results has position 0. Low values are considered better. This metric only tracks top-level items and not individual line matches.",
+							Interpretation: "The total number of search clicks across all search types over a 6 hour window.",
 						},
 						{
+							Name:           "percent_clicks_on_top_search_result",
+							Description:    "percent of clicks on top search result over 6h",
+							Query:          "sum by (ranked) (increase(src_search_ranking_result_clicked_bucket{le=\"1\",resultsLength=\">3\"}[6h])) / sum by (ranked) (increase(src_search_ranking_result_clicked_count[6h])) * 100",
+							NoAlert:        true,
+							Panel:          monitoring.Panel().LegendFormat("ranked={{ranked}}").Unit(monitoring.Percentage),
+							Owner:          monitoring.ObservableOwnerSearchCore,
+							Interpretation: "The percent of clicks that were on the top search result, excluding searches with very few results (3 or fewer).",
+						},
+						{
+							Name:           "percent_clicks_on_top_3_search_results",
+							Description:    "percent of clicks on top 3 search results over 6h",
+							Query:          "sum by (ranked) (increase(src_search_ranking_result_clicked_bucket{le=\"3\",resultsLength=\">3\"}[6h])) / sum by (ranked) (increase(src_search_ranking_result_clicked_count[6h])) * 100",
+							NoAlert:        true,
+							Panel:          monitoring.Panel().LegendFormat("ranked={{ranked}}").Unit(monitoring.Percentage),
+							Owner:          monitoring.ObservableOwnerSearchCore,
+							Interpretation: "The percent of clicks that were on the first 3 search results, excluding searches with very few results (3 or fewer).",
+						},
+					}, {
+						{
 							Name:        "distribution_of_clicked_search_result_type_over_6h_in_percent",
-							Description: "distribution of clicked search result type over 6h in %",
-							Query:       "round(sum(increase(src_search_ranking_result_clicked_sum{type=\"commit\"}[6h])) / sum (increase(src_search_ranking_result_clicked_sum[6h]))*100)",
+							Description: "distribution of clicked search result type over 6h",
+							Query:       "sum(increase(src_search_ranking_result_clicked_count{type=\"repo\"}[6h])) / sum(increase(src_search_ranking_result_clicked_count[6h])) * 100",
 							NoAlert:     true,
 							Panel: monitoring.Panel().With(
-								monitoring.PanelOptions.LegendOnRight(),
 								func(o monitoring.Observable, p *sdk.Panel) {
 									p.GraphPanel.Legend.Current = true
-									p.GraphPanel.Targets = []sdk.Target{{
-										Expr:         o.Query,
-										LegendFormat: "commit",
-									}, {
-										Expr:         "round(sum(increase(src_search_ranking_result_clicked_sum{type=\"fileMatch\"}[6h])) / sum (increase(src_search_ranking_result_clicked_sum[6h]))*100)",
-										LegendFormat: "fileMatch",
-									}, {
-										Expr:         "round(sum(increase(src_search_ranking_result_clicked_sum{type=\"repo\"}[6h])) / sum (increase(src_search_ranking_result_clicked_sum[6h]))*100)",
-										LegendFormat: "repo",
-									}}
+									p.GraphPanel.Targets = []sdk.Target{
+										{
+											RefID:        "0",
+											Expr:         o.Query,
+											LegendFormat: "repo",
+										}, {
+											RefID:        "1",
+											Expr:         "sum(increase(src_search_ranking_result_clicked_count{type=\"fileMatch\"}[6h])) / sum(increase(src_search_ranking_result_clicked_count[6h])) * 100",
+											LegendFormat: "fileMatch",
+										}, {
+											RefID:        "2",
+											Expr:         "sum(increase(src_search_ranking_result_clicked_count{type=\"filePathMatch\"}[6h])) / sum(increase(src_search_ranking_result_clicked_count[6h])) * 100",
+											LegendFormat: "filePathMatch",
+										},
+									}
 									p.GraphPanel.Tooltip.Shared = true
 								}),
 							Owner:          monitoring.ObservableOwnerSearchCore,
 							Interpretation: "The distribution of clicked search results by result type. At every point in time, the values should sum to 100.",
 						},
+						{
+							Name:           "percent_zoekt_searches_hitting_flush_limit",
+							Description:    "percent of zoekt searches that hit the flush time limit",
+							Query:          "sum(increase(zoekt_final_aggregate_size_count{reason=\"timer_expired\"}[1d])) / sum(increase(zoekt_final_aggregate_size_count[1d])) * 100",
+							NoAlert:        true,
+							Panel:          monitoring.Panel().Unit(monitoring.Percentage),
+							Owner:          monitoring.ObservableOwnerSearchCore,
+							Interpretation: "The percent of Zoekt searches that hit the flush time limit. These searches don't visit all matches, so they could be missing relevant results, or be non-deterministic.",
+						},
 					},
 				},
 			},
+			{
+				Title:  "Email delivery",
+				Hidden: true,
+				Rows: []monitoring.Row{{
+					{
+						Name:        "email_delivery_failures",
+						Description: "email delivery failure rate over 30 minutes",
+						Query:       `sum(increase(src_email_send{success="false"}[30m])) / sum(increase(src_email_send[30m])) * 100`,
+						Panel: monitoring.Panel().
+							LegendFormat("failures").
+							Unit(monitoring.Percentage).
+							Max(100).Min(0),
 
+						// Any failure is worth warning on, as failed email
+						// deliveries directly impact user experience.
+						Warning:  monitoring.Alert().Greater(0),
+						Critical: monitoring.Alert().GreaterOrEqual(10),
+
+						Owner: monitoring.ObservableOwnerInfraOrg,
+						NextSteps: `
+							- Check your SMTP configuration in site configuration.
+							- Check 'sourcegraph-frontend' logs for more detailed error messages.
+							- Check your SMTP provider for more detailed error messages.
+							- Use 'sum(increase(src_email_send{success="false"}[30m]))' to check the raw count of delivery failures.
+						`,
+					},
+				}, {
+					{
+						Name:        "email_deliveries_total",
+						Description: "total emails successfully delivered every 30 minutes",
+						Query:       `sum (increase(src_email_send{success="true"}[30m]))`,
+						Panel:       monitoring.Panel().LegendFormat("emails"),
+						NoAlert:     true, // this is a purely informational panel
+
+						Owner:          monitoring.ObservableOwnerInfraOrg,
+						Interpretation: "Total emails successfully delivered.",
+
+						// use to observe behaviour of email usage across instances
+						MultiInstance: true,
+					},
+					{
+						Name:        "email_deliveries_by_source",
+						Description: "emails successfully delivered every 30 minutes by source",
+						Query:       `sum by (email_source) (increase(src_email_send{success="true"}[30m]))`,
+						Panel: monitoring.Panel().LegendFormat("{{email_source}}").
+							With(monitoring.PanelOptions.LegendOnRight()),
+						NoAlert: true, // this is a purely informational panel
+
+						Owner:          monitoring.ObservableOwnerInfraOrg,
+						Interpretation: "Emails successfully delivered by source, i.e. product feature.",
+
+						// use to observe behaviour of email usage across instances.
+						// cardinality is 2-4, but it is useful to be able to see the
+						// breakdown regardless across instances.
+						MultiInstance: true,
+					},
+				}},
+			},
 			{
 				Title:  "Sentinel queries (only on sourcegraph.com)",
 				Hidden: true,
@@ -904,48 +1089,29 @@ func Frontend() *monitoring.Dashboard {
 					},
 				},
 			},
+			{
+				Title:  "Incoming webhooks",
+				Hidden: true,
+				Rows: []monitoring.Row{
+					{
+						{
+							Name:        "p95_time_to_handle_incoming_webhooks",
+							Description: "p95 time to handle incoming webhooks",
+							Query:       "histogram_quantile(0.95, sum  (rate(src_http_request_duration_seconds_bucket{route=~\"webhooks|github.webhooks|gitlab.webhooks|bitbucketServer.webhooks|bitbucketCloud.webhooks\"}[5m])) by (le, route))",
+							NoAlert:     true,
+							Panel:       monitoring.Panel().LegendFormat("duration").Unit(monitoring.Seconds).With(monitoring.PanelOptions.NoLegend()),
+							Owner:       monitoring.ObservableOwnerSource,
+							Interpretation: `
+							p95 response time to incoming webhook requests from code hosts.
+
+							Increases in response time can point to too much load on the database to keep up with the incoming requests.
+
+							See this documentation page for more details on webhook requests: (https://sourcegraph.com/docs/admin/config/webhooks/incoming)`,
+						},
+					},
+				},
+			},
 			shared.CodeInsights.NewSearchAggregationsGroup(containerName),
 		},
 	}
-}
-
-func orgMetricRows(orgMetricSpec []struct {
-	name        string
-	route       string
-	description string
-},
-) []monitoring.Row {
-	result := []monitoring.Row{}
-	for _, m := range orgMetricSpec {
-		result = append(result, monitoring.Row{
-			{
-				Name:           m.name + "_rate",
-				Description:    "rate of " + m.description,
-				Query:          `sum(irate(src_graphql_request_duration_seconds_count{route="` + m.route + `"}[5m]))`,
-				NoAlert:        true,
-				Panel:          monitoring.Panel().Unit(monitoring.RequestsPerSecond),
-				Owner:          monitoring.ObservableOwnerDevOps,
-				Interpretation: `Rate (QPS) of ` + m.description,
-			},
-			{
-				Name:           m.name + "_latency_p99",
-				Description:    "99 percentile latency of " + m.description,
-				Query:          `histogram_quantile(0.99, sum(rate(src_graphql_request_duration_seconds_bucket{route="` + m.route + `"}[5m])) by (le))`,
-				NoAlert:        true,
-				Panel:          monitoring.Panel().Unit(monitoring.Milliseconds),
-				Owner:          monitoring.ObservableOwnerDevOps,
-				Interpretation: `99 percentile latency of` + m.description,
-			},
-			{
-				Name:           m.name + "_error_rate",
-				Description:    "percentage of " + m.description + " that return an error",
-				Query:          `sum (irate(src_graphql_request_duration_seconds_count{route="` + m.route + `",success="false"}[5m]))/sum(irate(src_graphql_request_duration_seconds_count{route="` + m.route + `"}[5m]))*100`,
-				NoAlert:        true,
-				Panel:          monitoring.Panel().Unit(monitoring.Percentage),
-				Owner:          monitoring.ObservableOwnerDevOps,
-				Interpretation: `Percentage of ` + m.description + ` that return an error`,
-			},
-		})
-	}
-	return result
 }

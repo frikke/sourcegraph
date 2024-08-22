@@ -3,23 +3,45 @@ package http
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 
+	"github.com/sourcegraph/sourcegraph/internal/search/query"
 	"github.com/sourcegraph/sourcegraph/internal/search/streaming/api"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 const maxPayloadSize = 10 * 1024 * 1024 // 10mb
 
-// NewRequest returns an http.Request against the streaming API for query.
+// NewRequest returns an http.Request against the Stream API. Use
+// NewRequestWithVersion if you want to specify the version of the search syntax
+// or the default patternType.
 func NewRequest(baseURL string, query string) (*http.Request, error) {
-	u := baseURL + "/search/stream?q=" + url.QueryEscape(query)
+	return NewRequestWithVersion(baseURL, query, "V3", nil)
+}
+
+// NewRequestWithVersion returns an http.Request against the streaming API for
+// query with the specified version and patternType.
+func NewRequestWithVersion(baseURL, query string, version string, patternType *query.SearchType) (*http.Request, error) {
+	u := fmt.Sprintf("%s/search/stream?q=%s", baseURL, url.QueryEscape(query))
 	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
 		return nil, err
 	}
+
+	if version != "" || patternType != nil {
+		q := req.URL.Query()
+		if version != "" {
+			q.Add("v", version)
+		}
+		if patternType != nil {
+			q.Add("t", patternType.String())
+		}
+		req.URL.RawQuery = q.Encode()
+	}
+
 	req.Header.Set("Accept", "text/event-stream")
 	return req, nil
 }

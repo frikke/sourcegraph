@@ -9,14 +9,15 @@ import (
 	"github.com/sourcegraph/log"
 	"github.com/sourcegraph/zoekt"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/envvar"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
 	"github.com/sourcegraph/sourcegraph/internal/authz"
 	"github.com/sourcegraph/sourcegraph/internal/comby"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/dotcom"
 	"github.com/sourcegraph/sourcegraph/internal/endpoint"
-	"github.com/sourcegraph/sourcegraph/internal/extsvc"
+	"github.com/sourcegraph/sourcegraph/internal/gitserver"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver/gitdomain"
+	"github.com/sourcegraph/sourcegraph/internal/grpc/defaults"
 	"github.com/sourcegraph/sourcegraph/internal/search"
 	"github.com/sourcegraph/sourcegraph/internal/search/query"
 	searchrepos "github.com/sourcegraph/sourcegraph/internal/search/repos"
@@ -25,10 +26,11 @@ import (
 )
 
 type Observer struct {
-	Logger   log.Logger
-	Db       database.DB
-	Zoekt    zoekt.Streamer
-	Searcher *endpoint.Map
+	Logger                      log.Logger
+	Db                          database.DB
+	Zoekt                       zoekt.Streamer
+	Searcher                    *endpoint.Map
+	SearcherGRPCConnectionCache *defaults.ConnectionCache
 
 	// Inputs are used to generate alert messages based on the query.
 	*search.Inputs
@@ -47,9 +49,17 @@ type Observer struct {
 // raising NoResolvedRepos alerts with suggestions when we know the original
 // query does not contain any repos to search.
 func (o *Observer) reposExist(ctx context.Context, options search.RepoOptions) bool {
-	repositoryResolver := searchrepos.NewResolver(o.Logger, o.Db, o.Searcher, o.Zoekt)
-	resolved, err := repositoryResolver.Resolve(ctx, options)
-	return err == nil && len(resolved.RepoRevs) > 0
+	repositoryResolver := searchrepos.NewResolver(o.Logger, o.Db, gitserver.NewClient("search.alertobserver"), o.Searcher, o.SearcherGRPCConnectionCache, o.Zoekt)
+	it := repositoryResolver.Iterator(ctx, options)
+	for it.Next() {
+		resolved := it.Current()
+		// Due to filtering (eg hasCommitAfter) this page of results may be
+		// empty, so we only return early if we find a repo that exists.
+		if len(resolved.RepoRevs) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *Observer) alertForNoResolvedRepos(ctx context.Context, q query.Q) *search.Alert {
@@ -81,8 +91,8 @@ func (o *Observer) alertForNoResolvedRepos(ctx context.Context, q query.Q) *sear
 		}
 	}
 
-	isSiteAdmin := backend.CheckCurrentUserIsSiteAdmin(ctx, o.Db) == nil
-	if !envvar.SourcegraphDotComMode() {
+	isSiteAdmin := auth.CheckCurrentUserIsSiteAdmin(ctx, o.Db) == nil
+	if !dotcom.SourcegraphDotComMode() {
 		if needsRepoConfig, err := needsRepositoryConfiguration(ctx, o.Db); err == nil && needsRepoConfig {
 			if isSiteAdmin {
 				return &search.Alert{
@@ -208,13 +218,6 @@ func (o *Observer) Done() (*search.Alert, error) {
 	return o.alert, o.err
 }
 
-type alertKind string
-
-const (
-	smartSearchAdditionalResults alertKind = "smart-search-additional-results"
-	smartSearchPureResults                 = "smart-search-pure-results"
-)
-
 func (o *Observer) errorToAlert(ctx context.Context, err error) (*search.Alert, error) {
 	if err == nil {
 		return nil, nil
@@ -228,10 +231,9 @@ func (o *Observer) errorToAlert(ctx context.Context, err error) (*search.Alert, 
 	var (
 		mErr *searchrepos.MissingRepoRevsError
 		oErr *errOverRepoLimit
-		lErr *ErrLuckyQueries
 	)
 
-	if errors.HasType(err, authz.ErrStalePermissions{}) {
+	if errors.HasType[authz.ErrStalePermissions](err) {
 		return search.AlertForStalePermissions(), nil
 	}
 
@@ -256,28 +258,9 @@ func (o *Observer) errorToAlert(ctx context.Context, err error) (*search.Alert, 
 	}
 
 	if errors.As(err, &mErr) {
-		var a *search.Alert
-		a = AlertForMissingRepoRevs(mErr.Missing)
+		a := AlertForMissingRepoRevs(mErr.Missing)
 		a.Priority = 6
 		return a, nil
-	}
-
-	if errors.As(err, &lErr) {
-		title := "Also showing additional results"
-		description := "We returned all the results for your query. We also added results for similar queries that might interest you."
-		kind := string(smartSearchAdditionalResults)
-		if lErr.Type == LuckyAlertPure {
-			title = "No results for original query. Showing related results instead"
-			description = "The original query returned no results. Below are results for similar queries that might interest you."
-			kind = string(smartSearchPureResults)
-		}
-		return &search.Alert{
-			PrometheusType:  "smart_search_notice",
-			Title:           title,
-			Kind:            kind,
-			Description:     description,
-			ProposedQueries: lErr.ProposedQueries,
-		}, nil
 	}
 
 	if strings.Contains(err.Error(), "Worker_oomed") || strings.Contains(err.Error(), "Worker_exited_abnormally") {
@@ -333,19 +316,6 @@ func needsRepositoryConfiguration(ctx context.Context, db database.DB) (bool, er
 	return count == 0, nil
 }
 
-func needsPackageHostConfiguration(ctx context.Context, db database.DB) (bool, error) {
-	count, err := db.ExternalServices().Count(ctx, database.ExternalServicesListOptions{
-		Kinds: []string{
-			extsvc.KindNpmPackages,
-			extsvc.KindGoPackages,
-		},
-	})
-	if err != nil {
-		return false, err
-	}
-	return count == 0, nil
-}
-
 type errOverRepoLimit struct {
 	ProposedQueries []*search.QueryDescription
 	Description     string
@@ -353,22 +323,6 @@ type errOverRepoLimit struct {
 
 func (e *errOverRepoLimit) Error() string {
 	return "Too many matching repositories"
-}
-
-type LuckyAlertType int
-
-const (
-	LuckyAlertAdded LuckyAlertType = iota
-	LuckyAlertPure
-)
-
-type ErrLuckyQueries struct {
-	Type            LuckyAlertType
-	ProposedQueries []*search.QueryDescription
-}
-
-func (e *ErrLuckyQueries) Error() string {
-	return "Showing results for lucky search"
 }
 
 // isContextError returns true if ctx.Err() is not nil or if err

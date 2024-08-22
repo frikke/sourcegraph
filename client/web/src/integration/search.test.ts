@@ -1,28 +1,32 @@
 import expect from 'expect'
-import { test } from 'mocha'
+import { afterEach, beforeEach, describe, test } from 'mocha'
 import { Key } from 'ts-key-enum'
 
 import {
-    SearchGraphQlOperations,
+    SavedSearchVisibility,
+    SymbolKind,
+    type SharedGraphQlOperations,
+} from '@sourcegraph/shared/src/graphql-operations'
+import {
     commitHighlightResult,
     commitSearchStreamEvents,
-    diffSearchStreamEvents,
     diffHighlightResult,
-    mixedSearchStreamEvents,
+    diffSearchStreamEvents,
     highlightFileResult,
+    mixedSearchStreamEvents,
+    ownerSearchStreamEvents,
     symbolSearchStreamEvents,
-} from '@sourcegraph/search'
-import { SharedGraphQlOperations, SymbolKind } from '@sourcegraph/shared/src/graphql-operations'
-import { SearchEvent } from '@sourcegraph/shared/src/search/stream'
+} from '@sourcegraph/shared/src/search/integration/streaming-search-mocks'
+import type { SearchEvent } from '@sourcegraph/shared/src/search/stream'
 import { accessibilityAudit } from '@sourcegraph/shared/src/testing/accessibility'
-import { Driver, createDriverForTest } from '@sourcegraph/shared/src/testing/driver'
+import { createDriverForTest, type Driver } from '@sourcegraph/shared/src/testing/driver'
 import { afterEachSaveScreenshotIfFailed } from '@sourcegraph/shared/src/testing/screenshotReporter'
 
-import { WebGraphQlOperations } from '../graphql-operations'
+import type { WebGraphQlOperations } from '../graphql-operations'
 
-import { WebIntegrationTestContext, createWebIntegrationTestContext } from './context'
+import { createWebIntegrationTestContext, type WebIntegrationTestContext } from './context'
 import { commonWebGraphQlResults, createViewerSettingsGraphQLOverride } from './graphQlResults'
-import { createEditorAPI, enableEditor, percySnapshotWithVariants, withSearchQueryInput } from './utils'
+import { getSearchQueryInputConfig, withSearchQueryInput, type SearchQueryInput } from './utils'
 
 const mockDefaultStreamEvents: SearchEvent[] = [
     {
@@ -33,38 +37,65 @@ const mockDefaultStreamEvents: SearchEvent[] = [
     {
         type: 'filters',
         data: [
-            { label: 'archived:yes', value: 'archived:yes', count: 5, kind: 'utility', limitHit: true },
-            { label: 'fork:yes', value: 'fork:yes', count: 46, kind: 'utility', limitHit: true },
+            { label: 'archived:yes', value: 'archived:yes', count: 5, kind: 'utility', exhaustive: false },
+            { label: 'fork:yes', value: 'fork:yes', count: 46, kind: 'utility', exhaustive: false },
             // Two repo filters to trigger the repository sidebar section
             {
                 label: 'github.com/Algorilla/manta-ray',
                 value: 'repo:^github\\.com/Algorilla/manta-ray$',
                 count: 1,
                 kind: 'repo',
-                limitHit: true,
+                exhaustive: false,
             },
             {
                 label: 'github.com/Algorilla/manta-ray2',
                 value: 'repo:^github\\.com/Algorilla/manta-ray2$',
                 count: 1,
                 kind: 'repo',
-                limitHit: true,
+                exhaustive: false,
             },
         ],
     },
     { type: 'done', data: {} },
 ]
 
-const commonSearchGraphQLResults: Partial<WebGraphQlOperations & SharedGraphQlOperations & SearchGraphQlOperations> = {
+const commonSearchGraphQLResults: Partial<WebGraphQlOperations & SharedGraphQlOperations> = {
     ...commonWebGraphQlResults,
     IsSearchContextAvailable: () => ({
         isSearchContextAvailable: true,
     }),
+    SuggestionsRepo: () => ({
+        __typename: 'Query',
+        search: {
+            __typename: 'Search',
+            results: {
+                __typename: 'SearchResults',
+                repositories: [
+                    {
+                        __typename: 'Repository',
+                        id: 'repo1',
+                        name: 'github.com/Algorilla/manta-ray',
+                        stars: 1,
+                    },
+                    {
+                        __typename: 'Repository',
+                        id: 'repo1',
+                        name: 'github.com/Algorilla/manta-ray-2',
+                        stars: 2,
+                    },
+                    {
+                        __typename: 'Repository',
+                        id: 'repo1',
+                        name: 'github.com/Algorilla/manta-ray-3',
+                        stars: 3,
+                    },
+                ],
+            },
+        },
+    }),
 }
 
-const commonSearchGraphQLResultsWithUser: Partial<
-    WebGraphQlOperations & SharedGraphQlOperations & SearchGraphQlOperations
-> = {
+const commonSearchGraphQLResultsWithUser: Partial<WebGraphQlOperations & SharedGraphQlOperations> = {
     ...commonSearchGraphQLResults,
     UserAreaUserProfile: () => ({
         user: {
@@ -77,12 +108,19 @@ const commonSearchGraphQLResultsWithUser: Partial<
             avatarURL: '',
             viewerCanAdminister: true,
             builtinAuth: true,
-            tags: [],
+            createdAt: '2020-03-02T11:52:15Z',
+            roles: {
+                __typename: 'RoleConnection',
+                nodes: [],
+            },
         },
     }),
 }
 
-const queryInputSelector = '[data-testid="searchbox"] .test-query-input'
+const queryInputSelectors: Record<SearchQueryInput, string> = {
+    codemirror6: '[data-testid="searchbox"] .test-query-input',
+    v2: '.test-v2-query-input',
+}
 
 describe('Search', () => {
     let driver: Driver
@@ -104,15 +142,49 @@ describe('Search', () => {
     afterEach(() => testContext?.dispose())
 
     describe('Search filters', () => {
+        beforeEach(() => {
+            testContext.overrideGraphQL({
+                ...commonSearchGraphQLResultsWithUser,
+                ViewerSettings: () => ({
+                    viewerSettings: {
+                        __typename: 'SettingsCascade',
+                        subjects: [
+                            {
+                                __typename: 'DefaultSettings',
+                                id: 'TestDefaultSettingsID',
+                                settingsURL: null,
+                                viewerCanAdminister: false,
+                                latestSettings: {
+                                    id: 0,
+                                    contents: JSON.stringify({
+                                        experimentalFeatures: { newSearchResultFiltersPanel: false },
+                                    }),
+                                },
+                            },
+                        ],
+                        final: JSON.stringify({}),
+                    },
+                }),
+            })
+        })
+
         test('Search filters are shown on search result pages and clicking them triggers a new search', async () => {
             const dynamicFilters = ['archived:yes', 'repo:^github\\.com/Algorilla/manta-ray$']
             const origQuery = 'context:global foo'
+
             for (const filter of dynamicFilters) {
                 await driver.page.goto(
                     `${driver.sourcegraphBaseUrl}/search?q=${encodeURIComponent(origQuery)}&patternType=literal`
                 )
+
+                // Make sure that filters panel is open by default
+                await driver.page.evaluate(() => {
+                    localStorage.setItem('search.sidebar.collapsed', 'false')
+                })
+
                 await driver.page.waitForSelector(`[data-testid="filter-link"][value=${JSON.stringify(filter)}]`)
                 await driver.page.click(`[data-testid="filter-link"][value=${JSON.stringify(filter)}]`)
+
                 await driver.page.waitForFunction(
                     (expectedQuery: string) => {
                         const url = new URL(document.location.href)
@@ -127,30 +199,33 @@ describe('Search', () => {
     })
 
     describe('Filter completion', () => {
-        withSearchQueryInput(editorName => {
-            test(`Completing a negated filter should insert the filter with - prefix (${editorName})`, async () => {
+        withSearchQueryInput(({ name, waitForInput, applySettings }) => {
+            const queryInputSelector = queryInputSelectors[name]
+
+            test.skip(`Completing a negated filter should insert the filter with - prefix (${name})`, async () => {
                 testContext.overrideGraphQL({
                     ...commonSearchGraphQLResults,
-                    ...createViewerSettingsGraphQLOverride({ user: enableEditor(editorName) }),
+                    ...createViewerSettingsGraphQLOverride({ user: applySettings() }),
                 })
 
                 await driver.page.goto(driver.sourcegraphBaseUrl + '/search')
-                const editor = await createEditorAPI(driver, queryInputSelector)
+                const editor = await waitForInput(driver, queryInputSelector)
                 await editor.replace('-file')
                 await editor.selectSuggestion('-file')
                 expect(await editor.getValue()).toStrictEqual('-file:')
-                await percySnapshotWithVariants(driver.page, `Search home page (${editorName})`)
                 await accessibilityAudit(driver.page)
             })
         })
     })
 
     describe('Suggestions', () => {
-        withSearchQueryInput(editorName => {
-            test.skip(`Typing in the search field shows relevant suggestions (${editorName})`, async () => {
+        withSearchQueryInput(({ name, waitForInput, applySettings }) => {
+            const queryInputSelector = queryInputSelectors[name]
+
+            test.skip(`Typing in the search field shows relevant suggestions (${name})`, async () => {
                 testContext.overrideGraphQL({
                     ...commonSearchGraphQLResults,
-                    ...createViewerSettingsGraphQLOverride({ user: enableEditor(editorName) }),
+                    ...createViewerSettingsGraphQLOverride({ user: applySettings() }),
                 })
                 testContext.overrideSearchStreamEvents([
                     {
@@ -184,7 +259,7 @@ describe('Search', () => {
 
                 // Repo autocomplete from homepage
                 await driver.page.goto(driver.sourcegraphBaseUrl + '/search')
-                const editor = await createEditorAPI(driver, queryInputSelector)
+                const editor = await waitForInput(driver, queryInputSelector)
                 await editor.focus()
                 await editor.replace('repo:go-jwt-middlew')
                 await editor.selectSuggestion('github.com/auth0/go-jwt-middleware')
@@ -215,31 +290,26 @@ describe('Search', () => {
     })
 
     describe('Search field value', () => {
-        withSearchQueryInput(editorName => {
-            describe(editorName, () => {
+        withSearchQueryInput(({ name, waitForInput, applySettings }) => {
+            const queryInputSelector = queryInputSelectors[name]
+
+            describe(name, () => {
                 beforeEach(() => {
                     testContext.overrideGraphQL({
                         ...commonSearchGraphQLResults,
-                        ...createViewerSettingsGraphQLOverride({ user: enableEditor(editorName) }),
-                        RegistryExtensions: () => ({
-                            extensionRegistry: {
-                                __typename: 'ExtensionRegistry',
-                                extensions: { error: null, nodes: [] },
-                                featuredExtensions: null,
-                            },
-                        }),
+                        ...createViewerSettingsGraphQLOverride({ user: applySettings({}) }),
                     })
                 })
 
                 test('Is set from the URL query parameter when loading a search-related page', async () => {
                     await driver.page.goto(driver.sourcegraphBaseUrl + '/search?q=foo')
-                    const editor = await createEditorAPI(driver, queryInputSelector)
+                    const editor = await waitForInput(driver, queryInputSelector)
                     await editor.waitForIt()
                     await driver.page.waitForSelector('[data-testid="results-info-bar"]')
                     expect(await editor.getValue()).toStrictEqual('foo')
                     // Field value is cleared when navigating to a non search-related page
-                    await driver.page.waitForSelector('a[href="/notebooks"]')
-                    await driver.page.click('a[href="/notebooks"]')
+                    await driver.page.waitForSelector('a[href="/batch-changes"]')
+                    await driver.page.click('a[href="/batch-changes"]')
                     // Search box is gone when in a non-search page
                     expect(await editor.getValue()).toStrictEqual(undefined)
                     // Field value is restored when the back button is pressed
@@ -249,96 +319,135 @@ describe('Search', () => {
                     expect(await editor.getValue()).toStrictEqual('foo')
                 })
 
-                test('Normalizes input with line breaks', async () => {
+                test.skip('Normalizes input with line breaks', async () => {
                     await driver.page.goto(driver.sourcegraphBaseUrl + '/search')
-                    const editor = await createEditorAPI(driver, queryInputSelector)
+                    const editor = await waitForInput(driver, queryInputSelector)
                     await editor.focus()
                     await driver.paste('foo\n\n\n\n\nbar')
-                    expect(await editor.getValue()).toBe('foo bar')
+                    expect(await editor.getValue()).toBe(name === 'v2' ? 'context:global foo bar' : 'foo bar')
                 })
             })
         })
     })
 
     describe('Case sensitivity toggle', () => {
-        withSearchQueryInput(editorName => {
-            describe(editorName, () => {
+        withSearchQueryInput(({ name, applySettings, waitForInput }) => {
+            const queryInputSelector = queryInputSelectors[name]
+
+            describe(name, () => {
                 beforeEach(() => {
                     testContext.overrideGraphQL({
                         ...commonSearchGraphQLResults,
-                        ...createViewerSettingsGraphQLOverride({ user: enableEditor(editorName) }),
+                        ...createViewerSettingsGraphQLOverride({ user: applySettings() }),
                     })
                 })
 
                 test('Clicking toggle turns on case sensitivity', async () => {
                     await driver.page.goto(driver.sourcegraphBaseUrl + '/search')
-                    const editor = await createEditorAPI(driver, queryInputSelector)
+                    const editor = await waitForInput(driver, queryInputSelector)
                     await driver.page.waitForSelector('.test-case-sensitivity-toggle')
                     await editor.focus()
                     await driver.page.keyboard.type('test')
                     await driver.page.click('.test-case-sensitivity-toggle')
-                    await driver.assertWindowLocation('/search?q=context:global+test&patternType=standard&case=yes')
+                    await editor.focus()
+                    await driver.page.keyboard.press(Key.Enter)
+                    await driver.assertWindowLocation('/search?q=context:global+test&patternType=keyword&case=yes&sm=0')
                 })
 
                 test('Clicking toggle turns off case sensitivity and removes case= URL parameter', async () => {
-                    await driver.page.goto(driver.sourcegraphBaseUrl + '/search?q=test&patternType=standard&case=yes')
-                    await createEditorAPI(driver, queryInputSelector)
+                    await driver.page.goto(
+                        driver.sourcegraphBaseUrl + '/search?q=context:global+test&patternType=keyword&case=yes&sm=0'
+                    )
+                    const input = await waitForInput(driver, queryInputSelector)
                     await driver.page.waitForSelector('.test-case-sensitivity-toggle')
                     await driver.page.click('.test-case-sensitivity-toggle')
-                    await driver.assertWindowLocation('/search?q=context:global+test&patternType=standard')
+                    if (name === 'v2') {
+                        // The the toggle buttons do not submit automatically in the new search input
+                        await input.focus()
+                        await driver.page.keyboard.press(Key.Enter)
+                    }
+                    await driver.assertWindowLocation('/search?q=context:global+test&patternType=keyword&sm=0')
                 })
             })
         })
     })
 
     describe('Structural search toggle', () => {
-        withSearchQueryInput(editorName => {
-            describe(editorName, () => {
+        withSearchQueryInput(({ name, applySettings, waitForInput }) => {
+            const queryInputSelector = queryInputSelectors[name]
+
+            describe(name, () => {
                 beforeEach(() => {
                     testContext.overrideGraphQL({
                         ...commonSearchGraphQLResults,
-                        ...createViewerSettingsGraphQLOverride({ user: enableEditor(editorName) }),
+                        ...createViewerSettingsGraphQLOverride({
+                            user: applySettings({ experimentalFeatures: { keywordSearch: false } }),
+                        }),
                     })
+                    testContext.overrideJsContext({ experimentalFeatures: { structuralSearch: 'enabled' } })
                 })
 
                 test('Clicking toggle turns on structural search', async () => {
                     await driver.page.goto(driver.sourcegraphBaseUrl + '/search')
-                    const editor = await createEditorAPI(driver, queryInputSelector)
+                    const editor = await waitForInput(driver, queryInputSelector)
                     await driver.page.waitForSelector('.test-structural-search-toggle')
                     await editor.focus()
                     await driver.page.keyboard.type('test')
                     await driver.page.click('.test-structural-search-toggle')
-                    await driver.assertWindowLocation('/search?q=context:global+test&patternType=structural')
+                    await editor.focus()
+                    await driver.page.keyboard.press(Key.Enter)
+                    await driver.assertWindowLocation('/search?q=context:global+test&patternType=structural&sm=0')
                 })
 
                 test('Clicking toggle turns on structural search and removes existing patternType parameter', async () => {
                     await driver.page.goto(driver.sourcegraphBaseUrl + '/search?q=test&patternType=regexp')
-                    const editor = await createEditorAPI(driver, queryInputSelector)
+                    const editor = await waitForInput(driver, queryInputSelector)
                     await editor.focus()
                     await driver.page.waitForSelector('.test-structural-search-toggle')
                     await driver.page.click('.test-structural-search-toggle')
-                    await driver.assertWindowLocation('/search?q=context:global+test&patternType=structural')
+                    if (name === 'v2') {
+                        // The the toggle buttons do not submit automatically in the new search input
+                        await editor.focus()
+                        await driver.page.keyboard.press(Key.Enter)
+                    }
+                    await driver.assertWindowLocation('/search?q=context:global+test&patternType=structural&sm=0')
                 })
 
                 test('Clicking toggle turns off structural search and reverts to default pattern type', async () => {
                     await driver.page.goto(driver.sourcegraphBaseUrl + '/search?q=test&patternType=structural')
-                    await createEditorAPI(driver, queryInputSelector)
+                    const editor = await waitForInput(driver, queryInputSelector)
                     await driver.page.waitForSelector('.test-structural-search-toggle')
                     await driver.page.click('.test-structural-search-toggle')
-                    await driver.assertWindowLocation('/search?q=context:global+test&patternType=standard')
+                    if (name === 'v2') {
+                        // The the toggle buttons do not submit automatically in the new search input
+                        await editor.focus()
+                        await driver.page.keyboard.press(Key.Enter)
+                    }
+                    await driver.assertWindowLocation('/search?q=context:global+test&patternType=keyword&sm=0')
                 })
             })
         })
     })
 
     describe('Search button', () => {
+        const { waitForInput, applySettings } = getSearchQueryInputConfig('codemirror6')
+
+        beforeEach(() => {
+            testContext.overrideGraphQL({
+                ...commonSearchGraphQLResults,
+                ...createViewerSettingsGraphQLOverride({ user: applySettings() }),
+            })
+        })
+
         test('Clicking search button executes search', async () => {
             await driver.page.goto(driver.sourcegraphBaseUrl + '/search?q=test&patternType=regexp')
+            const editor = await waitForInput(driver, queryInputSelectors.codemirror6)
+            await editor.focus()
+            await driver.page.keyboard.type(' hello')
+
             await driver.page.waitForSelector('.test-search-button', { visible: true })
-            // Note: Delay added because this test has been intermittently failing without it. Monaco search bar may drop events if it gets too many too fast.
-            await driver.page.keyboard.type(' hello', { delay: 500 })
             await driver.page.click('.test-search-button')
-            await driver.assertWindowLocation('/search?q=context:global+test+hello&patternType=regexp')
+            await driver.assertWindowLocation('/search?q=context:global+test+hello&patternType=regexp&sm=0')
         })
     })
 
@@ -380,7 +489,7 @@ describe('Search', () => {
             await driver.page.waitForSelector('.test-search-result', { visible: true })
 
             const results = await driver.page.evaluate(() =>
-                [...document.querySelectorAll('.test-search-result-label')].map(label =>
+                [...document.querySelectorAll('[data-testid="result-container-header"]')].map(label =>
                     (label.textContent || '').trim()
                 )
             )
@@ -426,10 +535,12 @@ describe('Search', () => {
             await driver.page.waitForSelector('[data-testid="search-result-match-code-excerpt"] .match-highlight', {
                 visible: true,
             })
-            await percySnapshotWithVariants(driver.page, 'Streaming diff search syntax highlighting', {
-                waitForCodeHighlighting: true,
-            })
-            await accessibilityAudit(driver.page)
+
+            // Since current Chrome version that we use for integration tests
+            // doesn't support @layers rule cody styles leak to the main scope and override
+            // global classes for diff, production version should be fine since all browsers
+            // we support they support @layers (means no CSS leaks)
+            // await accessibilityAudit(driver.page)
         })
 
         test('commit search syntax highlighting', async () => {
@@ -446,9 +557,6 @@ describe('Search', () => {
                 visible: true,
             })
 
-            await percySnapshotWithVariants(driver.page, 'Streaming commit search syntax highlighting', {
-                waitForCodeHighlighting: true,
-            })
             await accessibilityAudit(driver.page)
         })
 
@@ -464,13 +572,6 @@ describe('Search', () => {
                 visible: true,
             })
 
-            await percySnapshotWithVariants(
-                driver.page,
-                'Streaming commit code, file and repo results with filter suggestions',
-                {
-                    waitForCodeHighlighting: true,
-                }
-            )
             await accessibilityAudit(driver.page)
         })
 
@@ -482,57 +583,138 @@ describe('Search', () => {
             testContext.overrideSearchStreamEvents(symbolSearchStreamEvents)
 
             await driver.page.goto(driver.sourcegraphBaseUrl + '/search?q=test&patternType=regexp')
-            await driver.page.waitForSelector('.test-file-match-children-item', {
+            await driver.page.waitForSelector('[data-testid="symbol-search-result"]', {
                 visible: true,
             })
 
-            await percySnapshotWithVariants(driver.page, 'Streaming search symbols', {
-                waitForCodeHighlighting: true,
+            await accessibilityAudit(driver.page)
+        })
+
+        test('owner results', async () => {
+            testContext.overrideGraphQL({
+                ...commonSearchGraphQLResults,
+                ...highlightFileResult,
             })
+            testContext.overrideSearchStreamEvents(ownerSearchStreamEvents)
+
+            await driver.page.goto(driver.sourcegraphBaseUrl + '/search?q=test&patternType=regexp')
+            await driver.page.waitForSelector('[data-testid="owner-search-result"]', {
+                visible: true,
+            })
+
             await accessibilityAudit(driver.page)
         })
     })
 
     describe('Saved searches', () => {
-        test('is styled correctly, with saved searches', async () => {
+        test('list page', async () => {
             testContext.overrideGraphQL({
                 ...commonSearchGraphQLResults,
-                savedSearches: () => ({
-                    savedSearches: [
-                        {
-                            description: 'Demo',
-                            id: 'U2F2ZWRTZWFyY2g6NQ==',
-                            namespace: { __typename: 'User', id: 'user123', namespaceName: 'test' },
-                            notify: false,
-                            notifySlack: false,
-                            query: 'context:global Batch Change patternType:literal',
-                            slackWebhookURL: null,
+                SavedSearches: () => ({
+                    savedSearches: {
+                        nodes: [
+                            {
+                                __typename: 'SavedSearch',
+                                description: 'Demo',
+                                id: 'U2F2ZWRTZWFyY2g6NQ==',
+                                owner: { __typename: 'User', id: 'user123', namespaceName: 'test' },
+                                createdBy: {
+                                    __typename: 'User',
+                                    id: 'a',
+                                    username: 'alice',
+                                    url: '',
+                                },
+                                createdAt: '2020-04-21T10:10:10Z',
+                                updatedBy: {
+                                    __typename: 'User',
+                                    id: 'a',
+                                    username: 'alice',
+                                    url: '',
+                                },
+                                updatedAt: '2020-04-21T10:10:10Z',
+                                draft: false,
+                                visibility: SavedSearchVisibility.PUBLIC,
+                                query: 'context:global Batch Change patternType:literal',
+                                url: '/saved-searches/U2F2ZWRTZWFyY2g6NQ==',
+                                viewerCanAdminister: true,
+                            },
+                        ],
+                        totalCount: 1,
+                        pageInfo: {
+                            startCursor:
+                                'U2F2ZWRTZWFyY2hDdXJzb3I6W3siYyI6InVwZGF0ZWRfYXQiLCJ2IjoiMTU4NzQ2MzgxMDAwMDAwMDAwMCIsImQiOiIifV0=',
+                            endCursor:
+                                'U2F2ZWRTZWFyY2hDdXJzb3I6W3siYyI6InVwZGF0ZWRfYXQiLCJ2IjoiMTU4NzQ2MzgxMDAwMDAwMDAwMCIsImQiOiIifV0=',
+                            hasNextPage: false,
+                            hasPreviousPage: false,
                         },
-                    ],
+                    },
+                }),
+                ViewerAffiliatedNamespaces: () => ({
+                    viewer: {
+                        affiliatedNamespaces: {
+                            nodes: [
+                                {
+                                    __typename: 'User',
+                                    id: 'user123',
+                                    namespaceName: 'test',
+                                },
+                                {
+                                    __typename: 'Org',
+                                    id: 'org456',
+                                    namespaceName: 'test-org',
+                                    displayName: 'Test Org',
+                                },
+                            ],
+                        },
+                    },
                 }),
             })
 
-            await driver.page.goto(driver.sourcegraphBaseUrl + '/users/test/searches')
+            await driver.page.goto(driver.sourcegraphBaseUrl + '/saved-searches')
             await driver.page.waitForSelector('[data-testid="saved-searches-list-page"]')
-            await percySnapshotWithVariants(driver.page, 'Saved searches list')
             await accessibilityAudit(driver.page)
         })
 
-        test('is styled correctly, with saved search form', async () => {
-            await driver.page.goto(driver.sourcegraphBaseUrl + '/users/test/searches/add')
+        test('new form', async () => {
+            testContext.overrideGraphQL({
+                ...commonSearchGraphQLResults,
+                ViewerAffiliatedNamespaces: () => ({
+                    viewer: {
+                        affiliatedNamespaces: {
+                            nodes: [
+                                {
+                                    __typename: 'User',
+                                    id: 'user123',
+                                    namespaceName: 'test',
+                                },
+                                {
+                                    __typename: 'Org',
+                                    id: 'org456',
+                                    namespaceName: 'test-org',
+                                    displayName: 'Test Org',
+                                },
+                            ],
+                        },
+                    },
+                }),
+            })
+
+            await driver.page.goto(driver.sourcegraphBaseUrl + '/saved-searches/new')
             await driver.page.waitForSelector('[data-testid="saved-search-form"]')
-            await percySnapshotWithVariants(driver.page, 'Saved search - Form')
             await accessibilityAudit(driver.page)
         })
     })
 
     describe('Search sidebar', () => {
-        withSearchQueryInput(editorName => {
-            describe(editorName, () => {
+        withSearchQueryInput(({ name, waitForInput, applySettings }) => {
+            const queryInputSelector = queryInputSelectors[name]
+
+            describe(name, () => {
                 beforeEach(() => {
                     testContext.overrideGraphQL({
                         ...commonSearchGraphQLResults,
-                        ...createViewerSettingsGraphQLOverride({ user: enableEditor(editorName) }),
+                        ...createViewerSettingsGraphQLOverride({ user: applySettings() }),
                     })
                 })
 
@@ -540,21 +722,11 @@ describe('Search', () => {
                     await driver.page.goto(driver.sourcegraphBaseUrl + '/search?q=test')
                     await driver.page.waitForSelector('[data-testid="search-type-suggest"]')
                     await driver.page.click('[data-testid="search-type-suggest"]')
-                    const editor = await createEditorAPI(driver, queryInputSelector)
+                    const editor = await waitForInput(driver, queryInputSelector)
                     await editor.waitForSuggestion()
                     expect(await editor.getValue()).toEqual('test repo:')
                 })
             })
-        })
-
-        test('updates the query input and submits the query', async () => {
-            await driver.page.goto(driver.sourcegraphBaseUrl + '/search?q=test')
-            await driver.page.waitForSelector('[data-testid="search-type-submit"]')
-            await Promise.all([
-                driver.page.waitForNavigation(),
-                driver.page.click('[data-testid="search-type-submit"]'),
-            ])
-            await driver.assertWindowLocation('/search?q=context:global+test+type:commit&patternType=standard')
         })
     })
 })

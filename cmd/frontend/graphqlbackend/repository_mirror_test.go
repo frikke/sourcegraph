@@ -2,26 +2,28 @@ package graphqlbackend
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/backend"
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/database/dbmocks"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver"
+	"github.com/sourcegraph/sourcegraph/internal/gitserver/protocol"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 )
 
 func TestCheckMirrorRepositoryConnection(t *testing.T) {
 	const repoName = api.RepoName("my/repo")
 
-	users := database.NewMockUserStore()
+	users := dbmocks.NewMockUserStore()
 	users.GetByCurrentAuthUserFunc.SetDefaultReturn(&types.User{SiteAdmin: true}, nil)
 
-	repos := database.NewMockRepoStore()
+	repos := dbmocks.NewMockRepoStore()
 
-	db := database.NewMockDB()
+	db := dbmocks.NewMockDB()
 	db.UsersFunc.SetDefaultReturn(users)
 	db.ReposFunc.SetDefaultReturn(repos)
 
@@ -38,10 +40,10 @@ func TestCheckMirrorRepositoryConnection(t *testing.T) {
 			}
 			return nil
 		}
-		defer func() {
+		t.Cleanup(func() {
 			backend.Mocks = backend.MockServices{}
 			gitserver.MockIsRepoCloneable = nil
-		}()
+		})
 
 		RunTests(t, []*Test{
 			{
@@ -49,50 +51,6 @@ func TestCheckMirrorRepositoryConnection(t *testing.T) {
 				Query: `
 				mutation {
 					checkMirrorRepositoryConnection(repository: "UmVwb3NpdG9yeToxMjM=") {
-					    error
-					}
-				}
-			`,
-				ExpectedResult: `
-				{
-					"checkMirrorRepositoryConnection": {
-						"error": null
-					}
-				}
-			`,
-			},
-		})
-
-		if !calledIsRepoCloneable {
-			t.Error("!calledIsRepoCloneable")
-		}
-	})
-
-	t.Run("name arg", func(t *testing.T) {
-		backend.Mocks.Repos.GetByName = func(ctx context.Context, name api.RepoName) (*types.Repo, error) {
-			t.Fatal("want GetByName to not be called")
-			return nil, nil
-		}
-
-		calledIsRepoCloneable := false
-		gitserver.MockIsRepoCloneable = func(repo api.RepoName) error {
-			calledIsRepoCloneable = true
-			if want := repoName; !reflect.DeepEqual(repo, want) {
-				t.Errorf("got %+v, want %+v", repo, want)
-			}
-			return nil
-		}
-		defer func() {
-			backend.Mocks = backend.MockServices{}
-			gitserver.MockIsRepoCloneable = nil
-		}()
-
-		RunTests(t, []*Test{
-			{
-				Schema: mustParseGraphQLSchema(t, db),
-				Query: `
-				mutation {
-					checkMirrorRepositoryConnection(name: "my/repo") {
 					    error
 					}
 				}
@@ -188,10 +146,10 @@ func TestCheckMirrorRepositoryRemoteURL(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.repoURL, func(t *testing.T) {
-			users := database.NewMockUserStore()
+			users := dbmocks.NewMockUserStore()
 			users.GetByCurrentAuthUserFunc.SetDefaultReturn(&types.User{SiteAdmin: true}, nil)
 
-			db := database.NewMockDB()
+			db := dbmocks.NewMockDB()
 			db.UsersFunc.SetDefaultReturn(users)
 
 			backend.Mocks.Repos.GetByName = func(ctx context.Context, name api.RepoName) (*types.Repo, error) {
@@ -201,9 +159,9 @@ func TestCheckMirrorRepositoryRemoteURL(t *testing.T) {
 					Sources:   map[string]*types.SourceInfo{"1": {CloneURL: tc.repoURL}},
 				}, nil
 			}
-			defer func() {
+			t.Cleanup(func() {
 				backend.Mocks = backend.MockServices{}
-			}()
+			})
 
 			RunTests(t, []*Test{
 				{
@@ -222,4 +180,57 @@ func TestCheckMirrorRepositoryRemoteURL(t *testing.T) {
 			})
 		})
 	}
+}
+
+type fakeGitserverClient struct {
+	gitserver.Client
+}
+
+func (f *fakeGitserverClient) RepoCloneProgress(_ context.Context, repoName api.RepoName) (*protocol.RepoCloneProgress, error) {
+	return &protocol.RepoCloneProgress{
+		CloneInProgress: true,
+		CloneProgress:   fmt.Sprintf("cloning fake %s...", repoName),
+		Cloned:          false,
+	}, nil
+}
+
+func TestRepositoryMirrorInfoCloneProgressCallsGitserver(t *testing.T) {
+	users := dbmocks.NewMockUserStore()
+	users.GetByCurrentAuthUserFunc.SetDefaultReturn(&types.User{SiteAdmin: true}, nil)
+
+	db := dbmocks.NewMockDB()
+	db.UsersFunc.SetDefaultReturn(users)
+
+	backend.Mocks.Repos.GetByName = func(ctx context.Context, name api.RepoName) (*types.Repo, error) {
+		return &types.Repo{
+			Name:      "repo-name",
+			CreatedAt: time.Now(),
+			Sources:   map[string]*types.SourceInfo{"1": {}},
+		}, nil
+	}
+	t.Cleanup(func() {
+		backend.Mocks = backend.MockServices{}
+	})
+
+	RunTest(t, &Test{
+		Schema: mustParseGraphQLSchemaWithClient(t, db, &fakeGitserverClient{}),
+		Query: `
+			{
+				repository(name: "my/repo") {
+					mirrorInfo {
+						cloneProgress
+					}
+				}
+			}
+		`,
+		ExpectedResult: `
+			{
+				"repository": {
+					"mirrorInfo": {
+						"cloneProgress": "cloning fake repo-name..."
+					}
+				}
+			}
+		`,
+	})
 }

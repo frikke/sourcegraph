@@ -4,16 +4,16 @@ import { mdiClose } from '@mdi/js'
 import { VisuallyHidden } from '@reach/visually-hidden'
 
 import { CodeSnippet } from '@sourcegraph/branded/src/components/CodeSnippet'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
 import { Button, Link, Modal, H3, H4, Text, Icon } from '@sourcegraph/wildcard'
 
 import { BatchSpecDownloadLink, getFileName } from '../../BatchSpec'
 
 import styles from './DownloadSpecModal.module.scss'
 
-export interface DownloadSpecModalProps {
+export interface DownloadSpecModalProps extends TelemetryV2Props {
     name: string
     originalInput: string
-    isLightTheme: boolean
     setIsDownloadSpecModalOpen: (condition: boolean) => void
     setDownloadSpecModalDismissed: (condition: boolean) => void
 }
@@ -21,9 +21,9 @@ export interface DownloadSpecModalProps {
 export const DownloadSpecModal: React.FunctionComponent<React.PropsWithChildren<DownloadSpecModalProps>> = ({
     name,
     originalInput,
-    isLightTheme,
     setIsDownloadSpecModalOpen,
     setDownloadSpecModalDismissed,
+    telemetryRecorder,
 }) => (
     <Modal
         onDismiss={() => {
@@ -71,7 +71,7 @@ export const DownloadSpecModal: React.FunctionComponent<React.PropsWithChildren<
                         <span className="text-monospace">batch</span> command allows to run batch specification files
                         using Docker.
                     </Text>
-                    <Link to="https://docs.sourcegraph.com/cli">Download src-cli</Link>
+                    <Link to="/help/cli">Download src-cli</Link>
                 </div>
             </div>
         </div>
@@ -93,8 +93,8 @@ export const DownloadSpecModal: React.FunctionComponent<React.PropsWithChildren<
                 <BatchSpecDownloadLink
                     name={name}
                     originalInput={originalInput}
-                    isLightTheme={isLightTheme}
                     asButton={false}
+                    telemetryRecorder={telemetryRecorder}
                 >
                     <Button
                         variant="primary"

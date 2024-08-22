@@ -4,26 +4,31 @@ import (
 	"context"
 	"os"
 	"strconv"
+	"sync"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/database"
 	"github.com/sourcegraph/sourcegraph/internal/env"
+	"github.com/sourcegraph/sourcegraph/internal/gqlutil"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 type settingsResolver struct {
 	db       database.DB
-	subject  *settingsSubject
+	subject  *settingsSubjectResolver
 	settings *api.Settings
-	user     *types.User
+
+	authorUserOnce sync.Once
+	authorUser     *types.User
+	authorUserErr  error
 }
 
 func (o *settingsResolver) ID() int32 {
 	return o.settings.ID
 }
 
-func (o *settingsResolver) Subject() *settingsSubject {
+func (o *settingsResolver) Subject() *settingsSubjectResolver {
 	return o.subject
 }
 
@@ -36,37 +41,34 @@ func (o *settingsResolver) Contents() JSONCString {
 	return JSONCString(o.settings.Contents)
 }
 
-func (o *settingsResolver) CreatedAt() DateTime {
-	return DateTime{Time: o.settings.CreatedAt}
+func (o *settingsResolver) CreatedAt() gqlutil.DateTime {
+	return gqlutil.DateTime{Time: o.settings.CreatedAt}
 }
 
 func (o *settingsResolver) Author(ctx context.Context) (*UserResolver, error) {
 	if o.settings.AuthorUserID == nil {
 		return nil, nil
 	}
-	if o.user == nil {
-		var err error
-		o.user, err = o.db.Users().GetByID(ctx, *o.settings.AuthorUserID)
-		if err != nil {
-			return nil, err
-		}
+
+	o.authorUserOnce.Do(func() {
+		o.authorUser, o.authorUserErr = o.db.Users().GetByID(ctx, *o.settings.AuthorUserID)
+	})
+	if o.authorUserErr != nil {
+		return nil, o.authorUserErr
 	}
-	return NewUserResolver(o.db, o.user), nil
+	return NewUserResolver(ctx, o.db, o.authorUser), nil
 }
 
 var globalSettingsAllowEdits, _ = strconv.ParseBool(env.Get("GLOBAL_SETTINGS_ALLOW_EDITS", "false", "When GLOBAL_SETTINGS_FILE is in use, allow edits in the application to be made which will be overwritten on next process restart"))
 
 // like database.Settings.CreateIfUpToDate, except it handles notifying the
 // query-runner if any saved queries have changed.
-func settingsCreateIfUpToDate(ctx context.Context, db database.DB, subject *settingsSubject, lastID *int32, authorUserID int32, contents string) (latestSetting *api.Settings, err error) {
+func settingsCreateIfUpToDate(ctx context.Context, db database.DB, subject *settingsSubjectResolver, lastID *int32, authorUserID int32, contents string) (latestSetting *api.Settings, err error) {
+	// 🚨 SECURITY: Ensure that we've already checked the viewer's access to the subject's settings.
+	subject.assertCheckedAccess()
+
 	if os.Getenv("GLOBAL_SETTINGS_FILE") != "" && subject.site != nil && !globalSettingsAllowEdits {
 		return nil, errors.New("Updating global settings not allowed when using GLOBAL_SETTINGS_FILE")
-	}
-
-	// Read current saved queries.
-	var oldSavedQueries api.PartialConfigSavedQueries
-	if err := subject.readSettings(ctx, &oldSavedQueries); err != nil {
-		return nil, err
 	}
 
 	// Update settings.

@@ -7,10 +7,11 @@ import (
 )
 
 type CodeInsights struct {
+	Ctx       context.Context
 	DateRange string
 	Grouping  string
 	DB        database.DB
-	Cache     bool
+	Cache     KeyValue
 }
 
 // Insights:Hovers

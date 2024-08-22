@@ -8,6 +8,8 @@ import (
 	"github.com/sourcegraph/log"
 
 	"github.com/sourcegraph/sourcegraph/internal/audit"
+	"github.com/sourcegraph/sourcegraph/internal/conf"
+	"github.com/sourcegraph/sourcegraph/schema"
 )
 
 func main() {
@@ -27,21 +29,29 @@ func main() {
 		InstanceID: "",
 	})
 
-	defer func() {
-		err := callbacks.Sync()
-		if err != nil {
-			os.Exit(-1)
-		}
-	}()
+	defer callbacks.Sync()
 
-	logger := log.Scoped("test", "logger with sampling config")
+	logger := log.Scoped("test")
 
 	logsCount, err := strconv.Atoi(os.Args[1])
 	if err != nil {
 		os.Exit(-1)
 	}
 
-	for i := 0; i < logsCount; i++ {
+	// audit log depends on site config, but a mock is sufficient
+	conf.Mock(&conf.Unified{SiteConfiguration: schema.SiteConfiguration{
+		Log: &schema.Log{
+			AuditLog: &schema.AuditLog{
+				InternalTraffic: true,
+				GitserverAccess: true,
+				GraphQL:         true,
+				SeverityLevel:   "INFO",
+			},
+		},
+	}})
+	defer conf.Mock(nil)
+
+	for range logsCount {
 		audit.Log(ctx, logger, audit.Record{
 			Entity: "integration test",
 			Action: "sampling testing",

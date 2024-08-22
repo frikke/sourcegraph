@@ -2,39 +2,168 @@ package repos
 
 import (
 	"context"
+	"os"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/sourcegraph/sourcegraph/internal/extsvc"
-	"github.com/sourcegraph/sourcegraph/internal/httpcli"
+	"github.com/sourcegraph/sourcegraph/internal/ratelimit"
 	"github.com/sourcegraph/sourcegraph/internal/testutil"
-	"github.com/sourcegraph/sourcegraph/internal/types"
+	"github.com/sourcegraph/sourcegraph/internal/types/typestest"
 	"github.com/sourcegraph/sourcegraph/schema"
 )
 
 func TestGerritSource_ListRepos(t *testing.T) {
-	conf := &schema.GerritConnection{
-		Url: "https://gerrit-review.googlesource.com",
-	}
-	cf, save := newClientFactory(t, t.Name(), httpcli.GerritUnauthenticateMiddleware)
-	defer save(t)
+	ratelimit.SetupForTest(t)
 
-	svc := &types.ExternalService{
-		Kind:   extsvc.KindGerrit,
-		Config: extsvc.NewUnencryptedConfig(marshalJSON(t, conf)),
-	}
+	t.Run("no filtering", func(t *testing.T) {
+		cf, save := NewClientFactory(t, t.Name())
+		defer save(t)
 
-	ctx := context.Background()
-	src, err := NewGerritSource(ctx, svc, cf)
-	if err != nil {
-		t.Fatal(err)
-	}
+		svc := typestest.MakeExternalService(t, extsvc.VariantGerrit, &schema.GerritConnection{
+			Url:      "https://gerrit.sgdev.org",
+			Username: os.Getenv("GERRIT_USERNAME"),
+			Password: os.Getenv("GERRIT_PASSWORD"),
+		})
 
-	src.perPage = 25
+		ctx := context.Background()
+		src, err := NewGerritSource(ctx, svc, cf)
+		require.NoError(t, err)
 
-	repos, err := listAll(context.Background(), src)
-	if err != nil {
-		t.Fatal(err)
-	}
+		src.perPage = 25
 
-	testutil.AssertGolden(t, "testdata/sources/GERRIT/"+t.Name(), update(t.Name()), repos)
+		repos, err := ListAll(ctx, src)
+		require.NoError(t, err)
+
+		testutil.AssertGolden(t, "testdata/sources/GERRIT/"+t.Name(), Update(t.Name()), repos)
+	})
+
+	t.Run("ssh enabled", func(t *testing.T) {
+		cf, save := NewClientFactory(t, t.Name())
+		defer save(t)
+
+		svc := typestest.MakeExternalService(t, extsvc.VariantGerrit, &schema.GerritConnection{
+			Url:        "https://gerrit.sgdev.org",
+			Username:   os.Getenv("GERRIT_USERNAME"),
+			Password:   os.Getenv("GERRIT_PASSWORD"),
+			GitURLType: "ssh",
+		})
+
+		ctx := context.Background()
+		src, err := NewGerritSource(ctx, svc, cf)
+		require.NoError(t, err)
+
+		repos, err := ListAll(ctx, src)
+		require.NoError(t, err)
+
+		testutil.AssertGolden(t, "testdata/sources/GERRIT/"+t.Name(), Update(t.Name()), repos)
+	})
+
+	t.Run("with filtering", func(t *testing.T) {
+		cf, save := NewClientFactory(t, t.Name())
+		defer save(t)
+
+		svc := typestest.MakeExternalService(t, extsvc.VariantGerrit, &schema.GerritConnection{
+			Projects: []string{
+				"src-cli",
+			},
+			Url:      "https://gerrit.sgdev.org",
+			Username: os.Getenv("GERRIT_USERNAME"),
+			Password: os.Getenv("GERRIT_PASSWORD"),
+		})
+
+		ctx := context.Background()
+		src, err := NewGerritSource(ctx, svc, cf)
+		require.NoError(t, err)
+
+		src.perPage = 25
+
+		repos, err := ListAll(ctx, src)
+		require.NoError(t, err)
+
+		assert.Len(t, repos, 1)
+		repoNames := make([]string, 0, len(repos))
+		for _, repo := range repos {
+			repoNames = append(repoNames, repo.ExternalRepo.ID)
+		}
+		assert.ElementsMatch(t, repoNames, []string{
+			"src-cli",
+		})
+	})
+
+	t.Run("with exclusion", func(t *testing.T) {
+		cf, save := NewClientFactory(t, t.Name())
+		defer save(t)
+
+		svc := typestest.MakeExternalService(t, extsvc.VariantGerrit, &schema.GerritConnection{
+			Url:      "https://gerrit.sgdev.org",
+			Username: os.Getenv("GERRIT_USERNAME"),
+			Password: os.Getenv("GERRIT_PASSWORD"),
+			Exclude:  []*schema.ExcludedGerritProject{{Name: "src-cli"}},
+		})
+
+		ctx := context.Background()
+		src, err := NewGerritSource(ctx, svc, cf)
+		require.NoError(t, err)
+
+		src.perPage = 25
+
+		repos, err := ListAll(ctx, src)
+		require.NoError(t, err)
+
+		for _, repo := range repos {
+			if string(repo.Name) == "src-cli" {
+				t.Fatal("repo src-cli should not be included")
+			}
+		}
+	})
+
+	t.Run("exclusion overrides inclusion", func(t *testing.T) {
+		cf, save := NewClientFactory(t, t.Name())
+		defer save(t)
+
+		svc := typestest.MakeExternalService(t, extsvc.VariantGerrit, &schema.GerritConnection{
+			Projects: []string{"src-cli"},
+			Exclude:  []*schema.ExcludedGerritProject{{Name: "src-cli"}},
+			Url:      "https://gerrit.sgdev.org",
+			Username: os.Getenv("GERRIT_USERNAME"),
+			Password: os.Getenv("GERRIT_PASSWORD"),
+		})
+
+		ctx := context.Background()
+		src, err := NewGerritSource(ctx, svc, cf)
+		require.NoError(t, err)
+
+		src.perPage = 25
+
+		repos, err := ListAll(ctx, src)
+		require.NoError(t, err)
+
+		assert.Empty(t, repos)
+	})
+
+	t.Run("repositoryPathPattern", func(t *testing.T) {
+		cf, save := NewClientFactory(t, t.Name())
+		defer save(t)
+
+		svc := typestest.MakeExternalService(t, extsvc.VariantGerrit, &schema.GerritConnection{
+			Url:                   "https://gerrit.sgdev.org",
+			Username:              os.Getenv("GERRIT_USERNAME"),
+			Password:              os.Getenv("GERRIT_PASSWORD"),
+			RepositoryPathPattern: "prefix/{name}",
+		})
+
+		ctx := context.Background()
+		src, err := NewGerritSource(ctx, svc, cf)
+		require.NoError(t, err)
+
+		src.perPage = 25
+
+		repos, err := ListAll(ctx, src)
+		require.NoError(t, err)
+
+		testutil.AssertGolden(t, "testdata/sources/GERRIT/"+t.Name(), Update(t.Name()), repos)
+	})
 }

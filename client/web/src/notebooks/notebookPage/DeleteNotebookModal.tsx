@@ -1,16 +1,17 @@
-import React, { useCallback, useEffect } from 'react'
+import React, { type FC, useCallback, useEffect } from 'react'
 
-import { useHistory } from 'react-router'
-import { Observable } from 'rxjs'
+import { useNavigate } from 'react-router-dom'
+import type { Observable } from 'rxjs'
 import { mergeMap, startWith, tap, catchError } from 'rxjs/operators'
 
 import { asError, isErrorLike } from '@sourcegraph/common'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import { LoadingSpinner, useEventObservable, Modal, Button, Alert, H3, Text } from '@sourcegraph/wildcard'
 
-import { deleteNotebook as _deleteNotebook } from '../backend'
+import type { deleteNotebook as _deleteNotebook } from '../backend'
 
-interface DeleteNotebookModalProps extends TelemetryProps {
+interface DeleteNotebookModalProps extends TelemetryProps, TelemetryV2Props {
     notebookId: string
     isOpen: boolean
     toggleDeleteModal: () => void
@@ -18,38 +19,44 @@ interface DeleteNotebookModalProps extends TelemetryProps {
 }
 
 const LOADING = 'loading' as const
+const deleteLabelId = 'deleteNotebookId'
 
-export const DeleteNotebookModal: React.FunctionComponent<React.PropsWithChildren<DeleteNotebookModalProps>> = ({
+export const DeleteNotebookModal: FC<DeleteNotebookModalProps> = ({
     notebookId,
     deleteNotebook,
     isOpen,
     toggleDeleteModal,
     telemetryService,
+    telemetryRecorder,
 }) => {
+    const navigate = useNavigate()
+
     useEffect(() => {
         if (isOpen) {
             telemetryService.log('SearchNotebookDeleteModalOpened')
+            telemetryRecorder.recordEvent('notebook.deleteModal', 'open')
         }
-    }, [isOpen, telemetryService])
-    const deleteLabelId = 'deleteNotebookId'
-    const history = useHistory()
+    }, [isOpen, telemetryService, telemetryRecorder])
 
     const [onDelete, deleteCompletedOrError] = useEventObservable(
         useCallback(
             (click: Observable<React.MouseEvent<HTMLButtonElement>>) =>
                 click.pipe(
-                    tap(() => telemetryService.log('SearchNotebookDeleteButtonClicked')),
+                    tap(() => {
+                        telemetryService.log('SearchNotebookDeleteButtonClicked')
+                        telemetryRecorder.recordEvent('notebook', 'delete')
+                    }),
                     mergeMap(() =>
                         deleteNotebook(notebookId).pipe(
                             tap(() => {
-                                history.push('/notebooks')
+                                navigate('/notebooks')
                             }),
                             startWith(LOADING),
                             catchError(error => [asError(error)])
                         )
                     )
                 ),
-            [deleteNotebook, history, notebookId, telemetryService]
+            [deleteNotebook, navigate, notebookId, telemetryService, telemetryRecorder]
         )
     )
 

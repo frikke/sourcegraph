@@ -1,12 +1,12 @@
 import { subDays } from 'date-fns'
 
 import {
-    BatchChangesByNamespaceResult,
-    BatchChangesResult,
+    type BatchChangesByNamespaceResult,
+    type BatchChangesResult,
     BatchChangeState,
     BatchSpecState,
-    GetLicenseAndUsageInfoResult,
-    ListBatchChange,
+    type GetLicenseAndUsageInfoResult,
+    type ListBatchChange,
 } from '../../../graphql-operations'
 
 export const now = new Date()
@@ -33,7 +33,10 @@ This is my thorough explanation. And it can also get very long, in that case the
             url: '/users/alice',
         },
         currentSpec: {
+            __typename: 'BatchSpec',
             id: 'old-spec-1',
+            state: BatchSpecState.COMPLETED,
+            applyURL: null,
         },
         batchSpecs: {
             nodes: [
@@ -65,7 +68,10 @@ This is my thorough explanation. And it can also get very long, in that case the
             url: '/users/alice',
         },
         currentSpec: {
-            id: 'empty-draft-2',
+            __typename: 'BatchSpec',
+            id: 'empty-draft',
+            state: BatchSpecState.PENDING,
+            applyURL: null,
         },
         batchSpecs: {
             nodes: [
@@ -97,7 +103,10 @@ This is my thorough explanation. And it can also get very long, in that case the
             url: '/users/alice',
         },
         currentSpec: {
-            id: 'old-spec-3',
+            __typename: 'BatchSpec',
+            id: 'empty-draft',
+            state: BatchSpecState.PENDING,
+            applyURL: null,
         },
         batchSpecs: {
             nodes: [
@@ -131,7 +140,10 @@ This is my thorough explanation. And it can also get very long, in that case the
             url: '/users/alice',
         },
         currentSpec: {
-            id: 'test-4',
+            __typename: 'BatchSpec',
+            id: 'empty-draft',
+            state: BatchSpecState.PENDING,
+            applyURL: null,
         },
         batchSpecs: {
             nodes: [

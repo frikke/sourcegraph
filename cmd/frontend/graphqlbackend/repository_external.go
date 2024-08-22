@@ -3,9 +3,9 @@ package graphqlbackend
 import (
 	"context"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/graphqlbackend/graphqlutil"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/gqlutil"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 )
 
@@ -18,14 +18,14 @@ type externalRepositoryResolver struct {
 }
 
 func (r *externalRepositoryResolver) ID(ctx context.Context) (string, error) {
-	repo, err := r.repository.repo(ctx)
+	repo, err := r.repository.getRepo(ctx)
 	if err != nil {
 		return "", err
 	}
 	return repo.ExternalRepo.ID, nil
 }
 func (r *externalRepositoryResolver) ServiceType(ctx context.Context) (string, error) {
-	repo, err := r.repository.repo(ctx)
+	repo, err := r.repository.getRepo(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -34,7 +34,7 @@ func (r *externalRepositoryResolver) ServiceType(ctx context.Context) (string, e
 }
 
 func (r *externalRepositoryResolver) ServiceID(ctx context.Context) (string, error) {
-	repo, err := r.repository.repo(ctx)
+	repo, err := r.repository.getRepo(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -43,21 +43,21 @@ func (r *externalRepositoryResolver) ServiceID(ctx context.Context) (string, err
 }
 
 func (r *RepositoryResolver) ExternalServices(ctx context.Context, args *struct {
-	graphqlutil.ConnectionArgs
-}) (*computedExternalServiceConnectionResolver, error) {
+	gqlutil.ConnectionArgs
+}) (*ComputedExternalServiceConnectionResolver, error) {
 	// 🚨 SECURITY: Only site admins may read external services (they have secrets).
-	if err := backend.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
+	if err := auth.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
 		return nil, err
 	}
 
-	repo, err := r.repo(ctx)
+	repo, err := r.getRepo(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	svcIDs := repo.ExternalServiceIDs()
 	if len(svcIDs) == 0 {
-		return &computedExternalServiceConnectionResolver{
+		return &ComputedExternalServiceConnectionResolver{
 			db:               r.db,
 			args:             args.ConnectionArgs,
 			externalServices: []*types.ExternalService{},
@@ -74,7 +74,7 @@ func (r *RepositoryResolver) ExternalServices(ctx context.Context, args *struct 
 		return nil, err
 	}
 
-	return &computedExternalServiceConnectionResolver{
+	return &ComputedExternalServiceConnectionResolver{
 		db:               r.db,
 		args:             args.ConnectionArgs,
 		externalServices: svcs,

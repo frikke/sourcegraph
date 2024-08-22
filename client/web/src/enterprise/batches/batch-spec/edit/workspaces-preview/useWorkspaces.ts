@@ -1,7 +1,10 @@
 import { dataOrThrowErrors } from '@sourcegraph/http-client'
 
-import { useConnection, UseConnectionResult } from '../../../../../components/FilteredConnection/hooks/useConnection'
 import {
+    useShowMorePagination,
+    type UseShowMorePaginationResult,
+} from '../../../../../components/FilteredConnection/hooks/useShowMorePagination'
+import type {
     Scalars,
     BatchSpecWorkspacesPreviewResult,
     BatchSpecWorkspacesPreviewVariables,
@@ -18,7 +21,7 @@ export interface WorkspacePreviewFilters {
 }
 
 /**
- * Custom hook that wraps `useConnection` to resolve the workspaces for the batch spec
+ * Custom hook that wraps `useShowMorePagination` to resolve the workspaces for the batch spec
  * with the ID and filters provided.
  *
  * @param batchSpecID The id of the batch spec to query.
@@ -27,8 +30,11 @@ export interface WorkspacePreviewFilters {
 export const useWorkspaces = (
     batchSpecID: Scalars['ID'],
     filters?: WorkspacePreviewFilters
-): UseConnectionResult<PreviewHiddenBatchSpecWorkspaceFields | PreviewVisibleBatchSpecWorkspaceFields> =>
-    useConnection<
+): UseShowMorePaginationResult<
+    BatchSpecWorkspacesPreviewResult,
+    PreviewHiddenBatchSpecWorkspaceFields | PreviewVisibleBatchSpecWorkspaceFields
+> =>
+    useShowMorePagination<
         BatchSpecWorkspacesPreviewResult,
         BatchSpecWorkspacesPreviewVariables,
         PreviewHiddenBatchSpecWorkspaceFields | PreviewVisibleBatchSpecWorkspaceFields
@@ -36,12 +42,10 @@ export const useWorkspaces = (
         query: WORKSPACES,
         variables: {
             batchSpec: batchSpecID,
-            after: null,
-            first: WORKSPACES_PER_PAGE_COUNT,
             search: filters?.search ?? null,
         },
         options: {
-            useURL: false,
+            pageSize: WORKSPACES_PER_PAGE_COUNT,
             fetchPolicy: 'cache-and-network',
         },
         getConnection: result => {

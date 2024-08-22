@@ -1,58 +1,81 @@
-import React from 'react'
+import type { FC } from 'react'
 
 import '../SourcegraphWebApp.scss'
 
+import { logger } from '@sourcegraph/common'
+
+import { LegacySourcegraphWebApp } from '../LegacySourcegraphWebApp'
+import { orgAreaHeaderNavItems } from '../org/area/navitems'
+import { orgAreaRoutes } from '../org/area/routes'
+import { orgSettingsAreaRoutes } from '../org/settings/routes'
+import { orgSettingsSideBarItems } from '../org/settings/sidebaritems'
+import { repoSettingsAreaRoutes } from '../repo/settings/routes'
+import { repoSettingsSideBarGroups } from '../repo/settings/sidebaritems'
+import { routes } from '../routes'
+import { siteAdminAreaRoutes } from '../site-admin/routes'
+import { siteAdminSidebarGroups } from '../site-admin/sidebaritems'
 import { SourcegraphWebApp } from '../SourcegraphWebApp'
+import { type StaticAppConfig, type StaticInjectedAppConfig, windowContextConfig } from '../staticAppConfig'
+import type { AppShellInit } from '../storm/app-shell-init'
+import { routes as stormRoutes } from '../storm/routes'
+import { userAreaHeaderNavItems } from '../user/area/navitems'
+import { userAreaRoutes } from '../user/area/routes'
+import { userSettingsAreaRoutes } from '../user/settings/routes'
+import { userSettingsSideBarItems } from '../user/settings/sidebaritems'
 
-import { CodeIntelligenceBadgeContent } from './codeintel/badge/components/CodeIntelligenceBadgeContent'
-import { CodeIntelligenceBadgeMenu } from './codeintel/badge/components/CodeIntelligenceBadgeMenu'
-import { enterpriseExtensionAreaHeaderNavItems } from './extensions/extension/extensionAreaHeaderNavItems'
-import { enterpriseExtensionAreaRoutes } from './extensions/extension/routes'
-import { enterpriseExtensionsAreaHeaderActionButtons } from './extensions/extensionsAreaHeaderActionButtons'
-import { enterpriseExtensionsAreaRoutes } from './extensions/routes'
-import { enterpriseOrgAreaHeaderNavItems } from './organizations/navitems'
-import { enterpriseOrganizationAreaRoutes } from './organizations/routes'
-import { enterpriseRepoHeaderActionButtons } from './repo/repoHeaderActionButtons'
-import { enterpriseRepoContainerRoutes, enterpriseRepoRevisionContainerRoutes } from './repo/routes'
-import { enterpriseRepoSettingsAreaRoutes } from './repo/settings/routes'
-import { enterpriseRepoSettingsSidebarGroups } from './repo/settings/sidebaritems'
-import { enterpriseRoutes } from './routes'
-import { enterpriseSiteAdminOverviewComponents } from './site-admin/overview/overviewComponents'
-import { enterpriseSiteAdminAreaRoutes } from './site-admin/routes'
-import { enterpriseSiteAdminSidebarGroups } from './site-admin/sidebaritems'
-import { enterpriseUserAreaHeaderNavItems } from './user/navitems'
-import { enterpriseUserAreaRoutes } from './user/routes'
-import { enterpriseUserSettingsAreaRoutes } from './user/settings/routes'
-import { enterpriseUserSettingsSideBarItems } from './user/settings/sidebaritems'
+import { BrainDot } from './codeintel/dashboard/components/BrainDot'
+import { enterpriseRepoContainerRoutes } from './repo/enterpriseRepoContainerRoutes'
+import { enterpriseRepoRevisionContainerRoutes } from './repo/enterpriseRepoRevisionContainerRoutes'
+import { siteAdminOverviewComponents } from './site-admin/overview/overviewComponents'
 
-export const EnterpriseWebApp: React.FunctionComponent<React.PropsWithChildren<unknown>> = () => (
-    <SourcegraphWebApp
-        extensionAreaRoutes={enterpriseExtensionAreaRoutes}
-        extensionAreaHeaderNavItems={enterpriseExtensionAreaHeaderNavItems}
-        extensionsAreaRoutes={window.context.enableLegacyExtensions ? enterpriseExtensionsAreaRoutes : undefined}
-        extensionsAreaHeaderActionButtons={
-            window.context.enableLegacyExtensions ? enterpriseExtensionsAreaHeaderActionButtons : undefined
-        }
-        siteAdminAreaRoutes={enterpriseSiteAdminAreaRoutes}
-        siteAdminSideBarGroups={enterpriseSiteAdminSidebarGroups}
-        siteAdminOverviewComponents={enterpriseSiteAdminOverviewComponents}
-        userAreaHeaderNavItems={enterpriseUserAreaHeaderNavItems}
-        userAreaRoutes={enterpriseUserAreaRoutes}
-        userSettingsSideBarItems={enterpriseUserSettingsSideBarItems}
-        userSettingsAreaRoutes={enterpriseUserSettingsAreaRoutes}
-        orgAreaRoutes={enterpriseOrganizationAreaRoutes}
-        orgAreaHeaderNavItems={enterpriseOrgAreaHeaderNavItems}
-        repoContainerRoutes={enterpriseRepoContainerRoutes}
-        repoRevisionContainerRoutes={enterpriseRepoRevisionContainerRoutes}
-        repoHeaderActionButtons={enterpriseRepoHeaderActionButtons}
-        repoSettingsAreaRoutes={enterpriseRepoSettingsAreaRoutes}
-        repoSettingsSidebarGroups={enterpriseRepoSettingsSidebarGroups}
-        routes={enterpriseRoutes}
-        codeIntelligenceEnabled={true}
-        codeIntelligenceBadgeMenu={CodeIntelligenceBadgeMenu}
-        codeIntelligenceBadgeContent={CodeIntelligenceBadgeContent}
-        codeInsightsEnabled={true}
-        batchChangesEnabled={window.context.batchChangesEnabled}
-        searchContextsEnabled={true}
-    />
-)
+const injectedValuesConfig = {
+    /**
+     * Routes and nav links
+     */
+    siteAdminAreaRoutes,
+    siteAdminSideBarGroups: siteAdminSidebarGroups,
+    siteAdminOverviewComponents,
+    userAreaHeaderNavItems,
+    userAreaRoutes,
+    userSettingsSideBarItems,
+    userSettingsAreaRoutes,
+    orgSettingsSideBarItems,
+    orgSettingsAreaRoutes,
+    orgAreaRoutes,
+    orgAreaHeaderNavItems,
+    repoContainerRoutes: enterpriseRepoContainerRoutes,
+    repoRevisionContainerRoutes: enterpriseRepoRevisionContainerRoutes,
+    repoSettingsAreaRoutes,
+    repoSettingsSidebarGroups: repoSettingsSideBarGroups,
+    routes,
+
+    /**
+     * Per feature injections
+     */
+    brainDot: BrainDot,
+} satisfies StaticInjectedAppConfig
+
+const staticAppConfig = {
+    ...injectedValuesConfig,
+    ...windowContextConfig,
+} satisfies StaticAppConfig
+
+export const EnterpriseWebApp: FC<AppShellInit> = props => {
+    if (window.context.experimentalFeatures.enableStorm) {
+        const { graphqlClient, temporarySettingsStorage } = props
+
+        logger.log('Storm 🌪️ is enabled for this page load.')
+
+        return (
+            <SourcegraphWebApp
+                {...staticAppConfig}
+                routes={stormRoutes}
+                graphqlClient={graphqlClient}
+                temporarySettingsStorage={temporarySettingsStorage}
+                telemetryRecorder={window.context.telemetryRecorder}
+            />
+        )
+    }
+
+    return <LegacySourcegraphWebApp {...staticAppConfig} />
+}

@@ -12,18 +12,17 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sourcegraph/go-diff/diff"
+	godiff "github.com/sourcegraph/go-diff/diff"
 	"github.com/sourcegraph/log/logtest"
 
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/graphqlbackend/externallink"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/graphqlbackend/graphqlutil"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/highlight"
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	"github.com/sourcegraph/sourcegraph/internal/authz"
 	"github.com/sourcegraph/sourcegraph/internal/database"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver/gitdomain"
 	"github.com/sourcegraph/sourcegraph/internal/types"
+	"github.com/sourcegraph/sourcegraph/lib/codeintel/languages"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
@@ -41,18 +40,15 @@ func TestRepositoryComparisonNoMergeBase(t *testing.T) {
 		CreatedAt: time.Now(),
 	}
 
-	t.Cleanup(gitserver.ResetMocks)
-	gitserver.Mocks.ResolveRevision = func(spec string, opt gitserver.ResolveRevisionOptions) (api.CommitID, error) {
+	gsClient := gitserver.NewMockClient()
+	gsClient.MergeBaseFunc.SetDefaultReturn("", nil)
+	gsClient.ResolveRevisionFunc.SetDefaultHook(func(_ context.Context, _ api.RepoName, spec string, _ gitserver.ResolveRevisionOptions) (api.CommitID, error) {
 		if spec != wantBaseRevision && spec != wantHeadRevision {
 			t.Fatalf("ResolveRevision received wrong spec: %s", spec)
 		}
 		return api.CommitID(spec), nil
-	}
-	gitserver.Mocks.MergeBase = func(repo api.RepoName, a, b api.CommitID) (api.CommitID, error) {
-		return "", errors.Errorf("merge base doesn't exist!")
-	}
+	})
 
-	gsClient := gitserver.NewClient(db)
 	input := &RepositoryComparisonInput{Base: &wantBaseRevision, Head: &wantHeadRevision}
 	repoResolver := NewRepositoryResolver(db, gsClient, repo)
 
@@ -64,7 +60,48 @@ func TestRepositoryComparisonNoMergeBase(t *testing.T) {
 	require.Equal(t, "..", comp.rangeType)
 }
 
+func TestRepositoryComparisonRootCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+
+	logger := logtest.Scoped(t)
+	ctx := context.Background()
+	db := database.NewDB(logger, nil)
+
+	wantBaseRevision := gitserver.DevNullSHA
+	wantHeadRevision := "1ead"
+
+	repo := &types.Repo{
+		ID:        api.RepoID(1),
+		Name:      api.RepoName("test"),
+		CreatedAt: time.Now(),
+	}
+
+	gsClient := gitserver.NewMockClient()
+	gsClient.MergeBaseFunc.SetDefaultReturn("", &gitdomain.RevisionNotFoundError{})
+	gsClient.ResolveRevisionFunc.SetDefaultHook(func(_ context.Context, _ api.RepoName, spec string, _ gitserver.ResolveRevisionOptions) (api.CommitID, error) {
+		if spec != wantBaseRevision && spec != wantHeadRevision {
+			t.Fatalf("ResolveRevision received wrong spec: %s", spec)
+		}
+		return api.CommitID(spec), nil
+	})
+
+	input := &RepositoryComparisonInput{Base: &wantBaseRevision, Head: &wantHeadRevision}
+	repoResolver := NewRepositoryResolver(db, gsClient, repo)
+
+	comp, err := NewRepositoryComparison(ctx, db, gsClient, repoResolver, input)
+	require.Nil(t, err)
+	require.Equal(t, wantBaseRevision, comp.baseRevspec)
+	require.Equal(t, wantHeadRevision, comp.headRevspec)
+	require.Equal(t, "..", comp.rangeType)
+}
+
 func TestRepositoryComparison(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+
 	logger := logtest.Scoped(t)
 	ctx := context.Background()
 	db := database.NewDB(logger, nil)
@@ -79,15 +116,7 @@ func TestRepositoryComparison(t *testing.T) {
 		CreatedAt: time.Now(),
 	}
 
-	gitserver.Mocks.ResolveRevision = func(spec string, opt gitserver.ResolveRevisionOptions) (api.CommitID, error) {
-		if spec != wantMergeBaseRevision && spec != wantHeadRevision {
-			t.Fatalf("ResolveRevision received wrong spec: %s", spec)
-		}
-		return api.CommitID(spec), nil
-	}
-	t.Cleanup(func() { gitserver.Mocks.ResolveRevision = nil })
-
-	gitserver.Mocks.ExecReader = func(args []string) (io.ReadCloser, error) {
+	gsClient := gitserver.NewMockClientWithExecReader(nil, func(_ context.Context, _ api.RepoName, args []string) (io.ReadCloser, error) {
 		if len(args) < 1 && args[0] != "diff" {
 			t.Fatalf("gitserver.ExecReader received wrong args: %v", args)
 		}
@@ -95,19 +124,23 @@ func TestRepositoryComparison(t *testing.T) {
 			return io.NopCloser(strings.NewReader(testDiffJokesOnly)), nil
 		}
 		return io.NopCloser(strings.NewReader(testDiff + testCopyDiff)), nil
-	}
-	t.Cleanup(func() { gitserver.Mocks.ExecReader = nil })
+	})
 
-	gitserver.Mocks.MergeBase = func(repo api.RepoName, a, b api.CommitID) (api.CommitID, error) {
-		if string(a) != wantBaseRevision || string(b) != wantHeadRevision {
+	gsClient.ResolveRevisionFunc.SetDefaultHook(func(_ context.Context, _ api.RepoName, spec string, _ gitserver.ResolveRevisionOptions) (api.CommitID, error) {
+		if spec != wantMergeBaseRevision && spec != wantHeadRevision {
+			t.Fatalf("ResolveRevision received wrong spec: %s", spec)
+		}
+		return api.CommitID(spec), nil
+	})
+
+	gsClient.MergeBaseFunc.SetDefaultHook(func(_ context.Context, _ api.RepoName, a, b string) (api.CommitID, error) {
+		if a != wantBaseRevision || b != wantHeadRevision {
 			t.Fatalf("gitserver.MergeBase received wrong args: %s %s", a, b)
 		}
 		return api.CommitID(wantMergeBaseRevision), nil
-	}
-	t.Cleanup(func() { gitserver.Mocks.MergeBase = nil })
+	})
 
 	input := &RepositoryComparisonInput{Base: &wantBaseRevision, Head: &wantHeadRevision}
-	gsClient := gitserver.NewClient(db)
 	repoResolver := NewRepositoryResolver(db, gsClient, repo)
 
 	comp, err := NewRepositoryComparison(ctx, db, gsClient, repoResolver, input)
@@ -143,12 +176,10 @@ func TestRepositoryComparison(t *testing.T) {
 		}
 
 		mockGSClient := gitserver.NewMockClient()
-		mockGSClient.CommitsFunc.SetDefaultHook(func(_ context.Context, _ api.RepoName, opts gitserver.CommitsOptions, _ authz.SubRepoPermissionChecker) ([]*gitdomain.Commit, error) {
-			wantRange := fmt.Sprintf("%s..%s", wantBaseRevision, wantHeadRevision)
+		mockGSClient.CommitsFunc.SetDefaultHook(func(_ context.Context, _ api.RepoName, opts gitserver.CommitsOptions) ([]*gitdomain.Commit, error) {
+			wantRanges := []string{fmt.Sprintf("%s..%s", wantBaseRevision, wantHeadRevision)}
 
-			if have, want := opts.Range, wantRange; have != want {
-				t.Fatalf("git.Commits received wrong range. want=%s, have=%s", want, have)
-			}
+			require.Equal(t, wantRanges, opts.Ranges)
 
 			return commits, nil
 		})
@@ -158,7 +189,7 @@ func TestRepositoryComparison(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		commitConnection := newComp.Commits(&graphqlutil.ConnectionArgs{})
+		commitConnection := newComp.Commits(&RepositoryComparisonCommitsArgs{})
 
 		nodes, err := commitConnection.Nodes(ctx)
 		if err != nil {
@@ -187,6 +218,36 @@ func TestRepositoryComparison(t *testing.T) {
 		}
 	})
 
+	t.Run("Commits with Path", func(t *testing.T) {
+		commits := []*gitdomain.Commit{
+			{ID: api.CommitID(wantBaseRevision)},
+		}
+
+		mockGSClient := gitserver.NewMockClient()
+		mockGSClient.CommitsFunc.SetDefaultHook(func(_ context.Context, _ api.RepoName, opts gitserver.CommitsOptions) ([]*gitdomain.Commit, error) {
+			if opts.Path == "" {
+				t.Fatalf("expected a path as part of commits args")
+			}
+			return commits, nil
+		})
+
+		newComp, err := NewRepositoryComparison(ctx, db, mockGSClient, repoResolver, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		testPath := "testpath"
+		commitConnection := newComp.Commits(&RepositoryComparisonCommitsArgs{Path: &testPath})
+
+		nodes, err := commitConnection.Nodes(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(nodes) != len(commits) {
+			t.Fatalf("wrong length of nodes: %d", len(nodes))
+		}
+	})
 	t.Run("FileDiffs", func(t *testing.T) {
 		t.Run("RawDiff", func(t *testing.T) {
 			diffConnection, err := comp.FileDiffs(ctx, &FileDiffsConnectionArgs{})
@@ -198,7 +259,7 @@ func TestRepositoryComparison(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if have, want := rawDiff, testDiff; have != want {
+			if have, want := rawDiff, testDiff+testCopyDiff; have != want {
 				t.Fatalf("rawDiff wrong. want=%q, have=%q", want, have)
 			}
 		})
@@ -257,7 +318,8 @@ func TestRepositoryComparison(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if len(nodes) != testDiffFiles {
+			// +1 for the copyDiffFile
+			if len(nodes) != testDiffFiles+1 {
 				t.Fatalf("wrong length of nodes. want=%d, have=%d", testDiffFiles, len(nodes))
 			}
 
@@ -327,8 +389,8 @@ func TestRepositoryComparison(t *testing.T) {
 		})
 
 		t.Run("Pagination", func(t *testing.T) {
-			endCursors := []string{"1", "2"}
-			totalCount := int32(testDiffFiles)
+			endCursors := []string{"1", "2", "3"}
+			totalCount := int32(testDiffFiles) + 1
 
 			tests := []struct {
 				first int32
@@ -361,6 +423,14 @@ func TestRepositoryComparison(t *testing.T) {
 					first:           1,
 					after:           endCursors[1],
 					wantNodeCount:   1,
+					wantHasNextPage: true,
+					wantEndCursor:   &endCursors[2],
+					wantTotalCount:  nil,
+				},
+				{
+					first:           1,
+					after:           endCursors[2],
+					wantNodeCount:   1,
 					wantHasNextPage: false,
 					wantEndCursor:   nil,
 					wantTotalCount:  &totalCount,
@@ -368,7 +438,7 @@ func TestRepositoryComparison(t *testing.T) {
 				{
 					first:           testDiffFiles + 1,
 					after:           "",
-					wantNodeCount:   testDiffFiles,
+					wantNodeCount:   testDiffFiles + 1,
 					wantHasNextPage: false,
 					wantEndCursor:   nil,
 					wantTotalCount:  &totalCount,
@@ -423,7 +493,7 @@ func TestRepositoryComparison(t *testing.T) {
 func TestDiffHunk(t *testing.T) {
 	ctx := context.Background()
 
-	dr := diff.NewMultiFileDiffReader(strings.NewReader(testDiff))
+	dr := godiff.NewMultiFileDiffReader(strings.NewReader(testDiff))
 	// We only read the first file diff from testDiff
 	fileDiff, err := dr.ReadFile()
 	if err != nil && err != io.EOF {
@@ -533,7 +603,7 @@ index 4d14577..10ef458 100644
 +(c) Copyright Sourcegraph 2013-2021.
 \ No newline at end of file
 `
-	dr := diff.NewMultiFileDiffReader(strings.NewReader(filediff))
+	dr := godiff.NewMultiFileDiffReader(strings.NewReader(filediff))
 	// We only read the first file diff from testDiff
 	fileDiff, err := dr.ReadFile()
 	if err != nil && err != io.EOF {
@@ -559,6 +629,7 @@ index 4d14577..10ef458 100644
 				"<div><span class=\"hl-text hl-html hl-markdown\">\n</span></div>",
 				"<div><span class=\"hl-text hl-html hl-markdown\">Detailed documentation can be found on\n</span></div>",
 				"<div><span class=\"hl-text hl-html hl-markdown\">[staticcheck.io](https://staticcheck.io/docs/).\n</span></div>",
+				"<div><span class=\"hl-text hl-html hl-markdown\">\n</span></div>",
 			},
 			highlightedHead: []template.HTML{
 				"<div><span class=\"hl-text hl-html hl-markdown\"><span class=\"hl-meta hl-block-level hl-markdown\"><span class=\"hl-markup hl-heading hl-1 hl-markdown\"><span class=\"hl-punctuation hl-definition hl-heading hl-begin hl-markdown\">#</span> </span><span class=\"hl-markup hl-heading hl-1 hl-markdown\"><span class=\"hl-entity hl-name hl-section hl-markdown\">staticcheck</span><span class=\"hl-meta hl-whitespace hl-newline hl-markdown\">\n</span></span></span></span></div>",
@@ -578,6 +649,7 @@ index 4d14577..10ef458 100644
 				"<div><span class=\"hl-text hl-html hl-markdown\">\n</span></div>",
 				"<div><span class=\"hl-text hl-html hl-markdown\">\n</span></div>",
 				"<div><span class=\"hl-text hl-html hl-markdown\">(c) Copyright Sourcegraph 2013-2021.</span></div>",
+				"<div><span class=\"hl-text hl-html hl-markdown\">\n</span></div>",
 			},
 		}
 
@@ -617,7 +689,7 @@ index 4d14577..9fe9a4f 100644
 ` + "-" + `
  See [the main README](https://github.com/dominikh/go-tools#installation) for installation instructions.`
 
-	dr := diff.NewMultiFileDiffReader(strings.NewReader(filediff))
+	dr := godiff.NewMultiFileDiffReader(strings.NewReader(filediff))
 	// We only read the first file diff from testDiff
 	fileDiff, err := dr.ReadFile()
 	if err != nil && err != io.EOF {
@@ -640,12 +712,14 @@ index 4d14577..9fe9a4f 100644
 				"## Installation",
 				"",
 				"See [the main README](https://github.com/dominikh/go-tools#installation) for installation instructions.",
+				"",
 			},
 			highlightedHead: []template.HTML{
 				"# staticcheck",
 				"## Installation",
 				"Wowza!",
 				"See [the main README](https://github.com/dominikh/go-tools#installation) for installation instructions.",
+				"",
 			},
 		}
 
@@ -712,9 +786,10 @@ index d206c4c..bb06461 100644
 -// If a feature is not present, it defaults to false.
 -func IsEnabled(key string) bool {
 -       return features[strings.ToLower(key)]
--}`
+-}
+`
 
-	dr := diff.NewMultiFileDiffReader(strings.NewReader(filediff))
+	dr := godiff.NewMultiFileDiffReader(strings.NewReader(filediff))
 	// We only read the first file diff from testDiff
 	fileDiff, err := dr.ReadFile()
 	if err != nil && err != io.EOF {
@@ -738,11 +813,13 @@ index d206c4c..bb06461 100644
 				"func IsEnabled(key string) bool {",
 				"return features[strings.ToLower(key)]",
 				"}",
+				"",
 			},
 			highlightedHead: []template.HTML{
 				"func AddFeature(key string, isEnabled bool) {",
 				"features[strings.ToLower(key)] = isEnabled",
 				"}",
+				"",
 			},
 		}
 
@@ -760,9 +837,10 @@ index d206c4c..bb06461 100644
 		wantLines := []struct {
 			kind, html string
 		}{
+			{kind: "UNCHANGED", html: "func AddFeature(key string, isEnabled bool) {"},
 			{kind: "UNCHANGED", html: "features[strings.ToLower(key)] = isEnabled"},
 			{kind: "UNCHANGED", html: "}"},
-			{kind: "UNCHANGED", html: ""},
+			{kind: "DELETED", html: ""},
 			{kind: "DELETED", html: "// IsEnabled determines if the specified feature is enabled. Determining if a feature is enabled is"},
 			{kind: "DELETED", html: "// case insensitive."},
 			{kind: "DELETED", html: "// If a feature is not present, it defaults to false."},
@@ -846,13 +924,12 @@ index 9bd8209..d2acfa9 100644
 +Another line
 `
 
-// This is unparseable by go-diff. Once it isn't anymore, the test should fail, reminding
-// us of the TODO comment in repository_comparison to reenable it.
 const testCopyDiff = `diff --git a/test.txt b/test2.txt
 similarity index 100%
 copy from test.txt
 copy to test2.txt
 `
+
 const testDiffFirstHunk = ` Line 1
  Line 2
  Line 3
@@ -894,13 +971,13 @@ func TestFileDiffHighlighter(t *testing.T) {
 
 	file1 := &dummyFileResolver{
 		path: "old.txt",
-		content: func(ctx context.Context) (string, error) {
+		content: func(ctx context.Context, args *GitTreeContentPageArgs) (string, error) {
 			return "old1\nold2\nold3\n", nil
 		},
 	}
 	file2 := &dummyFileResolver{
 		path: "new.txt",
-		content: func(ctx context.Context) (string, error) {
+		content: func(ctx context.Context, args *GitTreeContentPageArgs) (string, error) {
 			return "new1\nnew2\nnew3\n", nil
 		},
 	}
@@ -960,33 +1037,41 @@ func TestFileDiffHighlighter(t *testing.T) {
 type dummyFileResolver struct {
 	path, name string
 
-	richHTML     string
-	url          string
-	canonicalURL string
+	richHTML      string
+	url           string
+	canonicalURL  string
+	changelistURL string
 
-	content func(context.Context) (string, error)
+	content func(context.Context, *GitTreeContentPageArgs) (string, error)
 }
 
 func (d *dummyFileResolver) Path() string      { return d.path }
 func (d *dummyFileResolver) Name() string      { return d.name }
 func (d *dummyFileResolver) IsDirectory() bool { return false }
-func (d *dummyFileResolver) Content(ctx context.Context) (string, error) {
-	return d.content(ctx)
+func (d *dummyFileResolver) Content(ctx context.Context, args *GitTreeContentPageArgs) (string, error) {
+	return d.content(ctx, args)
 }
 
 func (d *dummyFileResolver) ByteSize(ctx context.Context) (int32, error) {
-	content, err := d.content(ctx)
+	content, err := d.content(ctx, &GitTreeContentPageArgs{})
 	if err != nil {
 		return 0, err
 	}
 	return int32(len([]byte(content))), nil
+}
+func (d *dummyFileResolver) TotalLines(ctx context.Context) (int32, error) {
+	content, err := d.content(ctx, &GitTreeContentPageArgs{})
+	if err != nil {
+		return 0, err
+	}
+	return int32(len(strings.Split(content, "\n"))), nil
 }
 
 func (d *dummyFileResolver) Binary(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-func (d *dummyFileResolver) RichHTML(ctx context.Context) (string, error) {
+func (d *dummyFileResolver) RichHTML(ctx context.Context, args *GitTreeContentPageArgs) (string, error) {
 	return d.richHTML, nil
 }
 
@@ -998,6 +1083,10 @@ func (d *dummyFileResolver) CanonicalURL() string {
 	return d.canonicalURL
 }
 
+func (d *dummyFileResolver) ChangelistURL(ctx context.Context) (*string, error) {
+	return &d.changelistURL, nil
+}
+
 func (d *dummyFileResolver) ExternalURLs(ctx context.Context) ([]*externallink.Resolver, error) {
 	return []*externallink.Resolver{}, nil
 }
@@ -1006,7 +1095,17 @@ func (d *dummyFileResolver) Highlight(ctx context.Context, args *HighlightArgs) 
 	return nil, errors.New("not implemented")
 }
 
-func (d *dummyFileResolver) ToGitBlob() (*GitTreeEntryResolver, bool) {
+func (d *dummyFileResolver) Languages(ctx context.Context) ([]string, error) {
+	return languages.GetLanguages(d.Name(), func() ([]byte, error) {
+		content, err := d.Content(ctx, &GitTreeContentPageArgs{})
+		if err != nil {
+			return nil, err
+		}
+		return []byte(content), nil
+	})
+}
+
+func (d *dummyFileResolver) ToGitBlob() (*GitBlobResolver, bool) {
 	return nil, false
 }
 

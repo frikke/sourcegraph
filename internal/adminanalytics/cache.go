@@ -1,30 +1,35 @@
 package adminanalytics
 
 import (
-	"context"
 	"encoding/json"
-	"math/rand"
-	"time"
 
-	"github.com/gomodule/redigo/redis"
-
-	"github.com/sourcegraph/log"
-
-	"github.com/sourcegraph/sourcegraph/internal/database"
-	"github.com/sourcegraph/sourcegraph/internal/featureflag"
 	"github.com/sourcegraph/sourcegraph/internal/redispool"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
-var (
-	pool     = redispool.Store
-	scopeKey = "adminanalytics:"
-)
+const scopeKey = "adminanalytics:"
 
-func getArrayFromCache[K interface{}](cacheKey string) ([]*K, error) {
-	rdb := pool.Get()
-	defer rdb.Close()
+// KeyValue is the subset of redispool.KeyValue that we use in adminanalytics.
+type KeyValue interface {
+	Get(key string) redispool.Value
+	SetEx(key string, ttlSeconds int, val any) error
+}
 
-	data, err := redis.String(rdb.Do("GET", scopeKey+cacheKey))
+type NoopCache struct{}
+
+var err = errors.New("NoopCache cache miss")
+
+func (n NoopCache) Get(_ string) redispool.Value {
+	// Return an error to simulate a cache miss.
+	return redispool.NewValue(nil, err)
+}
+
+func (n NoopCache) SetEx(_ string, _ int, _ any) error {
+	return nil
+}
+
+func getArrayFromCache[K interface{}](cache KeyValue, cacheKey string) ([]*K, error) {
+	data, err := cache.Get(scopeKey + cacheKey).String()
 	if err != nil {
 		return nil, err
 	}
@@ -38,11 +43,8 @@ func getArrayFromCache[K interface{}](cacheKey string) ([]*K, error) {
 	return nodes, nil
 }
 
-func getItemFromCache[T interface{}](cacheKey string) (*T, error) {
-	rdb := pool.Get()
-	defer rdb.Close()
-
-	data, err := redis.String(rdb.Do("GET", scopeKey+cacheKey))
+func getItemFromCache[T interface{}](cache KeyValue, cacheKey string) (*T, error) {
+	data, err := cache.Get(scopeKey + cacheKey).String()
 	if err != nil {
 		return nil, err
 	}
@@ -56,102 +58,28 @@ func getItemFromCache[T interface{}](cacheKey string) (*T, error) {
 	return &summary, nil
 }
 
-func setDataToCache(key string, data string) (bool, error) {
-	rdb := pool.Get()
-	defer rdb.Close()
-
-	if _, err := rdb.Do("SET", key, data); err != nil {
-		return false, err
+func setDataToCache(cache KeyValue, key string, data string, expireSeconds int) error {
+	if expireSeconds == 0 {
+		expireSeconds = 24 * 60 * 60 // 1 day
 	}
 
-	if _, err := rdb.Do("EXPIRE", key, int64(24*time.Hour/time.Second)); err != nil {
-		return false, err
-	}
-
-	return true, nil
+	return cache.SetEx(scopeKey+key, expireSeconds, data)
 }
 
-func setArrayToCache[T interface{}](cacheKey string, nodes []*T) (bool, error) {
+func setArrayToCache[T interface{}](cache KeyValue, cacheKey string, nodes []*T) error {
 	data, err := json.Marshal(nodes)
 	if err != nil {
-		return false, err
+		return err
 	}
 
-	return setDataToCache(scopeKey+cacheKey, string(data))
+	return setDataToCache(cache, cacheKey, string(data), 0)
 }
 
-func setItemToCache[T interface{}](cacheKey string, summary *T) (bool, error) {
+func setItemToCache[T interface{}](cache KeyValue, cacheKey string, summary *T) error {
 	data, err := json.Marshal(summary)
 	if err != nil {
-		return false, err
+		return err
 	}
 
-	return setDataToCache(scopeKey+cacheKey, string(data))
-}
-
-var dateRanges = []string{LastThreeMonths, LastMonth, LastWeek}
-var groupBys = []string{Weekly, Daily}
-
-type CacheAll interface {
-	CacheAll(ctx context.Context) error
-}
-
-func refreshAnalyticsCache(ctx context.Context, db database.DB) error {
-	for _, dateRange := range dateRanges {
-		for _, groupBy := range groupBys {
-			stores := []CacheAll{
-				&Search{DateRange: dateRange, Grouping: groupBy, DB: db, Cache: true},
-				&Users{DateRange: dateRange, Grouping: groupBy, DB: db, Cache: true},
-				&Notebooks{DateRange: dateRange, Grouping: groupBy, DB: db, Cache: true},
-				&CodeIntel{DateRange: dateRange, Grouping: groupBy, DB: db, Cache: true},
-				&Repos{DB: db, Cache: true},
-				&BatchChanges{Grouping: groupBy, DateRange: dateRange, DB: db, Cache: true},
-				&Extensions{Grouping: groupBy, DateRange: dateRange, DB: db, Cache: true},
-				&CodeInsights{Grouping: groupBy, DateRange: dateRange, DB: db, Cache: true},
-			}
-			for _, store := range stores {
-				if err := store.CacheAll(ctx); err != nil {
-					return err
-				}
-			}
-		}
-
-		_, err := GetCodeIntelByLanguage(ctx, db, true, dateRange)
-		if err != nil {
-			return err
-		}
-
-		_, err = GetCodeIntelTopRepositories(ctx, db, true, dateRange)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-var started bool
-
-func StartAnalyticsCacheRefresh(ctx context.Context, db database.DB) {
-	logger := log.Scoped("adminanalytics:cache-refresh", "admin analytics cache refresh")
-
-	if started {
-		panic("already started")
-	}
-
-	started = true
-	ctx = featureflag.WithFlags(ctx, db.FeatureFlags())
-
-	const delay = 24 * time.Hour
-	for {
-		if !featureflag.FromContext(ctx).GetBoolOr("admin-analytics-disabled", false) {
-			if err := refreshAnalyticsCache(ctx, db); err != nil {
-				logger.Error("Error refreshing admin analytics cache", log.Error(err))
-			}
-		}
-
-		// Randomize sleep to prevent thundering herds.
-		randomDelay := time.Duration(rand.Intn(600)) * time.Second
-		time.Sleep(delay + randomDelay)
-	}
+	return setDataToCache(cache, cacheKey, string(data), 0)
 }

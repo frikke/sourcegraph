@@ -14,12 +14,12 @@ func TestZipCacheDelete(t *testing.T) {
 	// Set up a store.
 	s := tmpStore(t)
 
-	s.FetchTar = func(ctx context.Context, repo api.RepoName, commit api.CommitID) (io.ReadCloser, error) {
+	s.FetchTar = func(ctx context.Context, repo api.RepoName, commit api.CommitID, paths []string) (io.ReadCloser, error) {
 		return emptyTar(t), nil
 	}
 
 	// Grab a zip.
-	path, err := s.PrepareZip(context.Background(), "somerepo", "0123456789012345678901234567890123456789")
+	path, err := s.PrepareZip(context.Background(), "somerepo", "0123456789012345678901234567890123456789", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

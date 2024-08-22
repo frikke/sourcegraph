@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { of, from, Subject, ObservableInput, Observable, asyncScheduler, scheduled, Unsubscribable } from 'rxjs'
-import { mergeMap, map, takeUntil, take, catchError, takeWhile, switchMap, publish, refCount } from 'rxjs/operators'
+import {
+    of,
+    from,
+    Subject,
+    type ObservableInput,
+    type Observable,
+    asyncScheduler,
+    scheduled,
+    type Unsubscribable,
+} from 'rxjs'
+import { mergeMap, map, takeUntil, take, catchError, takeWhile, switchMap, share } from 'rxjs/operators'
 
-import { ErrorLike, asError, isErrorLike } from '@sourcegraph/common'
+import { type ErrorLike, asError, isErrorLike } from '@sourcegraph/common'
 
 interface Request<T> {
     /**
@@ -59,7 +68,7 @@ const MAX_PARALLEL_QUERIES = 3
  * these hooks unit tests.
  */
 /* eslint-disable react-hooks/rules-of-hooks */
-// eslint-disable-next-line @typescript-eslint/explicit-function-return-type,@typescript-eslint/explicit-module-boundary-types
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
 export function createUseParallelRequestsHook<T>({ maxRequests } = { maxRequests: MAX_PARALLEL_QUERIES }) {
     const requests = new Subject<Request<T>>()
     const cancelledRequests = new Set<Request<T>>()
@@ -133,7 +142,13 @@ export function createUseParallelRequestsHook<T>({ maxRequests } = { maxRequests
                 const event: Request<D> = {
                     request,
                     // Makes cancel stream a hot observable
-                    cancel: cancelStream.pipe(publish(), refCount()),
+                    cancel: cancelStream.pipe(
+                        share({
+                            resetOnError: false,
+                            resetOnComplete: false,
+                            resetOnRefCountZero: false,
+                        })
+                    ),
                     onComplete: result => {
                         if (isErrorLike(result)) {
                             return setState({ data: undefined, loading: false, error: result })
@@ -143,11 +158,11 @@ export function createUseParallelRequestsHook<T>({ maxRequests } = { maxRequests
                     },
                 }
 
-                requests.next((event as unknown) as Request<T>)
+                requests.next(event as unknown as Request<T>)
 
                 return () => {
                     // Cancel scheduled stream
-                    cancelledRequests.add((event as unknown) as Request<T>)
+                    cancelledRequests.add(event as unknown as Request<T>)
 
                     // Stop/cancel ongoing/started request stream
                     cancelStream.next(true)
@@ -169,7 +184,7 @@ export function createUseParallelRequestsHook<T>({ maxRequests } = { maxRequests
                 () => () => {
                     for (const request of localRequestPool.current) {
                         // Cancel scheduled stream
-                        cancelledRequests.add((request as unknown) as Request<T>)
+                        cancelledRequests.add(request as unknown as Request<T>)
                     }
                 },
                 []
@@ -183,7 +198,13 @@ export function createUseParallelRequestsHook<T>({ maxRequests } = { maxRequests
                 const event: Request<D> = {
                     request,
                     // Makes cancel stream a hot observable
-                    cancel: cancelStream.pipe(publish(), refCount()),
+                    cancel: cancelStream.pipe(
+                        share({
+                            resetOnError: false,
+                            resetOnComplete: false,
+                            resetOnRefCountZero: false,
+                        })
+                    ),
                     onComplete: result => {
                         localRequestPool.current = localRequestPool.current.filter(request => request !== event)
 
@@ -196,12 +217,12 @@ export function createUseParallelRequestsHook<T>({ maxRequests } = { maxRequests
                 }
 
                 localRequestPool.current.push(event)
-                requests.next((event as unknown) as Request<T>)
+                requests.next(event as unknown as Request<T>)
 
                 return {
                     unsubscribe: () => {
                         // Cancel scheduled stream
-                        cancelledRequests.add((event as unknown) as Request<T>)
+                        cancelledRequests.add(event as unknown as Request<T>)
 
                         // Stop/cancel ongoing/started request stream
                         cancelStream.next(true)

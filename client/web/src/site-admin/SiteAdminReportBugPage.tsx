@@ -1,14 +1,15 @@
-import React, { useMemo } from 'react'
+import React, { useEffect, useMemo } from 'react'
 
 import { mapValues, values } from 'lodash'
-import { RouteComponentProps } from 'react-router'
 
-import { ExternalServiceKind } from '@sourcegraph/shared/src/graphql-operations'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
+import type { ExternalServiceKind } from '@sourcegraph/shared/src/graphql-operations'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { useIsLightTheme } from '@sourcegraph/shared/src/theme'
 import { LoadingSpinner, useObservable, Alert, Link, H2, Text } from '@sourcegraph/wildcard'
 
 import awsCodeCommitJSON from '../../../../schema/aws_codecommit.schema.json'
+import azureDevOpsJSON from '../../../../schema/azuredevops.schema.json'
 import bitbucketCloudSchemaJSON from '../../../../schema/bitbucket_cloud.schema.json'
 import bitbucketServerSchemaJSON from '../../../../schema/bitbucket_server.schema.json'
 import gerritSchemaJSON from '../../../../schema/gerrit.schema.json'
@@ -23,13 +24,14 @@ import pagureSchemaJSON from '../../../../schema/pagure.schema.json'
 import perforceSchemaJSON from '../../../../schema/perforce.schema.json'
 import phabricatorSchemaJSON from '../../../../schema/phabricator.schema.json'
 import pythonPackagesSchemaJSON from '../../../../schema/python-packages.schema.json'
+import rubyPackagesSchemaJSON from '../../../../schema/ruby-packages.schema.json'
 import rustPackagesSchemaJSON from '../../../../schema/rust-packages.schema.json'
 import settingsSchemaJSON from '../../../../schema/settings.schema.json'
 import siteSchemaJSON from '../../../../schema/site.schema.json'
 import { PageTitle } from '../components/PageTitle'
 import { DynamicallyImportedMonacoSettingsEditor } from '../settings/DynamicallyImportedMonacoSettingsEditor'
 
-import { fetchAllConfigAndSettings, fetchMonitoringStats } from './backend'
+import { fetchAllConfigAndSettings } from './backend'
 
 /**
  * Minimal shape of a JSON Schema. These values are treated as opaque, so more specific types are
@@ -37,11 +39,12 @@ import { fetchAllConfigAndSettings, fetchMonitoringStats } from './backend'
  */
 interface JSONSchema {
     $id: string
-    definitions?: Record<string, { type: string }>
+    definitions?: Record<string, { type: string | string[] }>
 }
 
 const externalServices: Record<ExternalServiceKind, JSONSchema> = {
     AWSCODECOMMIT: awsCodeCommitJSON,
+    AZUREDEVOPS: azureDevOpsJSON,
     BITBUCKETCLOUD: bitbucketCloudSchemaJSON,
     BITBUCKETSERVER: bitbucketServerSchemaJSON,
     GERRIT: gerritSchemaJSON,
@@ -53,6 +56,7 @@ const externalServices: Record<ExternalServiceKind, JSONSchema> = {
     NPMPACKAGES: npmPackagesSchemaJSON,
     PYTHONPACKAGES: pythonPackagesSchemaJSON,
     RUSTPACKAGES: rustPackagesSchemaJSON,
+    RUBYPACKAGES: rubyPackagesSchemaJSON,
     OTHER: otherExternalServiceSchemaJSON,
     PERFORCE: perforceSchemaJSON,
     PHABRICATOR: phabricatorSchemaJSON,
@@ -106,15 +110,15 @@ const allConfigSchema = {
         .reduce((allDefinitions, definitions) => ({ ...allDefinitions, ...definitions }), {}),
 }
 
-interface Props extends RouteComponentProps, ThemeProps, TelemetryProps {}
+interface Props extends TelemetryProps, TelemetryV2Props {}
 
 export const SiteAdminReportBugPage: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
-    isLightTheme,
     telemetryService,
-    history,
+    telemetryRecorder,
 }) => {
-    const monitoringDaysBack = 7
-    const monitoringStats = useObservable(useMemo(() => fetchMonitoringStats(monitoringDaysBack), []))
+    useEffect(() => telemetryRecorder.recordEvent('admin.reportBug', 'view'), [telemetryRecorder])
+
+    const isLightTheme = useIsLightTheme()
     const allConfig = useObservable(useMemo(fetchAllConfigAndSettings, []))
     return (
         <div>
@@ -141,22 +145,18 @@ export const SiteAdminReportBugPage: React.FunctionComponent<React.PropsWithChil
                     support@sourcegraph.com.
                 </div>
             </Alert>
-            {allConfig === undefined || monitoringStats === undefined ? (
+            {allConfig === undefined ? (
                 <LoadingSpinner className="mt-2" />
             ) : (
                 <DynamicallyImportedMonacoSettingsEditor
-                    value={JSON.stringify(
-                        monitoringStats ? { ...allConfig, ...monitoringStats } : { ...allConfig, alerts: null },
-                        undefined,
-                        2
-                    )}
+                    value={JSON.stringify(allConfig, undefined, 2)}
                     jsonSchema={allConfigSchema}
                     canEdit={false}
                     height={800}
                     isLightTheme={isLightTheme}
-                    history={history}
                     readOnly={true}
                     telemetryService={telemetryService}
+                    telemetryRecorder={telemetryRecorder}
                 />
             )}
         </div>

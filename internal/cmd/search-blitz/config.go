@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"embed"
 	_ "embed"
+	"io/fs"
+	"os"
 	"strings"
 	"time"
 
@@ -13,20 +15,19 @@ import (
 //go:embed queries*.txt
 var queriesFS embed.FS
 
-type Config struct {
-	Groups []*QueryGroupConfig
-}
+//go:embed attribution/*.txt
+var attributionFS embed.FS
 
-type QueryGroupConfig struct {
-	Name    string
+type Config struct {
 	Queries []*QueryConfig
 }
 
 type QueryConfig struct {
-	Query string
-	Name  string
+	Query   string
+	Snippet string
+	Name    string
 
-	// An unset interval defaults to 1m
+	// An unset interval defaults to 5m
 	Interval time.Duration
 
 	// An empty value for Protocols means "all"
@@ -43,7 +44,21 @@ const (
 	Stream
 )
 
-func loadQueries(env string) (_ *Config, err error) {
+// Loads queries from queryFile if set, otherwise falls back to
+// embedded set of queries.
+func loadConfig(queryFile, env string) (_ *Config, err error) {
+	if queryFile != "" {
+		queriesRaw, err := os.ReadFile(queryFile)
+		if err != nil {
+			return nil, err
+		}
+		queries, err := parseQueries(queriesRaw)
+		if err != nil {
+			return nil, err
+		}
+		return &Config{Queries: queries}, nil
+	}
+
 	if env == "" {
 		env = "cloud"
 	}
@@ -63,6 +78,22 @@ func loadQueries(env string) (_ *Config, err error) {
 	}
 
 	var queries []*QueryConfig
+	attributions, err := loadAttributions()
+	if err != nil {
+		return nil, err
+	}
+	queries = append(queries, attributions...)
+
+	parsedQueries, err := parseQueries(queriesRaw)
+	if err != nil {
+		return nil, err
+	}
+	queries = append(queries, parsedQueries...)
+
+	return &Config{Queries: queries}, nil
+}
+
+func parseQueries(queriesRaw []byte) (queries []*QueryConfig, err error) {
 	var current QueryConfig
 	add := func() {
 		q := &QueryConfig{
@@ -91,11 +122,31 @@ func loadQueries(env string) (_ *Config, err error) {
 		}
 	}
 	add()
+	return queries, err
+}
 
-	return &Config{
-		Groups: []*QueryGroupConfig{{
-			Name:    "monitoring_queries",
-			Queries: queries,
-		}},
-	}, err
+func loadAttributions() ([]*QueryConfig, error) {
+	var qs []*QueryConfig
+	err := fs.WalkDir(attributionFS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+
+		b, err := fs.ReadFile(attributionFS, path)
+		if err != nil {
+			return err
+		}
+
+		// Remove extension and prefix with attr_
+		name := "attr_" + strings.Split(d.Name(), ".")[0]
+
+		qs = append(qs, &QueryConfig{
+			Snippet:   string(b),
+			Name:      name,
+			Protocols: []Protocol{Batch}, // only support batch for attribution
+		})
+
+		return nil
+	})
+	return qs, err
 }

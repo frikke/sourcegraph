@@ -1,21 +1,20 @@
 import { applyEdits, modify, parse as parseJSONC } from 'jsonc-parser'
-import { from, fromEvent, Observable } from 'rxjs'
+import { from, fromEvent, type Observable } from 'rxjs'
 import { distinctUntilChanged, filter, map, startWith } from 'rxjs/operators'
 
 import { isErrorLike } from '@sourcegraph/common'
 import { dataOrThrowErrors, gql } from '@sourcegraph/http-client'
-import { SettingsEdit } from '@sourcegraph/shared/src/api/client/services/settings'
-import { PlatformContext } from '@sourcegraph/shared/src/platform/context'
+import type { SettingsEdit } from '@sourcegraph/shared/src/api/client/services/settings'
+import type { PlatformContext } from '@sourcegraph/shared/src/platform/context'
 import {
     mergeSettings,
-    SettingsCascade,
-    SettingsCascadeOrError,
-    SettingsSubject,
-    SubjectSettingsContents,
+    type SettingsCascade,
+    type SettingsCascadeOrError,
+    type SettingsSubject,
 } from '@sourcegraph/shared/src/settings/settings'
 
 import { observeStorageKey, storage } from '../../browser-extension/web-extension-api/storage'
-import { ViewerConfigurationResult } from '../../graphql-operations'
+import type { ViewerSettingsResult } from '../../graphql-operations'
 import { isInPage } from '../context'
 
 const inPageClientSettingsKey = 'sourcegraphClientSettings'
@@ -36,7 +35,8 @@ function observeLocalStorageKey(key: string, defaultValue: string): Observable<s
 }
 
 const createStorageSettingsCascade: () => Observable<SettingsCascade> = () => {
-    /** Observable of the JSONC string of the settings.
+    /**
+     * Observable of the JSONC string of the settings.
      *
      * NOTE: We can't use LocalStorageSubject here because the JSONC string is stored raw in localStorage and LocalStorageSubject also does parsing.
      * This could be changed, but users already have settings stored, so it would need a migration for little benefit.
@@ -50,6 +50,7 @@ const createStorageSettingsCascade: () => Observable<SettingsCascade> = () => {
         id: 'Client',
         displayName: 'Client',
         viewerCanAdminister: true,
+        latestSettings: null,
     }
 
     return storageObservable.pipe(
@@ -95,78 +96,111 @@ export function mergeCascades(
     }
 }
 
-// This is a fragment on the DEPRECATED GraphQL API type ConfigurationCascade (not SettingsCascade) for backcompat.
-const configurationCascadeFragment = gql`
-    fragment ConfigurationCascadeFields on ConfigurationCascade {
+const settingsCascadeFragment = gql`
+    fragment SettingsCascadeFields on SettingsCascade {
         subjects {
             __typename
-            ... on Org {
-                name
-                displayName
-            }
-            ... on User {
-                username
-                displayName
-            }
-            ... on Site {
-                siteID
-                allowSiteSettingsEdits
-            }
-            id
-            latestSettings {
-                id
-                contents
-            }
-            settingsURL
-            viewerCanAdminister
+            ...OrgSettingFields
+            ...UserSettingFields
+            ...SiteSettingFields
+            ...DefaultSettingFields
         }
         merged {
             contents
             messages
         }
     }
+
+    fragment OrgSettingFields on Org {
+        __typename
+        latestSettings {
+            id
+            contents
+        }
+        id
+        settingsURL
+        viewerCanAdminister
+
+        name
+        displayName
+    }
+
+    fragment UserSettingFields on User {
+        __typename
+        latestSettings {
+            id
+            contents
+        }
+        id
+        settingsURL
+        viewerCanAdminister
+
+        username
+        displayName
+    }
+
+    fragment SiteSettingFields on Site {
+        __typename
+        latestSettings {
+            id
+            contents
+        }
+        id
+        settingsURL
+        viewerCanAdminister
+
+        siteID
+        allowSiteSettingsEdits
+    }
+
+    fragment DefaultSettingFields on DefaultSettings {
+        __typename
+        latestSettings {
+            id
+            contents
+        }
+        id
+        settingsURL
+        viewerCanAdminister
+    }
 `
 
 /**
  * Fetches the settings cascade for the viewer.
- *
- * TODO(sqs): This uses the DEPRECATED GraphQL Query.viewerConfiguration and ConfigurationCascade for backcompat.
  */
-export function fetchViewerSettings(
-    requestGraphQL: PlatformContext['requestGraphQL']
-): Observable<{
+export function fetchViewerSettings(requestGraphQL: PlatformContext['requestGraphQL']): Observable<{
     final: string
-    subjects: (SettingsSubject & SubjectSettingsContents)[]
+    subjects: SettingsSubject[]
 }> {
     return from(
-        requestGraphQL<ViewerConfigurationResult>({
+        requestGraphQL<ViewerSettingsResult>({
             request: gql`
-                query ViewerConfiguration {
-                    viewerConfiguration {
-                        ...ConfigurationCascadeFields
+                query ViewerSettings {
+                    viewerSettings {
+                        ...SettingsCascadeFields
                     }
                 }
-                ${configurationCascadeFragment}
+                ${settingsCascadeFragment}
             `,
             variables: {},
             mightContainPrivateInfo: false,
         })
     ).pipe(
         map(dataOrThrowErrors),
-        map(({ viewerConfiguration }) => {
-            if (!viewerConfiguration) {
-                throw new Error('fetchViewerSettings: empty viewerConfiguration')
+        map(({ viewerSettings }) => {
+            if (!viewerSettings) {
+                throw new Error('fetchViewerSettings: empty viewerSettings')
             }
 
-            for (const subject of viewerConfiguration.subjects) {
+            for (const subject of viewerSettings.subjects) {
                 // User/org/global settings cannot be edited from the
                 // browser extension (only client settings can).
                 subject.viewerCanAdminister = false
             }
 
             return {
-                subjects: viewerConfiguration.subjects,
-                final: viewerConfiguration.merged.contents,
+                subjects: viewerSettings.subjects,
+                final: viewerSettings.merged.contents,
             }
         })
     )

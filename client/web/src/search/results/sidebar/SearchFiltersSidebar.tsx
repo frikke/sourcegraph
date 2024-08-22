@@ -1,10 +1,19 @@
-import { FC, ReactNode, ReactElement, useCallback, useMemo, HTMLAttributes, memo, PropsWithChildren } from 'react'
+import {
+    type FC,
+    type ReactNode,
+    type ReactElement,
+    useCallback,
+    useMemo,
+    forwardRef,
+    type HTMLAttributes,
+    type ComponentType,
+    type PropsWithChildren,
+} from 'react'
 
 import { mdiInformationOutline } from '@mdi/js'
 
-import { QueryStateUpdate, QueryUpdate } from '@sourcegraph/search'
 import {
-    SearchSidebar,
+    StickySearchSidebar,
     SearchSidebarSection,
     getDynamicFilterLinks,
     getRepoFilterLinks,
@@ -13,22 +22,34 @@ import {
     getSearchTypeLinks,
     getFiltersOfKind,
     useLastRepoName,
-} from '@sourcegraph/search-ui'
-import { SearchPatternType } from '@sourcegraph/shared/src/schema'
+    PersistSidebarStoreProvider,
+} from '@sourcegraph/branded'
+import type { QueryStateUpdate, QueryUpdate } from '@sourcegraph/shared/src/search'
 import { FilterType } from '@sourcegraph/shared/src/search/query/filters'
-import { Filter } from '@sourcegraph/shared/src/search/stream'
-import { SettingsCascadeProps } from '@sourcegraph/shared/src/settings/settings'
+import type { Filter } from '@sourcegraph/shared/src/search/stream'
+import { type SettingsCascadeProps, useExperimentalFeatures } from '@sourcegraph/shared/src/settings/settings'
 import { SectionID } from '@sourcegraph/shared/src/settings/temporary/searchSidebar'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import { Code, Tooltip, Icon } from '@sourcegraph/wildcard'
 
-import { buildSearchURLQueryFromQueryState, useExperimentalFeatures } from '../../../stores'
+import type { SearchPatternType } from '../../../graphql-operations'
+import { buildSearchURLQueryFromQueryState } from '../../../stores'
 import { AggregationUIMode, GroupResultsPing } from '../components/aggregation'
 
 import { getRevisions } from './Revisions'
 import { SearchAggregations } from './SearchAggregations'
 
-export interface SearchFiltersSidebarProps extends TelemetryProps, SettingsCascadeProps, HTMLAttributes<HTMLElement> {
+interface GenericSidebarProps extends HTMLAttributes<HTMLElement> {
+    onClose: () => void
+}
+
+export interface SearchFiltersSidebarProps
+    extends TelemetryProps,
+        SettingsCascadeProps,
+        HTMLAttributes<HTMLElement>,
+        TelemetryV2Props {
+    as?: ComponentType<PropsWithChildren<GenericSidebarProps>>
     liveQuery: string
     submittedURLQuery: string
     patternType: SearchPatternType
@@ -38,12 +59,24 @@ export interface SearchFiltersSidebarProps extends TelemetryProps, SettingsCasca
     selectedSearchContextSpec?: string
     aggregationUIMode?: AggregationUIMode
     onNavbarQueryChange: (queryState: QueryStateUpdate) => void
-    onSearchSubmit: (updates: QueryUpdate[]) => void
+    onSearchSubmit: (updates: QueryUpdate[], updatedSearchQuery?: string) => void
     setSidebarCollapsed: (collapsed: boolean) => void
 }
 
-export const SearchFiltersSidebar: FC<PropsWithChildren<SearchFiltersSidebarProps>> = memo(props => {
+const V2KindTypes: { [key in Filter['kind']]: number } = {
+    file: 1,
+    repo: 2,
+    lang: 3,
+    utility: 4,
+    author: 5,
+    'commit date': 6,
+    'symbol type': 7,
+    type: 8,
+}
+
+export const SearchFiltersSidebar = forwardRef<HTMLElement, PropsWithChildren<SearchFiltersSidebarProps>>(props => {
     const {
+        as: Component = StickySearchSidebar,
         liveQuery,
         submittedURLQuery,
         caseSensitive,
@@ -56,40 +89,45 @@ export const SearchFiltersSidebar: FC<PropsWithChildren<SearchFiltersSidebarProp
         onSearchSubmit,
         setSidebarCollapsed,
         telemetryService,
+        telemetryRecorder,
         settingsCascade,
         children,
         ...attributes
     } = props
 
     // Settings
-    const enableSearchAggregations = useExperimentalFeatures(features => features.searchResultsAggregations ?? true)
-    const proactiveSearchAggregations = useExperimentalFeatures(
-        features => features.proactiveSearchResultsAggregations ?? true
-    )
+    const { enableSearchAggregations, proactiveSearchAggregations } = useExperimentalFeatures(features => ({
+        enableSearchAggregations: features.searchResultsAggregations ?? true,
+        proactiveSearchAggregations: features.proactiveSearchResultsAggregations ?? true,
+    }))
 
     // Derived state
     const repoFilters = useMemo(() => getFiltersOfKind(filters, FilterType.repo), [filters])
     const repoName = useLastRepoName(liveQuery, repoFilters)
 
     const onDynamicFilterClicked = useCallback(
-        (value: string, kind?: string) => {
+        (value: string, kind?: Filter['kind']) => {
             telemetryService.log('DynamicFilterClicked', { search_filter: { kind } })
+            telemetryRecorder.recordEvent('search.dynamicFilter', 'click', {
+                metadata: { kind: kind ? V2KindTypes[kind] : 0 },
+            })
             onSearchSubmit([{ type: 'toggleSubquery', value }])
         },
-        [telemetryService, onSearchSubmit]
+        [telemetryService, onSearchSubmit, telemetryRecorder]
     )
 
     const onSnippetClicked = useCallback(
         (value: string) => {
             telemetryService.log('SearchSnippetClicked')
+            telemetryRecorder.recordEvent('search.snippet', 'click')
             onSearchSubmit([{ type: 'toggleSubquery', value }])
         },
-        [telemetryService, onSearchSubmit]
+        [telemetryService, onSearchSubmit, telemetryRecorder]
     )
 
     const handleAggregationBarLinkClick = useCallback(
-        (query: string): void => {
-            onSearchSubmit([{ type: 'replaceQuery', value: query }])
+        (query: string, updatedSearchQuery: string): void => {
+            onSearchSubmit([{ type: 'replaceQuery', value: query }], updatedSearchQuery)
         },
         [onSearchSubmit]
     )
@@ -97,96 +135,113 @@ export const SearchFiltersSidebar: FC<PropsWithChildren<SearchFiltersSidebarProp
     const handleGroupedByToggle = useCallback(
         (open: boolean): void => {
             telemetryService.log(open ? GroupResultsPing.ExpandSidebarSection : GroupResultsPing.CollapseSidebarSection)
+            telemetryRecorder.recordEvent('search.group.results', open ? 'expand' : 'collapse')
         },
-        [telemetryService]
+        [telemetryService, telemetryRecorder]
     )
 
     return (
-        <SearchSidebar {...attributes} onClose={() => setSidebarCollapsed(true)}>
-            {children}
+        <Component {...attributes} onClose={() => setSidebarCollapsed(true)}>
+            <PersistSidebarStoreProvider>
+                {children}
 
-            {showAggregationPanel && enableSearchAggregations && aggregationUIMode === AggregationUIMode.Sidebar && (
-                <SearchSidebarSection
-                    sectionId={SectionID.GROUPED_BY}
-                    header={<CustomAggregationHeading telemetryService={props.telemetryService} />}
-                    // SearchAggregations content contains component that makes a few API network requests
-                    // in order to prevent these calls if this section is collapsed we turn off force render
-                    // for collapse section component
-                    forcedRender={false}
-                    onToggle={handleGroupedByToggle}
-                >
-                    <SearchAggregations
-                        query={submittedURLQuery}
-                        patternType={patternType}
-                        proactive={proactiveSearchAggregations}
-                        caseSensitive={caseSensitive}
-                        telemetryService={telemetryService}
-                        onQuerySubmit={handleAggregationBarLinkClick}
-                    />
+                {showAggregationPanel &&
+                    enableSearchAggregations &&
+                    aggregationUIMode === AggregationUIMode.Sidebar && (
+                        <SearchSidebarSection
+                            sectionId={SectionID.GROUPED_BY}
+                            header="Group results by"
+                            postHeader={
+                                <CustomAggregationHeading
+                                    telemetryService={props.telemetryService}
+                                    telemetryRecorder={telemetryRecorder}
+                                />
+                            }
+                            // SearchAggregations content contains component that makes a few API network requests
+                            // in order to prevent these calls if this section is collapsed we turn off force render
+                            // for collapse section component
+                            forcedRender={false}
+                            onToggle={handleGroupedByToggle}
+                        >
+                            <SearchAggregations
+                                query={submittedURLQuery}
+                                patternType={patternType}
+                                proactive={proactiveSearchAggregations}
+                                caseSensitive={caseSensitive}
+                                telemetryService={telemetryService}
+                                telemetryRecorder={telemetryRecorder}
+                                onQuerySubmit={handleAggregationBarLinkClick}
+                            />
+                        </SearchSidebarSection>
+                    )}
+
+                <SearchSidebarSection sectionId={SectionID.SEARCH_TYPES} header="Search Types">
+                    {getSearchTypeLinks({
+                        query: liveQuery,
+                        onNavbarQueryChange,
+                        selectedSearchContextSpec,
+                        buildSearchURLQueryFromQueryState,
+                        forceButton: false,
+                    })}
                 </SearchSidebarSection>
-            )}
 
-            <SearchSidebarSection sectionId={SectionID.SEARCH_TYPES} header="Search Types">
-                {getSearchTypeLinks({
-                    query: liveQuery,
-                    onNavbarQueryChange,
-                    selectedSearchContextSpec,
-                    buildSearchURLQueryFromQueryState,
-                    forceButton: false,
-                })}
-            </SearchSidebarSection>
-
-            <SearchSidebarSection sectionId={SectionID.LANGUAGES} header="Languages">
-                {getDynamicFilterLinks(filters, ['lang'], onDynamicFilterClicked, label => `Search ${label} files`)}
-            </SearchSidebarSection>
-
-            <SearchSidebarSection
-                sectionId={SectionID.REPOSITORIES}
-                header="Repositories"
-                showSearch={true}
-                minItems={1}
-                noResultText={getRepoFilterNoResultText}
-            >
-                {getRepoFilterLinks(repoFilters, onDynamicFilterClicked)}
-            </SearchSidebarSection>
-
-            <SearchSidebarSection sectionId={SectionID.FILE_TYPES} header="File types">
-                {getDynamicFilterLinks(filters, ['file'], onDynamicFilterClicked)}
-            </SearchSidebarSection>
-            <SearchSidebarSection sectionId={SectionID.OTHER} header="Other">
-                {getDynamicFilterLinks(filters, ['utility'], onDynamicFilterClicked)}
-            </SearchSidebarSection>
-
-            {repoName && (
-                <SearchSidebarSection
-                    sectionId={SectionID.REVISIONS}
-                    header="Revisions"
-                    showSearch={true}
-                    clearSearchOnChange={repoName}
-                >
-                    {getRevisions({ repoName, onFilterClick: onSearchSubmit })}
+                <SearchSidebarSection sectionId={SectionID.LANGUAGES} header="Languages" minItems={2}>
+                    {getDynamicFilterLinks(filters, ['lang'], onDynamicFilterClicked, label => `Search ${label} files`)}
                 </SearchSidebarSection>
-            )}
 
-            <SearchSidebarSection
-                sectionId={SectionID.SEARCH_REFERENCE}
-                header="Search reference"
-                showSearch={true}
-                // search reference should always preserve the filter
-                // (false is just an arbitrary but static value)
-                clearSearchOnChange={false}
-            >
-                {getSearchReferenceFactory({ telemetryService, setQueryState: onNavbarQueryChange })}
-            </SearchSidebarSection>
+                <SearchSidebarSection
+                    sectionId={SectionID.REPOSITORIES}
+                    header="Repositories"
+                    searchOptions={{ ariaLabel: 'Find repositories', noResultText: getRepoFilterNoResultText }}
+                    minItems={2}
+                >
+                    {getRepoFilterLinks(repoFilters, onDynamicFilterClicked)}
+                </SearchSidebarSection>
 
-            <SearchSidebarSection sectionId={SectionID.SEARCH_SNIPPETS} header="Search snippets">
-                {getSearchSnippetLinks(settingsCascade, onSnippetClicked)}
-            </SearchSidebarSection>
-        </SearchSidebar>
+                <SearchSidebarSection sectionId={SectionID.FILE_TYPES} header="File types">
+                    {getDynamicFilterLinks(filters, ['file'], onDynamicFilterClicked)}
+                </SearchSidebarSection>
+                <SearchSidebarSection sectionId={SectionID.OTHER} header="Other">
+                    {getDynamicFilterLinks(filters, ['utility'], onDynamicFilterClicked)}
+                </SearchSidebarSection>
+
+                {repoName && (
+                    <SearchSidebarSection
+                        sectionId={SectionID.REVISIONS}
+                        header="Revisions"
+                        searchOptions={{
+                            ariaLabel: 'Find revisions',
+                            clearSearchOnChange: repoName,
+                        }}
+                    >
+                        {getRevisions({ repoName, onFilterClick: onSearchSubmit })}
+                    </SearchSidebarSection>
+                )}
+
+                <SearchSidebarSection
+                    sectionId={SectionID.SEARCH_REFERENCE}
+                    header="Search reference"
+                    searchOptions={{
+                        ariaLabel: 'Find filters',
+                        // search reference should always preserve the filter
+                        // (false is just an arbitrary but static value)
+                        clearSearchOnChange: false,
+                    }}
+                >
+                    {getSearchReferenceFactory({
+                        telemetryService,
+                        telemetryRecorder,
+                        setQueryState: onNavbarQueryChange,
+                    })}
+                </SearchSidebarSection>
+
+                <SearchSidebarSection sectionId={SectionID.SEARCH_SNIPPETS} header="Search snippets">
+                    {getSearchSnippetLinks(settingsCascade, onSnippetClicked)}
+                </SearchSidebarSection>
+            </PersistSidebarStoreProvider>
+        </Component>
     )
 })
-
-SearchFiltersSidebar.displayName = 'SearchFiltersSidebar'
 
 const getRepoFilterNoResultText = (repoFilterLinks: ReactElement[]): ReactNode => (
     <span>
@@ -195,16 +250,16 @@ const getRepoFilterNoResultText = (repoFilterLinks: ReactElement[]): ReactNode =
     </span>
 )
 
-const CustomAggregationHeading: FC<TelemetryProps> = ({ telemetryService }) => (
-    <>
-        Group results by
-        <Tooltip content="Aggregation is based on results with no count limitation (count:all).">
-            <Icon
-                aria-label="Info icon about aggregation run"
-                size="md"
-                svgPath={mdiInformationOutline}
-                onMouseEnter={() => telemetryService.log(GroupResultsPing.InfoIconHover)}
-            />
-        </Tooltip>
-    </>
+const CustomAggregationHeading: FC<TelemetryProps & TelemetryV2Props> = ({ telemetryService, telemetryRecorder }) => (
+    <Tooltip content="Aggregation is based on results with no count limitation (count:all).">
+        <Icon
+            aria-label="(Aggregation is based on results with no count limitation (count:all).)"
+            size="md"
+            svgPath={mdiInformationOutline}
+            onMouseEnter={() => {
+                telemetryService.log(GroupResultsPing.InfoIconHover)
+                telemetryRecorder.recordEvent('search.group.results.infoIcon', 'hover')
+            }}
+        />
+    </Tooltip>
 )

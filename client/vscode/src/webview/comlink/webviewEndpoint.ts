@@ -1,11 +1,11 @@
 import * as Comlink from 'comlink'
 import { isObject } from 'lodash'
 
-import { EndpointPair } from '@sourcegraph/shared/src/platform/context'
+import type { EndpointPair } from '@sourcegraph/shared/src/platform/context'
 
-import { VsCodeApi } from '../../vsCodeApi'
+import type { VsCodeApi } from '../../vsCodeApi'
 
-import { generateUUID, isNestedConnection, NestedConnectionData, RelationshipType } from '.'
+import { generateUUID, isNestedConnection, type NestedConnectionData, type RelationshipType } from '.'
 
 const panelId = self.document ? self.document.documentElement.dataset.panelId! : 'web-worker'
 
@@ -31,9 +31,8 @@ const vscodeWebviewProxyTransferHandler: Comlink.TransferHandler<
     },
     deserialize: serialized => {
         // Get endpoint factory based on relationship type
-        const endpointFactory = endpointFactories[
-            serialized.relationshipType === 'webToWeb' ? 'webToWeb' : 'webToNode'
-        ]!
+        const endpointFactory =
+            endpointFactories[serialized.relationshipType === 'webToWeb' ? 'webToWeb' : 'webToNode']!
 
         // Create endpoint, return wrapped proxy.
         const endpoint = endpointFactory(serialized.nestedConnectionId)
@@ -49,9 +48,7 @@ Comlink.transferHandlers.set('proxy', vscodeWebviewProxyTransferHandler)
  *
  * @param target Typically a WebWorker or `self` from a WebWorker (`Endpoint` for main thread).
  */
-export function createEndpointsForWebToWeb(
-    target: Comlink.Endpoint
-): {
+export function createEndpointsForWebToWeb(target: Comlink.Endpoint): {
     webview: Comlink.Endpoint
     worker: Comlink.Endpoint
 } {

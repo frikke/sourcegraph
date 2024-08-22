@@ -1,6 +1,6 @@
 import { isMacPlatform } from '@sourcegraph/common'
 
-import { Key, ModifierKey } from './keys'
+import { type Key, MODIFIER_KEYS, type ModifierKey } from './keys'
 
 const ON_MATCH_DELAY = 500
 
@@ -48,16 +48,19 @@ export class ShortcutManager {
         this.updateMatchingShortcuts(event)
 
         switch (this.shortcutsMatched.length) {
-            case 0:
+            case 0: {
                 this.resetKeys()
                 break
-            case 1:
+            }
+            case 1: {
                 this.callMatchedShortcut(event)
                 break
-            default:
+            }
+            default: {
                 this.timer = window.setTimeout(() => {
                     this.callMatchedShortcut(event)
                 }, ON_MATCH_DELAY)
+            }
         }
     }
 
@@ -70,6 +73,10 @@ export class ShortcutManager {
             }
 
             if (held && !isModifierHeld(held, event)) {
+                return false
+            }
+
+            if (!held && isAnyModifierKeyHeld(event)) {
                 return false
             }
 
@@ -114,6 +121,10 @@ function isModifierHeld(held: Exclude<Data['held'], undefined>, event: KeyboardE
     // calling it here makes the code easier to test
     const modKey = getModKey()
     return held.every(key => event.getModifierState(key === 'Mod' ? modKey : key))
+}
+
+function isAnyModifierKeyHeld(event: KeyboardEvent): boolean {
+    return MODIFIER_KEYS.some(key => event.getModifierState(key))
 }
 
 /**

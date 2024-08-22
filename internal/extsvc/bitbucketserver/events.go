@@ -19,8 +19,11 @@ func WebhookEventType(r *http.Request) string {
 
 func ParseWebhookEvent(eventType string, payload []byte) (e any, err error) {
 	switch eventType {
-	case "ping":
+	case "ping", "diagnostics:ping":
 		return PingEvent{}, nil
+	case "repo:refs_changed":
+		e = &PushEvent{}
+		return e, json.Unmarshal(payload, e)
 	case "repo:build_status":
 		e = &BuildStatusEvent{}
 		return e, json.Unmarshal(payload, e)
@@ -36,6 +39,33 @@ func ParseWebhookEvent(eventType string, payload []byte) (e any, err error) {
 }
 
 type PingEvent struct{}
+
+type PushEvent struct {
+	Repository  Repo        `json:"repository"`
+	CreatedDate int64       `json:"createdDate"`
+	Changes     []RefChange `json:"changes"`
+}
+
+type RefChange struct {
+	Ref RefChangeRef `json:"ref"`
+	// "refId": "refs/heads/master",
+	RefID string `json:"refId"`
+	// "fromHash": "e54a46d4e4ddb7bb370070aa8a9b68e0ed959e5b",
+	FromHash string `json:"fromHash"`
+	// "toHash": "b14f55bd2b206c1128676131f9d66c56ec19e388",
+	ToHash string `json:"toHash"`
+	// "type": "UPDATE"
+	Type string `json:"type"`
+}
+
+type RefChangeRef struct {
+	// "id": "refs/heads/master",
+	ID string `json:"id"`
+	// "displayId": "master",
+	DisplayID string `json:"displayId"`
+	// "type": "BRANCH"
+	Type string `json:"type"`
+}
 
 type PullRequestActivityEvent struct {
 	Date        time.Time      `json:"date"`

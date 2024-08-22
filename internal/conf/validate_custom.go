@@ -40,7 +40,7 @@ func validateCustom(cfg Unified) (problems Problems) {
 	}
 
 	// Auth provider config validation is contributed by the
-	// github.com/sourcegraph/sourcegraph/cmd/frontend/internal/auth/... packages (using
+	// github.com/sourcegraph/sourcegraph/internal/auth/... packages (using
 	// ContributeValidator).
 
 	{
@@ -83,7 +83,8 @@ func validateCustom(cfg Unified) (problems Problems) {
 func TestValidator(t interface {
 	Errorf(format string, args ...any)
 	Helper()
-}, c conftypes.UnifiedQuerier, f Validator, wantProblems Problems) {
+}, c conftypes.UnifiedQuerier, f Validator, wantProblems Problems,
+) {
 	t.Helper()
 	problems := f(c)
 	wantSet := make(map[string]problemKind, len(wantProblems))
@@ -106,25 +107,4 @@ func TestValidator(t interface {
 	if len(wantSet) > 0 {
 		t.Errorf("got no matches for expected error substrings %q", wantSet)
 	}
-}
-
-// ContributeWarning adds the configuration validator function to the validation process.
-// It is called to validate site configuration. Any problems it returns are shown as configuration
-// warnings in the form of site alerts.
-//
-// It may only be called at init time.
-func ContributeWarning(f Validator) {
-	contributedWarnings = append(contributedWarnings, f)
-}
-
-var contributedWarnings []Validator
-
-// GetWarnings identifies problems with the configuration that a site
-// admin should address, but do not prevent Sourcegraph from running.
-func GetWarnings() (problems Problems, err error) {
-	c := *Get()
-	for i := range contributedWarnings {
-		problems = append(problems, contributedWarnings[i](c)...)
-	}
-	return problems, nil
 }

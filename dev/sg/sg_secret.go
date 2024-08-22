@@ -6,9 +6,10 @@ import (
 
 	"github.com/urfave/cli/v2"
 
-	"github.com/sourcegraph/sourcegraph/dev/sg/cliutil"
+	"github.com/sourcegraph/sourcegraph/dev/sg/internal/category"
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/secrets"
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/std"
+	"github.com/sourcegraph/sourcegraph/lib/cliutil/completions"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 	"github.com/sourcegraph/sourcegraph/lib/output"
 )
@@ -19,22 +20,20 @@ var (
 	secretCommand = &cli.Command{
 		Name:  "secret",
 		Usage: "Manipulate secrets stored in memory and in file",
-		UsageText: `
-# List all secrets stored in your local configuration.
+		UsageText: `# List all secrets stored in your local configuration.
 sg secret list
 
-# Remove the secrets associated with buildkite (sg ci build) - supports autocompletion for
-# ease of use
+# Remove the secrets associated with buildkite (sg ci build) - (supports bash autocompletion).
 sg secret reset buildkite
 `,
-		Category: CategoryEnv,
+		Category: category.Env,
 		Subcommands: []*cli.Command{
 			{
 				Name:         "reset",
-				ArgsUsage:    "<...key>",
-				Usage:        "Remove a specific secret from secrets file",
+				ArgsUsage:    "key1 key2 ...",
+				Usage:        "Remove a individual secret(s) from secrets file (see 'list' for getting the keys)",
 				Action:       resetSecretExec,
-				BashComplete: cliutil.CompleteOptions(bashCompleteSecrets),
+				BashComplete: completions.CompleteArgs(bashCompleteSecrets),
 			},
 			{
 				Name:  "list",
@@ -108,9 +107,9 @@ func listSecretExec(ctx *cli.Context) error {
 }
 
 func bashCompleteSecrets() (options []string) {
-	secrets, err := loadSecrets()
+	allSecrets, err := loadSecrets()
 	if err != nil {
 		return nil
 	}
-	return secrets.Keys()
+	return allSecrets.Keys()
 }

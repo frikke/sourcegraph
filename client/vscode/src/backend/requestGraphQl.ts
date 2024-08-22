@@ -1,16 +1,10 @@
 import { asError } from '@sourcegraph/common'
-import { checkOk, GraphQLResult, GRAPHQL_URI, isHTTPAuthError } from '@sourcegraph/http-client'
+import { checkOk, GRAPHQL_URI, type GraphQLResult, isHTTPAuthError } from '@sourcegraph/http-client'
 
-import { accessTokenSetting, handleAccessTokenError } from '../settings/accessTokenSetting'
-import { endpointSetting, endpointRequestHeadersSetting } from '../settings/endpointSetting'
+import { handleAccessTokenError, getAccessToken } from '../settings/accessTokenSetting'
+import { endpointRequestHeadersSetting, endpointSetting } from '../settings/endpointSetting'
 
-let invalidated = false
-/**
- * To be called when Sourcegraph URL changes.
- */
-export function invalidateClient(): void {
-    invalidated = true
-}
+import { fetch, getProxyAgent, Headers, type HeadersInit } from './fetch'
 
 export const requestGraphQLFromVSCode = async <R, V = object>(
     request: string,
@@ -18,13 +12,8 @@ export const requestGraphQLFromVSCode = async <R, V = object>(
     overrideAccessToken?: string,
     overrideSourcegraphURL?: string
 ): Promise<GraphQLResult<R>> => {
-    if (invalidated) {
-        throw new Error(
-            'Sourcegraph GraphQL Client has been invalidated due to instance URL change. Restart VS Code to fix.'
-        )
-    }
     const sourcegraphURL = overrideSourcegraphURL || endpointSetting()
-    const accessToken = overrideAccessToken || accessTokenSetting()
+    const accessToken = overrideAccessToken || (await getAccessToken())
     const nameMatch = request.match(/^\s*(?:query|mutation)\s+(\w+)/)
     const apiURL = `${GRAPHQL_URI}${nameMatch ? '?' + nameMatch[1] : ''}`
     const customHeaders = endpointRequestHeadersSetting()
@@ -40,24 +29,24 @@ export const requestGraphQLFromVSCode = async <R, V = object>(
         // Debt: intercepted requests in integration tests
         // have 0 status codes, so don't check in test environment.
         const checkFunction = process.env.IS_TEST ? <T>(value: T): T => value : checkOk
-        const response = checkFunction(
-            await fetch(url, {
-                body: JSON.stringify({
-                    query: request,
-                    variables,
-                }),
-                method: 'POST',
-                headers,
-            })
-        )
+        const options: any = {
+            agent: getProxyAgent(),
+            body: JSON.stringify({
+                query: request,
+                variables,
+            }),
+            method: 'POST',
+            headers,
+        }
+
+        const response = checkFunction(await fetch(url, options))
         // TODO request cancellation w/ VS Code cancellation tokens.
-        // eslint-disable-next-line @typescript-eslint/return-await
-        return response.json() as Promise<GraphQLResult<any>>
+        return (await response.json()) as GraphQLResult<R>
     } catch (error) {
         // If `overrideAccessToken` is set, we're validating the token
         // and errors will be displayed in the UI.
         if (isHTTPAuthError(error) && !overrideAccessToken) {
-            handleAccessTokenError(accessToken, sourcegraphURL).then(
+            handleAccessTokenError(accessToken || '', sourcegraphURL).then(
                 () => {},
                 () => {}
             )

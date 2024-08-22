@@ -1,11 +1,9 @@
-import { ChangeEvent, useEffect, useState } from 'react'
+import { type ChangeEvent, useEffect, useState } from 'react'
 
 import { mdiSourceRepository } from '@mdi/js'
-import { DecoratorFn, Meta } from '@storybook/react'
+import type { Decorator, Meta } from '@storybook/react'
 
-import { BrandedStory } from '@sourcegraph/branded/src/components/BrandedStory'
-import webStyles from '@sourcegraph/web/src/SourcegraphWebApp.scss'
-
+import { BrandedStory } from '../../stories/BrandedStory'
 import { Button } from '../Button'
 import { Grid } from '../Grid'
 import { Icon } from '../Icon'
@@ -22,8 +20,8 @@ import {
     ComboboxOptionGroup,
 } from './Combobox'
 
-const decorator: DecoratorFn = story => (
-    <BrandedStory styles={webStyles}>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>
+const decorator: Decorator = story => (
+    <BrandedStory>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>
 )
 
 const config: Meta = {
@@ -39,6 +37,7 @@ export const ComboboxDemo = () => (
         <Grid columnCount={3}>
             <CommonSearchDemo />
             <ComboboxOpenOnFocusDemo />
+            <ScrollableListDemo />
             <ComboboxWithIcon />
             <ComboboxCustomSuggestionRenderDemo />
             <ComboboxServerSideSearchDemo />
@@ -80,6 +79,29 @@ const ComboboxOpenOnFocusDemo = () => (
                 <ComboboxOption value="github.com/sourcegraph/deploy" />
                 <ComboboxOption value="github.com/sourcegraph/handbook" />
                 <ComboboxOption value="github.com/sourcegraph/with-long-loooooong-repo-name" />
+            </ComboboxList>
+        </ComboboxPopover>
+    </Combobox>
+)
+
+const ScrollableListDemo = () => (
+    <Combobox aria-label="Choose a repo" openOnFocus={true} style={{ maxWidth: '20rem' }}>
+        <ComboboxInput
+            label="Repository"
+            placeholder="Focus and navigate with arrow"
+            message="You need to specify repo name (github.com/sg/sg) and then pick one of the suggestions items."
+        />
+
+        <ComboboxPopover>
+            <ComboboxList style={{ maxHeight: 155 }}>
+                <ComboboxOption value="github.com/sourcegraph/sourcegraph" />
+                <ComboboxOption value="github.com/sourcegraph/about" />
+                <ComboboxOption value="github.com/sourcegraph/deploy" />
+                <ComboboxOption value="github.com/sourcegraph/handbook" />
+                <ComboboxOption value="github.com/sourcegraph/4.0" />
+                <ComboboxOption value="github.com/sourcegraph/sorokin" />
+                <ComboboxOption value="github.com/sourcegraph/1.1" />
+                <ComboboxOption value="github.com/sourcegraph/2.0" />
             </ComboboxList>
         </ComboboxPopover>
     </Combobox>

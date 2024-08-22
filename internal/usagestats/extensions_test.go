@@ -26,7 +26,7 @@ func TestExtensionsUsageStatistics(t *testing.T) {
 	mockTimeNow(now)
 
 	logger := logtest.Scoped(t)
-	db := database.NewDB(logger, dbtest.NewDB(logger, t))
+	db := database.NewDB(logger, dbtest.NewDB(t))
 
 	_, err := db.ExecContext(context.Background(), `
 		INSERT INTO event_logs
@@ -48,7 +48,7 @@ func TestExtensionsUsageStatistics(t *testing.T) {
 	}
 
 	oneFloat := float64(1)
-	oneAndAHalfFloat := float64(1.5)
+	oneAndAHalfFloat := 1.5
 	oneInt := int32(1)
 	twoInt := int32(2)
 

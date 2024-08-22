@@ -1,76 +1,101 @@
-import React, { useMemo } from 'react'
+import React, { useEffect } from 'react'
 
 import classNames from 'classnames'
-import { parseISO } from 'date-fns'
-import differenceInDays from 'date-fns/differenceInDays'
+import { parseISO, differenceInDays } from 'date-fns'
 
 import { renderMarkdown } from '@sourcegraph/common'
-import { Markdown } from '@sourcegraph/shared/src/components/Markdown'
-import { Settings } from '@sourcegraph/shared/src/schema/settings.schema'
-import { isSettingsValid, SettingsCascadeProps } from '@sourcegraph/shared/src/settings/settings'
-import { Link, useObservable } from '@sourcegraph/wildcard'
+import { gql, useQuery } from '@sourcegraph/http-client'
+import { useSettings } from '@sourcegraph/shared/src/settings/settings'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { Link, Markdown } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../auth'
+import type { AuthenticatedUser } from '../auth'
 import { DismissibleAlert } from '../components/DismissibleAlert'
-import { siteFlags } from '../site/backend'
-import { CodeHostScopeAlerts, GitLabScopeAlert } from '../site/CodeHostScopeAlerts/CodeHostScopeAlerts'
-import { DockerForMacAlert } from '../site/DockerForMacAlert'
+import { useFeatureFlag } from '../featureFlags/useFeatureFlag'
+import type { GlobalAlertsSiteFlagsResult, GlobalAlertsSiteFlagsVariables } from '../graphql-operations'
 import { FreeUsersExceededAlert } from '../site/FreeUsersExceededAlert'
 import { LicenseExpirationAlert } from '../site/LicenseExpirationAlert'
 import { NeedsRepositoryConfigurationAlert } from '../site/NeedsRepositoryConfigurationAlert'
+import { siteFlagFieldsFragment } from '../storm/pages/LayoutPage/LayoutPage.loader'
 
 import { GlobalAlert } from './GlobalAlert'
 import { Notices, VerifyEmailNotices } from './Notices'
 
 import styles from './GlobalAlerts.module.scss'
 
-interface Props extends SettingsCascadeProps {
+interface Props extends TelemetryV2Props {
     authenticatedUser: AuthenticatedUser | null
-    isSourcegraphDotCom: boolean
 }
+
+// NOTE: The name of the query is also added in the refreshSiteFlags() function
+// found in client/web/src/site/backend.tsx
+const QUERY = gql`
+    query GlobalAlertsSiteFlags {
+        site {
+            ...SiteFlagFields
+        }
+    }
+
+    ${siteFlagFieldsFragment}
+`
+/**
+ * Alerts that should not be visible when admin onboarding is enabled
+ */
+const adminOnboardingRemovedAlerts = ['externalURL', 'email.smtp', 'enable repository permissions']
 
 /**
  * Fetches and displays relevant global alerts at the top of the page
  */
-export const GlobalAlerts: React.FunctionComponent<Props> = ({
-    authenticatedUser,
-    settingsCascade,
-    isSourcegraphDotCom,
-}) => {
-    const siteFlagsValue = useObservable(siteFlags)
+export const GlobalAlerts: React.FunctionComponent<Props> = ({ authenticatedUser, telemetryRecorder }) => {
+    const settings = useSettings()
+    const [isAdminOnboardingEnabled] = useFeatureFlag('admin-onboarding', true)
+    const { data } = useQuery<GlobalAlertsSiteFlagsResult, GlobalAlertsSiteFlagsVariables>(QUERY, {
+        fetchPolicy: 'cache-and-network',
+    })
 
-    const verifyEmailProps = useMemo(() => {
-        if (!authenticatedUser || !isSourcegraphDotCom) {
-            return
+    useEffect(() => {
+        if (settings?.motd && Array.isArray(settings.motd)) {
+            telemetryRecorder.recordEvent('alert.motd', 'view')
         }
-        return {
-            emails: authenticatedUser.emails.filter(({ verified }) => !verified).map(({ email }) => email),
-            settingsURL: authenticatedUser.settingsURL as string,
+        if (process.env.SOURCEGRAPH_API_URL) {
+            telemetryRecorder.recordEvent('alert.proxyAPI', 'view')
         }
-    }, [authenticatedUser, isSourcegraphDotCom])
+    }, [settings?.motd, telemetryRecorder])
+
+    const siteFlagsValue = data?.site
+    let alerts = siteFlagsValue?.alerts ?? []
+
+    if (isAdminOnboardingEnabled) {
+        alerts =
+            siteFlagsValue?.alerts.filter(
+                ({ message }) => !adminOnboardingRemovedAlerts.some(alt => message.includes(alt))
+            ) ?? []
+    }
+
     return (
         <div className={classNames('test-global-alert', styles.globalAlerts)}>
             {siteFlagsValue && (
                 <>
-                    {siteFlagsValue.needsRepositoryConfiguration && (
-                        <NeedsRepositoryConfigurationAlert className={styles.alert} />
+                    {siteFlagsValue?.needsRepositoryConfiguration && (
+                        <NeedsRepositoryConfigurationAlert
+                            className={styles.alert}
+                            telemetryRecorder={telemetryRecorder}
+                        />
                     )}
                     {siteFlagsValue.freeUsersExceeded && (
                         <FreeUsersExceededAlert
                             noLicenseWarningUserCount={siteFlagsValue.productSubscription.noLicenseWarningUserCount}
                             className={styles.alert}
+                            telemetryRecorder={telemetryRecorder}
                         />
                     )}
-                    {/* Only show if the user has already added repositories; if not yet, the user wouldn't experience any Docker for Mac perf issues anyway. */}
-                    {window.context.likelyDockerOnMac && window.context.deployType === 'docker-container' && (
-                        <DockerForMacAlert className={styles.alert} />
-                    )}
-                    {window.context.sourcegraphDotComMode && (
-                        <CodeHostScopeAlerts authenticatedUser={authenticatedUser} />
-                    )}
-                    {window.context.sourcegraphDotComMode && <GitLabScopeAlert authenticatedUser={authenticatedUser} />}
-                    {siteFlagsValue.alerts.map((alert, index) => (
-                        <GlobalAlert key={index} alert={alert} className={styles.alert} />
+                    {alerts.map((alert, index) => (
+                        <GlobalAlert
+                            key={index}
+                            alert={alert}
+                            className={styles.alert}
+                            telemetryRecorder={telemetryRecorder}
+                        />
                     ))}
                     {siteFlagsValue.productSubscription.license &&
                         (() => {
@@ -81,16 +106,16 @@ export const GlobalAlerts: React.FunctionComponent<Props> = ({
                                         expiresAt={expiresAt}
                                         daysLeft={Math.floor(differenceInDays(expiresAt, Date.now()))}
                                         className={styles.alert}
+                                        telemetryRecorder={telemetryRecorder}
                                     />
                                 )
                             )
                         })()}
                 </>
             )}
-            {isSettingsValid<Settings>(settingsCascade) &&
-                settingsCascade.final.motd &&
-                Array.isArray(settingsCascade.final.motd) &&
-                settingsCascade.final.motd.map(motd => (
+            {settings?.motd &&
+                Array.isArray(settings.motd) &&
+                settings.motd.map(motd => (
                     <DismissibleAlert
                         key={motd}
                         partialStorageKey={`motd.${motd}`}
@@ -116,10 +141,12 @@ export const GlobalAlerts: React.FunctionComponent<Props> = ({
                     .
                 </DismissibleAlert>
             )}
-            <Notices alertClassName={styles.alert} location="top" settingsCascade={settingsCascade} />
-            {!!verifyEmailProps?.emails.length && (
-                <VerifyEmailNotices alertClassName={styles.alert} {...verifyEmailProps} />
-            )}
+            <Notices alertClassName={styles.alert} location="top" telemetryRecorder={telemetryRecorder} />
+            <VerifyEmailNotices
+                authenticatedUser={authenticatedUser}
+                alertClassName={styles.alert}
+                telemetryRecorder={telemetryRecorder}
+            />
         </div>
     )
 }

@@ -1,18 +1,18 @@
 import React, { useCallback, useMemo, useState } from 'react'
 
-import { mdiAlertCircle, mdiChevronDown, mdiChevronRight, mdiOpenInNew } from '@mdi/js'
+import { mdiAlertCircle, mdiChevronDown, mdiChevronUp, mdiOpenInNew } from '@mdi/js'
 import classNames from 'classnames'
 
+import { Timestamp } from '@sourcegraph/branded/src/components/Timestamp'
 import { pluralize } from '@sourcegraph/common'
 import { buildSearchURLQuery } from '@sourcegraph/shared/src/util/url'
 import { Button, Link, Icon } from '@sourcegraph/wildcard'
 
 import { ConnectionList } from '../../../../components/FilteredConnection/ui'
-import { Timestamp } from '../../../../components/time/Timestamp'
 import {
     EventStatus,
-    MonitorActionEvents,
-    MonitorTriggerEventWithActions,
+    type MonitorActionEvents,
+    type MonitorTriggerEventWithActions,
     SearchPatternType,
 } from '../../../../graphql-operations'
 
@@ -47,12 +47,15 @@ export const TriggerEvent: React.FunctionComponent<
         }
 
         switch (triggerEvent.status) {
-            case EventStatus.ERROR:
+            case EventStatus.ERROR: {
                 return 'Unknown error occurred when running the search'
-            case EventStatus.PENDING:
+            }
+            case EventStatus.PENDING: {
                 return 'Search is pending'
-            default:
+            }
+            default: {
                 return 'Search ran successfully'
+            }
         }
     }
 
@@ -61,9 +64,9 @@ export const TriggerEvent: React.FunctionComponent<
             <div className="d-flex align-items-center">
                 <Button onClick={toggleExpanded} className={classNames('d-block', styles.expandButton)}>
                     {expanded ? (
-                        <Icon svgPath={mdiChevronDown} className="mr-2" aria-label="Collapse run." />
+                        <Icon svgPath={mdiChevronUp} className="mr-2" aria-label="Collapse run." />
                     ) : (
-                        <Icon svgPath={mdiChevronRight} className="mr-2" aria-label="Expand run." />
+                        <Icon svgPath={mdiChevronDown} className="mr-2" aria-label="Expand run." />
                     )}
 
                     {hasError ? (
@@ -103,7 +106,7 @@ export const TriggerEvent: React.FunctionComponent<
                     />
 
                     {triggerEvent.actions.nodes.map(action => (
-                        <>
+                        <React.Fragment key={action.id}>
                             {action.events.nodes.map(actionEvent => (
                                 <CollapsibleDetailsWithStatus
                                     key={actionEvent.id}
@@ -122,7 +125,7 @@ export const TriggerEvent: React.FunctionComponent<
                                     startOpen={startOpen}
                                 />
                             )}
-                        </>
+                        </React.Fragment>
                     ))}
                 </ConnectionList>
             )}
@@ -136,22 +139,28 @@ function getActionEventMessage(actionEvent: MonitorActionEvents['nodes'][number]
     }
 
     switch (actionEvent.status) {
-        case EventStatus.ERROR:
+        case EventStatus.ERROR: {
             return 'Unknown error occurred when sending the notification'
-        case EventStatus.PENDING:
+        }
+        case EventStatus.PENDING: {
             return 'Notification is pending'
-        default:
+        }
+        default: {
             return 'Notification sent successfully'
+        }
     }
 }
 
 function getActionEventTitle(action: MonitorTriggerEventWithActions['actions']['nodes'][number]): string {
     switch (action.__typename) {
-        case 'MonitorEmail':
+        case 'MonitorEmail': {
             return 'Email'
-        case 'MonitorSlackWebhook':
+        }
+        case 'MonitorSlackWebhook': {
             return 'Slack'
-        case 'MonitorWebhook':
+        }
+        case 'MonitorWebhook': {
             return 'Webhook'
+        }
     }
 }

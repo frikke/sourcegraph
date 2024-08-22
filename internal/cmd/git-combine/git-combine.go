@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io/fs"
-	"log"
+	"log" //nolint:logging // TODO move all logging to sourcegraph/log
 	"math"
 	"math/rand"
 	"os"
@@ -60,7 +60,7 @@ func (o *Options) SetDefaults() {
 func Combine(path string, opt Options) error {
 	opt.SetDefaults()
 
-	log := opt.Logger
+	logger := opt.Logger
 
 	r, err := git.PlainOpen(path)
 	if err != nil {
@@ -81,7 +81,7 @@ func Combine(path string, opt Options) error {
 		}
 	}
 
-	log.Println("Determining the tree hashes of subdirectories...")
+	logger.Println("Determining the tree hashes of subdirectories...")
 	remoteToTree := map[string]plumbing.Hash{}
 	if head != nil {
 		tree, err := head.Tree()
@@ -93,7 +93,7 @@ func Combine(path string, opt Options) error {
 		}
 	}
 
-	log.Println("Collecting new commits...")
+	logger.Println("Collecting new commits...")
 	lastLog := time.Now()
 	remoteToCommits := map[string][]*object.Commit{}
 	for remote := range conf.Remotes {
@@ -110,9 +110,9 @@ func Combine(path string, opt Options) error {
 			continue
 		}
 
-		for depth := 0; depth < opt.LimitRemote; depth++ {
+		for depth := range opt.LimitRemote {
 			if time.Since(lastLog) > time.Second {
-				log.Printf("Collecting new commits... (remotes %s, commit depth %d)", remote, depth)
+				logger.Printf("Collecting new commits... (remotes %s, commit depth %d)", remote, depth)
 				lastLog = time.Now()
 			}
 
@@ -202,7 +202,7 @@ func Combine(path string, opt Options) error {
 		return nil
 	}
 
-	log.Println("Applying new commits...")
+	logger.Println("Applying new commits...")
 	total := 0
 	for _, commits := range remoteToCommits {
 		total += len(commits)
@@ -234,7 +234,7 @@ func Combine(path string, opt Options) error {
 
 			if time.Since(lastLog) > time.Second {
 				progress := float64(height) / float64(total)
-				log.Printf("%.2f%% done (applied %d commits out of %d total)", progress*100, height+1, total)
+				logger.Printf("%.2f%% done (applied %d commits out of %d total)", progress*100, height+1, total)
 				lastLog = time.Now()
 			}
 		}
@@ -487,16 +487,16 @@ func cleanupStaleLockFiles(gitDir string, logger *log.Logger) error {
 		"gc.pid.lock", // created when git starts a garbage collection run
 		"index.lock",  // created when running "git add" / "git commit"
 
-		// from cmd/gitserver/server/cleanup.go, see
-		// https://github.com/sourcegraph/sourcegraph/blob/55d83e8111d4dfea480ad94813e07d58068fec9c/cmd/gitserver/server/cleanup.go#L325-L359
+		// from cmd/gitserver/internal/cleanup.go, see
+		// https://github.com/sourcegraph/sourcegraph/blob/55d83e8111d4dfea480ad94813e07d58068fec9c/cmd/gitserver/internal/cleanup.go#L325-L359
 		"config.lock",
 		"packed-refs.lock",
 	} {
 		lockFiles = append(lockFiles, filepath.Join(gitDir, f))
 	}
 
-	// from cmd/gitserver/server/cleanup.go, see
-	// https://github.com/sourcegraph/sourcegraph/blob/55d83e8111d4dfea480ad94813e07d58068fec9c/cmd/gitserver/server/cleanup.go#L325-L359
+	// from cmd/gitserver/internal/cleanup.go, see
+	// https://github.com/sourcegraph/sourcegraph/blob/55d83e8111d4dfea480ad94813e07d58068fec9c/cmd/gitserver/internal/cleanup.go#L325-L359
 	lockFiles = append(lockFiles, filepath.Join(gitDir, "objects", "info", "commit-graph.lock"))
 
 	refsDir := filepath.Join(gitDir, "refs")

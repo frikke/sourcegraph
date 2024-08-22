@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log" //nolint:logging // TODO move all logging to sourcegraph/log
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -18,17 +18,14 @@ import (
 
 	sglog "github.com/sourcegraph/log"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/app/debugproxies"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/app/otlpadapter"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
-	"github.com/sourcegraph/sourcegraph/internal/conf/conftypes"
 	"github.com/sourcegraph/sourcegraph/internal/conf/deploy"
 	"github.com/sourcegraph/sourcegraph/internal/database"
 	"github.com/sourcegraph/sourcegraph/internal/debugserver"
 	"github.com/sourcegraph/sourcegraph/internal/env"
 	"github.com/sourcegraph/sourcegraph/internal/otlpenv"
-	srcprometheus "github.com/sourcegraph/sourcegraph/internal/src-prometheus"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 	"github.com/sourcegraph/sourcegraph/schema"
 )
@@ -38,16 +35,12 @@ var (
 	jaegerURLFromEnv  = env.Get("JAEGER_SERVER_URL", "", "URL at which Jaeger UI can be reached")
 )
 
-func init() {
-	conf.ContributeWarning(newPrometheusValidator(srcprometheus.NewClient(srcprometheus.PrometheusURL)))
-}
-
 func addNoK8sClientHandler(r *mux.Router, db database.DB) {
 	noHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `Cluster information not available`)
 		fmt.Fprintf(w, `<br><br><a href="headers">headers</a><br>`)
 	})
-	r.Handle("/", adminOnly(noHandler, db))
+	r.Handle("/", debugproxies.AdminOnly(db, noHandler))
 }
 
 // addDebugHandlers registers the reverse proxies to each services debug
@@ -82,38 +75,18 @@ func addDebugHandlers(r *mux.Router, db database.DB) {
 		addNoK8sClientHandler(r, db)
 	}
 
-	rph.AddToRouter(r, db)
+	rph.AddToRouter(r, db) // todo
 }
-
-// PreMountGrafanaHook (if set) is invoked as a hook prior to mounting a
-// the Grafana endpoint to the debug router.
-var PreMountGrafanaHook func() error
-
-// This error is returned if the current license does not support monitoring.
-const errMonitoringNotLicensed = `The feature "monitoring" is not activated in your Sourcegraph license. Upgrade your Sourcegraph subscription to use this feature.`
 
 func addNoGrafanaHandler(r *mux.Router, db database.DB) {
 	noGrafana := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `Grafana endpoint proxying: Please set env var GRAFANA_SERVER_URL`)
 	})
-	r.Handle("/grafana", adminOnly(noGrafana, db))
-}
-
-func addGrafanaNotLicensedHandler(r *mux.Router, db database.DB) {
-	notLicensed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, errMonitoringNotLicensed, http.StatusUnauthorized)
-	})
-	r.Handle("/grafana", adminOnly(notLicensed, db))
+	r.Handle("/grafana", debugproxies.AdminOnly(db, noGrafana))
 }
 
 // addReverseProxyForService registers a reverse proxy for the specified service.
 func addGrafana(r *mux.Router, db database.DB) {
-	if PreMountGrafanaHook != nil {
-		if err := PreMountGrafanaHook(); err != nil {
-			addGrafanaNotLicensedHandler(r, db)
-			return
-		}
-	}
 	if len(grafanaURLFromEnv) > 0 {
 		grafanaURL, err := url.Parse(grafanaURLFromEnv)
 		if err != nil {
@@ -123,7 +96,7 @@ func addGrafana(r *mux.Router, db database.DB) {
 		} else {
 			prefix := "/grafana"
 			// 🚨 SECURITY: Only admins have access to Grafana dashboard
-			r.PathPrefix(prefix).Handler(adminOnly(&httputil.ReverseProxy{
+			r.PathPrefix(prefix).Handler(debugproxies.AdminOnly(db, &httputil.ReverseProxy{
 				Director: func(req *http.Request) {
 					// if set, grafana will fail with an authentication error, so don't allow passthrough
 					req.Header.Del("Authorization")
@@ -133,8 +106,7 @@ func addGrafana(r *mux.Router, db database.DB) {
 						req.URL.Path = req.URL.Path[i+len(prefix):]
 					}
 				},
-				ErrorLog: log.New(env.DebugOut, fmt.Sprintf("%s debug proxy: ", "grafana"), log.LstdFlags),
-			}, db))
+			}))
 		}
 	} else {
 		addNoGrafanaHandler(r, db)
@@ -147,7 +119,7 @@ func addGrafana(r *mux.Router, db database.DB) {
 // The route only forwards known project ids, so a DSN must be defined in siteconfig.Log.Sentry.Dsn
 // to allow events to be forwarded. Sentry responses are ignored.
 func addSentry(r *mux.Router) {
-	logger := sglog.Scoped("sentryTunnel", "A Sentry.io specific HTTP route that allows to forward client-side reports, https://docs.sentry.io/platforms/javascript/troubleshooting/#dealing-with-ad-blockers")
+	logger := sglog.Scoped("sentryTunnel")
 
 	// Helper to fetch Sentry configuration from siteConfig.
 	getConfig := func() (string, string, error) {
@@ -224,20 +196,20 @@ func addSentry(r *mux.Router) {
 			// We want to keep this short, the default client settings are not strict enough.
 			Timeout: 3 * time.Second,
 		}
-		url := fmt.Sprintf("%s/api/%s/envelope/", sentryHost, pID)
+		apiUrl := fmt.Sprintf("%s/api/%s/envelope/", sentryHost, pID)
 
 		// Asynchronously forward to Sentry, there's no need to keep holding this connection
 		// opened any longer.
 		go func() {
-			resp, err := client.Post(url, "text/plain;charset=UTF-8", bytes.NewReader(b))
+			resp, err := client.Post(apiUrl, "text/plain;charset=UTF-8", bytes.NewReader(b))
 			if err != nil || resp.StatusCode >= 400 {
 				logger.Warn("failed to forward", sglog.Error(err), sglog.Int("statusCode", resp.StatusCode))
 				return
 			}
+			resp.Body.Close()
 		}()
 
 		w.WriteHeader(http.StatusOK)
-		return
 	})
 }
 
@@ -245,12 +217,11 @@ func addNoJaegerHandler(r *mux.Router, db database.DB) {
 	noJaeger := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `Jaeger endpoint proxying: Please set env var JAEGER_SERVER_URL`)
 	})
-	r.Handle("/jaeger", adminOnly(noJaeger, db))
+	r.Handle("/jaeger", debugproxies.AdminOnly(db, noJaeger))
 }
 
 func addJaeger(r *mux.Router, db database.DB) {
 	if len(jaegerURLFromEnv) > 0 {
-		fmt.Println("Jaeger URL from env ", jaegerURLFromEnv)
 		jaegerURL, err := url.Parse(jaegerURLFromEnv)
 		if err != nil {
 			log.Printf("failed to parse JAEGER_SERVER_URL=%s: %v", jaegerURLFromEnv, err)
@@ -258,13 +229,12 @@ func addJaeger(r *mux.Router, db database.DB) {
 		} else {
 			prefix := "/jaeger"
 			// 🚨 SECURITY: Only admins have access to Jaeger dashboard
-			r.PathPrefix(prefix).Handler(adminOnly(&httputil.ReverseProxy{
+			r.PathPrefix(prefix).Handler(debugproxies.AdminOnly(db, &httputil.ReverseProxy{
 				Director: func(req *http.Request) {
 					req.URL.Scheme = "http"
 					req.URL.Host = jaegerURL.Host
 				},
-				ErrorLog: log.New(env.DebugOut, fmt.Sprintf("%s debug proxy: ", "jaeger"), log.LstdFlags),
-			}, db))
+			}))
 		}
 
 	} else {
@@ -289,7 +259,7 @@ func addOpenTelemetryProtocolAdapter(r *mux.Router) {
 		ctx      = context.Background()
 		endpoint = otlpenv.GetEndpoint()
 		protocol = otlpenv.GetProtocol()
-		logger   = sglog.Scoped("otlpAdapter", "OpenTelemetry protocol adapter and forwarder").
+		logger   = sglog.Scoped("otlpAdapter").
 				With(sglog.String("endpoint", endpoint), sglog.String("protocol", string(protocol)))
 	)
 
@@ -314,52 +284,4 @@ func addOpenTelemetryProtocolAdapter(r *mux.Router) {
 
 	// Register adapter endpoints
 	otlpadapter.Register(ctx, logger, protocol, endpoint, r, clientEnabled)
-}
-
-// adminOnly is a HTTP middleware which only allows requests by admins.
-func adminOnly(next http.Handler, db database.DB) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := backend.CheckCurrentUserIsSiteAdmin(r.Context(), db); err != nil {
-			http.Error(w, err.Error(), http.StatusUnauthorized)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
-}
-
-// newPrometheusValidator renders problems with the Prometheus deployment and relevant site configuration
-// as reported by `prom-wrapper` inside the `sourcegraph/prometheus` container if Prometheus is enabled.
-//
-// It also accepts the error from creating `srcprometheus.Client` as an parameter, to validate
-// Prometheus configuration.
-func newPrometheusValidator(prom srcprometheus.Client, promErr error) conf.Validator {
-	return func(c conftypes.SiteConfigQuerier) conf.Problems {
-		// surface new prometheus client error if it was unexpected
-		prometheusUnavailable := errors.Is(promErr, srcprometheus.ErrPrometheusUnavailable)
-		if promErr != nil && !prometheusUnavailable {
-			return conf.NewSiteProblems(fmt.Sprintf("Prometheus (`PROMETHEUS_URL`) might be misconfigured: %v", promErr))
-		}
-
-		// no need to validate prometheus config if no `observability.*` settings are configured
-		observabilityNotConfigured := len(c.SiteConfig().ObservabilityAlerts) == 0 && len(c.SiteConfig().ObservabilitySilenceAlerts) == 0
-		if observabilityNotConfigured {
-			// no observability configuration, no checks to make
-			return nil
-		} else if prometheusUnavailable {
-			// no prometheus, but observability is configured
-			return conf.NewSiteProblems("`observability.alerts` or `observability.silenceAlerts` are configured, but Prometheus is not available")
-		}
-
-		// use a short timeout to avoid having this block problems from loading
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		defer cancel()
-
-		// get reported problems
-		status, err := prom.GetConfigStatus(ctx)
-		if err != nil {
-			return conf.NewSiteProblems(fmt.Sprintf("`observability`: failed to fetch alerting configuration status: %v", err))
-		}
-		return status.Problems
-	}
 }

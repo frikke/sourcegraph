@@ -1,50 +1,50 @@
 import { castArray } from 'lodash'
-import { Observable, of } from 'rxjs'
+import { from, of, lastValueFrom } from 'rxjs'
 import { defaultIfEmpty, map } from 'rxjs/operators'
-import * as sglegacy from 'sourcegraph'
-import { DocumentSelector, TextDocument } from 'sourcegraph'
 
 import {
     fromHoverMerged,
-    HoverMerged,
-    TextDocumentIdentifier,
-    TextDocumentPositionParameters,
+    type HoverMerged,
+    type TextDocumentIdentifier,
+    type TextDocumentPositionParameters,
 } from '@sourcegraph/client-api'
-import { MaybeLoadingResult } from '@sourcegraph/codeintellify'
+import type { MaybeLoadingResult } from '@sourcegraph/codeintellify'
 // eslint-disable-next-line no-restricted-imports
 import { isDefined } from '@sourcegraph/common/src/types'
-import * as clientType from '@sourcegraph/extension-api-types'
+import type * as clientType from '@sourcegraph/extension-api-types'
 
 import { match } from '../api/client/types/textDocument'
-import { FlatExtensionHostAPI } from '../api/contract'
+import type { CodeIntelExtensionHostAPI, FlatExtensionHostAPI, ScipParameters } from '../api/contract'
 import { proxySubscribable } from '../api/extension/api/common'
 import { toPosition } from '../api/extension/api/types'
-import { PanelViewData } from '../api/extension/extensionHostApi'
 import { getModeFromPath } from '../languages'
-import { parseRepoURI } from '../util/url'
+import { parseRepoGitURI } from '../util/url'
 
-import { CodeIntelContext } from './legacy-extensions/api'
+import type { DocumentSelector, TextDocument, DocumentHighlight } from './legacy-extensions/api'
 import * as sourcegraph from './legacy-extensions/api'
-import { LanguageSpec } from './legacy-extensions/language-specs/language-spec'
-import { languageSpecs } from './legacy-extensions/language-specs/languages'
+import type { LanguageSpec } from './legacy-extensions/language-specs/language-spec'
+import { findLanguageSpec, languageSpecs } from './legacy-extensions/language-specs/languages'
 import { RedactingLogger } from './legacy-extensions/logging'
-import { createProviders, emptySourcegraphProviders, SourcegraphProviders } from './legacy-extensions/providers'
-
-export type QueryGraphQLFn<T> = () => Promise<T>
+import { createProviders, emptySourcegraphProviders, type SourcegraphProviders } from './legacy-extensions/providers'
+import { SymbolRole, Occurrence } from './scip'
 
 export interface CodeIntelAPI {
-    hasReferenceProvidersForDocument(textParameters: TextDocumentPositionParameters): Observable<boolean>
-    getDefinition(textParameters: TextDocumentPositionParameters): Observable<clientType.Location[]>
+    hasReferenceProvidersForDocument(textParameters: TextDocumentPositionParameters): Promise<boolean>
+    getDefinition(
+        textParameters: TextDocumentPositionParameters,
+        scipParameters?: ScipParameters
+    ): Promise<clientType.Location[]>
     getReferences(
         textParameters: TextDocumentPositionParameters,
-        context: sourcegraph.ReferenceContext
-    ): Observable<clientType.Location[]>
-    getImplementations(parameters: TextDocumentPositionParameters): Observable<clientType.Location[]>
-    getHover(textParameters: TextDocumentPositionParameters): Observable<HoverMerged | null>
-    getDocumentHighlights(textParameters: TextDocumentPositionParameters): Observable<sglegacy.DocumentHighlight[]>
+        context: sourcegraph.ReferenceContext,
+        scipParameters?: ScipParameters
+    ): Promise<clientType.Location[]>
+    getImplementations(parameters: TextDocumentPositionParameters): Promise<clientType.Location[]>
+    getHover(textParameters: TextDocumentPositionParameters): Promise<HoverMerged | null>
+    getDocumentHighlights(textParameters: TextDocumentPositionParameters): Promise<DocumentHighlight[]>
 }
 
-export function newCodeIntelAPI(context: sourcegraph.CodeIntelContext): CodeIntelAPI {
+export function createCodeIntelAPI(context: sourcegraph.CodeIntelContext): CodeIntelAPI {
     sourcegraph.updateCodeIntelContext(context)
     return new DefaultCodeIntelAPI()
 }
@@ -52,58 +52,75 @@ export function newCodeIntelAPI(context: sourcegraph.CodeIntelContext): CodeInte
 class DefaultCodeIntelAPI implements CodeIntelAPI {
     private locationResult(
         locations: sourcegraph.ProviderResult<sourcegraph.Definition>
-    ): Observable<clientType.Location[]> {
-        return locations.pipe(
-            defaultIfEmpty(),
-            map(result =>
-                castArray(result)
-                    .filter(isDefined)
-                    .map(location => ({ ...location, uri: location.uri.toString() }))
-            )
+    ): Promise<clientType.Location[]> {
+        return lastValueFrom(
+            locations.pipe(
+                defaultIfEmpty(undefined),
+                map(result =>
+                    castArray(result)
+                        .filter(isDefined)
+                        .map(location => ({ ...location, uri: location.uri.toString() }))
+                )
+            ),
+            { defaultValue: [] }
         )
     }
 
-    public hasReferenceProvidersForDocument(textParameters: TextDocumentPositionParameters): Observable<boolean> {
+    public hasReferenceProvidersForDocument(textParameters: TextDocumentPositionParameters): Promise<boolean> {
         const document = toTextDocument(textParameters.textDocument)
         const providers = findLanguageMatchingDocument(document)?.providers
-        return of(!!providers)
+        return Promise.resolve(!!providers)
     }
-    public getReferences(
+    public async getReferences(
         textParameters: TextDocumentPositionParameters,
-        context: sourcegraph.ReferenceContext
-    ): Observable<clientType.Location[]> {
+        context: sourcegraph.ReferenceContext,
+        scipParameters?: ScipParameters
+    ): Promise<clientType.Location[]> {
+        const locals = scipParameters ? localReferences(scipParameters) : []
+        if (locals.length > 0) {
+            return locals.map(local => ({ uri: textParameters.textDocument.uri, range: local.range }))
+        }
         const request = requestFor(textParameters)
         return this.locationResult(
             request.providers.references.provideReferences(request.document, request.position, context)
         )
     }
-    public getDefinition(textParameters: TextDocumentPositionParameters): Observable<clientType.Location[]> {
+    public async getDefinition(
+        textParameters: TextDocumentPositionParameters,
+        scipParameters?: ScipParameters
+    ): Promise<clientType.Location[]> {
+        const definitions = scipParameters ? localDefinition(scipParameters) : []
+        if (definitions.length > 0) {
+            return definitions.map(definition => ({ uri: textParameters.textDocument.uri, range: definition.range }))
+        }
         const request = requestFor(textParameters)
         return this.locationResult(request.providers.definition.provideDefinition(request.document, request.position))
     }
-    public getImplementations(textParameters: TextDocumentPositionParameters): Observable<clientType.Location[]> {
+    public async getImplementations(textParameters: TextDocumentPositionParameters): Promise<clientType.Location[]> {
         const request = requestFor(textParameters)
         return this.locationResult(
             request.providers.implementations.provideLocations(request.document, request.position)
         )
     }
-    public getHover(textParameters: TextDocumentPositionParameters): Observable<HoverMerged | null> {
+    public getHover(textParameters: TextDocumentPositionParameters): Promise<HoverMerged | null> {
         const request = requestFor(textParameters)
-        return (
+        return lastValueFrom(
             request.providers.hover
                 .provideHover(request.document, request.position)
                 // We intentionally don't use `defaultIfEmpty()` here because
                 // that makes the popover load with an empty docstring.
-                .pipe(map(result => fromHoverMerged([result])))
+                .pipe(map(result => fromHoverMerged([result]))),
+            { defaultValue: null }
         )
     }
-    public getDocumentHighlights(
-        textParameters: TextDocumentPositionParameters
-    ): Observable<sglegacy.DocumentHighlight[]> {
+    public getDocumentHighlights(textParameters: TextDocumentPositionParameters): Promise<DocumentHighlight[]> {
         const request = requestFor(textParameters)
-        return request.providers.documentHighlights.provideDocumentHighlights(request.document, request.position).pipe(
-            defaultIfEmpty(),
-            map(result => (result ? (result as sglegacy.DocumentHighlight[]) : []))
+        return lastValueFrom(
+            request.providers.documentHighlights.provideDocumentHighlights(request.document, request.position).pipe(
+                defaultIfEmpty(undefined),
+                map(result => result || [])
+            ),
+            { defaultValue: [] }
         )
     }
 }
@@ -126,12 +143,12 @@ function requestFor(textParameters: TextDocumentPositionParameters): LanguageReq
 function toTextDocument(textDocument: TextDocumentIdentifier): sourcegraph.TextDocument {
     return {
         uri: textDocument.uri,
-        languageId: getModeFromPath(parseRepoURI(textDocument.uri).filePath || ''),
+        languageId: getModeFromPath(parseRepoGitURI(textDocument.uri).filePath || ''),
         text: undefined,
     }
 }
 
-function findLanguageMatchingDocument(textDocument: TextDocumentIdentifier): Language | undefined {
+export function findLanguageMatchingDocument(textDocument: TextDocumentIdentifier): Language | undefined {
     const document: Pick<TextDocument, 'uri' | 'languageId'> = toTextDocument(textDocument)
     for (const language of languages) {
         if (match(language.selector, document)) {
@@ -153,6 +170,11 @@ const languages: Language[] = languageSpecs.map(spec => ({
     providers: createProviders(spec, hasImplementationsField, new RedactingLogger(console)),
 }))
 
+// Returns true if the provided language supports "Find implementations"
+export function hasFindImplementationsSupport(language: string): boolean {
+    return findLanguageSpec(language)?.textDocumentImplemenationSupport ?? false
+}
+
 function selectorForSpec(languageSpec: LanguageSpec): DocumentSelector {
     return [
         { language: languageSpec.languageID },
@@ -172,77 +194,62 @@ function selectorForSpec(languageSpec: LanguageSpec): DocumentSelector {
 // extensions, we monkey patch the old implementation with new implementations.
 // The benefit of monkey patching is that we can optionally disable if for
 // customers that choose to enable the legacy extensions.
+//
+// TODO(camdencheek): USE THIS to patch code intel into extensions
 export function injectNewCodeintel(
     old: FlatExtensionHostAPI,
-    codeintelContext: CodeIntelContext
+    codeintelContext: sourcegraph.CodeIntelContext
 ): FlatExtensionHostAPI {
-    const codeintel = newCodeIntelAPI(codeintelContext)
-    function thenMaybeLoadingResult<T>(promise: Observable<T>): Observable<MaybeLoadingResult<T>> {
-        return promise.pipe(
-            map(result => {
-                const maybeLoadingResult: MaybeLoadingResult<T> = { isLoading: false, result }
-                return maybeLoadingResult
-            })
-        )
+    const api = createCodeIntelAPI(codeintelContext)
+    const codeintelOverrides = newCodeIntelExtensionHostAPI(api)
+    return { ...old, ...codeintelOverrides }
+}
+
+export function newCodeIntelExtensionHostAPI(codeintel: CodeIntelAPI): CodeIntelExtensionHostAPI {
+    function thenMaybeLoadingResult<T>(result: T): MaybeLoadingResult<T> {
+        return { isLoading: false, result }
     }
 
-    const codeintelOverrides: Pick<
-        FlatExtensionHostAPI,
-        | 'getHover'
-        | 'getDocumentHighlights'
-        | 'getReferences'
-        | 'getDefinition'
-        | 'getLocations'
-        | 'hasReferenceProvidersForDocument'
-        | 'getPanelViews'
-    > = {
-        getPanelViews() {
-            const panels: PanelViewData[] = []
-            for (const spec of languageSpecs) {
-                if (spec.textDocumentImplemenationSupport) {
-                    const id = `implementations_${spec.languageID}`
-                    panels.push({
-                        id,
-                        content: '',
-                        component: { locationProvider: id },
-                        selector: selectorForSpec(spec),
-                        priority: 160,
-                        title: 'Implementations',
-                    })
-                }
-            }
-            return proxySubscribable(of(panels))
-        },
+    return {
         hasReferenceProvidersForDocument(textParameters) {
-            return proxySubscribable(codeintel.hasReferenceProvidersForDocument(textParameters))
+            return proxySubscribable(from(codeintel.hasReferenceProvidersForDocument(textParameters)))
         },
         getLocations(id, parameters) {
             if (!id.startsWith('implementations_')) {
-                return proxySubscribable(thenMaybeLoadingResult(of([])))
+                return proxySubscribable(of({ isLoading: false, result: [] }))
             }
-            return proxySubscribable(thenMaybeLoadingResult(codeintel.getImplementations(parameters)))
+            return proxySubscribable(from(codeintel.getImplementations(parameters).then(thenMaybeLoadingResult)))
         },
         getDefinition(parameters) {
-            return proxySubscribable(thenMaybeLoadingResult(codeintel.getDefinition(parameters)))
+            return proxySubscribable(from(codeintel.getDefinition(parameters).then(thenMaybeLoadingResult)))
         },
-        getReferences(parameters, context) {
-            return proxySubscribable(thenMaybeLoadingResult(codeintel.getReferences(parameters, context)))
+        getReferences(parameters, context, scipParameters) {
+            return proxySubscribable(
+                from(codeintel.getReferences(parameters, context, scipParameters).then(thenMaybeLoadingResult))
+            )
         },
         getDocumentHighlights: (textParameters: TextDocumentPositionParameters) =>
-            proxySubscribable(codeintel.getDocumentHighlights(textParameters)),
+            proxySubscribable(from(codeintel.getDocumentHighlights(textParameters))),
         getHover: (textParameters: TextDocumentPositionParameters) =>
-            proxySubscribable(thenMaybeLoadingResult(codeintel.getHover(textParameters))),
+            proxySubscribable(from(codeintel.getHover(textParameters).then(thenMaybeLoadingResult))),
     }
+}
 
-    return new Proxy(old, {
-        get(target, prop) {
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
-            const codeintelFunction = (codeintelOverrides as any)[prop]
-            if (codeintelFunction) {
-                return codeintelFunction
-            }
-            // eslint-disable-next-line prefer-rest-params
-            return Reflect.get(target, prop, ...arguments)
-        },
-    })
+export function localReferences(params: ScipParameters): Occurrence[] {
+    if (params.referenceOccurrence.symbol?.startsWith('local ')) {
+        return params.documentOccurrences.filter(occurrence => occurrence.symbol === params.referenceOccurrence.symbol)
+    }
+    return []
+}
+
+function localDefinition(params: ScipParameters): Occurrence[] {
+    if (!params.referenceOccurrence.symbol) {
+        return []
+    }
+    return params.documentOccurrences.filter(
+        definitionOccurrence =>
+            definitionOccurrence.symbol === params.referenceOccurrence.symbol &&
+            definitionOccurrence.symbolRoles &&
+            (definitionOccurrence.symbolRoles & SymbolRole.Definition) !== 0
+    )
 }

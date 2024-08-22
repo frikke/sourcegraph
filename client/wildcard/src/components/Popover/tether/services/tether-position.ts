@@ -1,6 +1,6 @@
-import { createPoint, Point } from '../models/geometry/point'
-import { getIntersection, intersects, Rectangle } from '../models/geometry/rectangle'
-import { Position, Strategy } from '../models/tether-models'
+import { createPoint, type Point } from '../models/geometry/point'
+import { getIntersection, intersects, type Rectangle } from '../models/geometry/rectangle'
+import { type ElementPosition, Strategy } from '../models/tether-models'
 
 import {
     getConstrainedElement,
@@ -16,7 +16,7 @@ import {
     isElementVisible,
 } from './geometry'
 import { getExtendedConstraint } from './geometry/actions/get-extended-constraint'
-import { TetherLayout } from './types'
+import type { TetherLayout } from './types'
 
 export interface TetherState {
     /** Area of the element in pixels */
@@ -34,7 +34,7 @@ export interface TetherState {
     /** Y and X coordinates of marker element */
     markerOffset: Point
 
-    position: Position
+    position: ElementPosition
 }
 
 /**
@@ -45,7 +45,7 @@ export interface TetherState {
  * @param layout - Document layout information (overflows, constrains, paddings, etc)
  * @param position - Another position value to fit tooltip element
  */
-export function getPositionState(layout: TetherLayout, position: Position): TetherState | null {
+export function getPositionState(layout: TetherLayout, position: ElementPosition): TetherState | null {
     const { overlapping, anchorOffset, strategy, targetPadding } = layout
     const { element, target, marker, overflow, constraint } = getNormalizedLayout(layout)
 

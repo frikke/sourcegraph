@@ -1,7 +1,39 @@
 // @ts-check
 
+// Use faster experimental way of doing multi-project TypeScript linting. See
+// https://github.com/typescript-eslint/typescript-eslint/pull/6754.
+process.env.TYPESCRIPT_ESLINT_EXPERIMENTAL_TSSERVER = 'true'
+
 const config = {
-  extends: '@sourcegraph/eslint-config',
+  root: true,
+  ignorePatterns: [
+    '**/graphql-operations.ts',
+    '**/node_modules/**',
+    'out/',
+    'dist/',
+    'src/schema/*',
+    'graphql-operations.ts',
+    'GH2SG.bookmarklet.js',
+    '**/vendor/*.js',
+    'svelte.config.js',
+    'vite.config.ts',
+    'vitest.config.ts',
+    'postcss.config.js',
+    'playwright.config.ts',
+    'bundlesize.config.js',
+    'prettier.config.js',
+    'svgo.config.js',
+    '.vscode-test',
+    '**/*.json',
+    '**/*.d.ts',
+    'eslint-relative-formatter.js',
+    'typedoc.js',
+    'client/web/dev/**/*',
+    'graphql-schema-linter.config.js',
+    // Generated code
+    'client/web/src/enterprise/site-admin/dotcom/productSubscriptions/enterpriseportalgen/**',
+  ],
+  extends: ['@sourcegraph/eslint-config', 'plugin:storybook/recommended'],
   env: {
     browser: true,
     node: true,
@@ -13,8 +45,8 @@ const config = {
     ecmaFeatures: {
       jsx: true,
     },
-    EXPERIMENTAL_useSourceOfProjectReferenceRedirect: true,
-    project: __dirname + '/tsconfig.eslint.json',
+    EXPERIMENTAL_useProjectService: true,
+    project: true,
   },
   settings: {
     react: {
@@ -31,14 +63,40 @@ const config = {
       },
     ],
   },
-  plugins: ['@sourcegraph/sourcegraph', 'monorepo', '@sourcegraph/wildcard'],
+  plugins: ['@sourcegraph/sourcegraph', 'monorepo', '@sourcegraph/wildcard', 'storybook'],
   rules: {
     // Rules that are specific to this repo
     // All other rules should go into https://github.com/sourcegraph/eslint-config
     'no-console': 'error',
     'monorepo/no-relative-import': 'error',
     '@sourcegraph/sourcegraph/check-help-links': 'error',
+    // This rule doesn't understand type imports and we already have
+    // import/no-duplicates enabled as well, which does understand type imports
+    'no-duplicate-imports': 'off',
+    'id-length': 'off',
+    'no-void': 'off',
     '@typescript-eslint/consistent-type-exports': 'warn',
+    '@typescript-eslint/consistent-type-imports': [
+      'warn',
+      {
+        fixStyle: 'inline-type-imports',
+        disallowTypeAnnotations: false,
+      },
+    ],
+    // This converts 'import {type foo} from ...' to 'import type {foo} from ...'
+    '@typescript-eslint/no-import-type-side-effects': ['warn'],
+
+    // These rules are very slow on-save.
+    '@typescript-eslint/no-unsafe-assignment': 'off',
+    '@typescript-eslint/unbound-method': 'off',
+    '@typescript-eslint/no-misused-promises': 'off',
+    '@typescript-eslint/no-unnecessary-qualifier': 'off',
+    '@typescript-eslint/no-unused-vars': 'off', // also duplicated by tsconfig noUnused{Locals,Parameters}
+    '@typescript-eslint/no-explicit-any': 'off',
+    '@typescript-eslint/no-non-null-assertion': 'off',
+    '@typescript-eslint/ban-ts-comment': 'off',
+    'etc/no-deprecated': 'off',
+
     'no-restricted-imports': [
       'error',
       {
@@ -56,33 +114,42 @@ const config = {
             importNames: ['Link'],
             message: 'Use the <Link /> component from @sourcegraph/wildcard instead.',
           },
-          {
-            name: 'zustand',
-            importNames: ['default'],
-            message:
-              'Our Zustand stores should be created in a single place. Create this store in client/web/src/stores',
-          },
-          {
-            name: 'chromatic/isChromatic',
-            message: 'Please use `isChromatic` from the `@sourcegraph/storybook` package.',
-          },
         ],
         patterns: [
           {
-            group: ['**/enterprise/*'],
-            message: `The OSS product may not pull in any code from the enterprise codebase, to stay a 100% open-source program.
-
-See https://handbook.sourcegraph.com/community/faq#is-all-of-sourcegraph-open-source for more information.`,
+            group: ['@sourcegraph/branded/src/search-ui/experimental'],
+            message:
+              'The experimental search input is not available for general use. If you have questions about it reach out to the search product team.',
           },
           {
             group: [
               '@sourcegraph/*/src/*',
+              '@sourcegraph/*/src/testing/*',
+              '@sourcegraph/*/src/stories/*',
               '!@sourcegraph/branded/src/*',
+              '!@sourcegraph/branded/src/testing/*',
               '!@sourcegraph/shared/src/*',
+              '!@sourcegraph/shared/src/testing/*',
               '!@sourcegraph/web/src/SourcegraphWebApp.scss',
+              '!@sourcegraph/branded/src/search-ui/experimental',
+              '!@sourcegraph/*/src/testing',
+              '!@sourcegraph/*/src/stories',
+              '!@sourcegraph/build-config/src/esbuild/*',
+              '!@sourcegraph/build-config/src/*',
+              '!@sourcegraph/testing/src/jestDomMatchers',
             ],
             message:
               'Imports from package internals are banned. Add relevant export to the entry point of the package to import it from the outside world.',
+          },
+          {
+            group: ['**/out/*'],
+            message:
+              "Please don't import stuff from the 'out' directory. It’s generated code. Remove the 'out/' part and you should be good go to.",
+          },
+          {
+            group: ['!@sourcegraph/cody-shared/*', '!@sourcegraph/cody-ui/*'],
+            message:
+              "Allowed imports from @sourcegraph/cody-* packages while those packages' APIs are being stabilized.",
           },
         ],
       },
@@ -192,9 +259,9 @@ See https://handbook.sourcegraph.com/community/faq#is-all-of-sourcegraph-open-so
           'Prefer using the <Tooltip> component with an <Input> directly, when possible. Please only use <InputTooltip> when the legacy styling it provides is needed. We will be working to fix style issues with <Input> (especially for checkboxes) in the future.',
       },
       {
-        selector: 'JSXSpreadAttribute[argument.name=/^(props|rest)$/]',
+        selector: 'ImportDeclaration[source.value="react-router"]',
         message:
-          "Spreading props can be unsafe. Prefer destructuring the props object, or continue only if you're sure.",
+          'Use `react-router-dom-v5-compat` instead. We are in the process of migrating from react-router v5 to v6. More info https://github.com/sourcegraph/sourcegraph/issues/33834',
       },
     ],
     // https://reactjs.org/blog/2020/09/22/introducing-the-new-jsx-transform.html#eslint
@@ -205,8 +272,34 @@ See https://handbook.sourcegraph.com/community/faq#is-all-of-sourcegraph-open-so
       'never',
       {
         schema: 'always',
+        scss: 'always',
+        css: 'always',
+        yaml: 'always',
+        svg: 'always',
+        cjs: 'always',
       },
     ],
+    'import/order': 'off',
+    'unicorn/expiring-todo-comments': 'off',
+
+    // These rules were newly introduced in @sourcegraph/eslint-config@0.35.0 and have not yet been
+    // fixed in our existing code.
+    'unicorn/prefer-top-level-await': 'warn',
+    'unicorn/prefer-logical-operator-over-ternary': 'warn',
+    'unicorn/prefer-blob-reading-methods': 'warn',
+    'unicorn/prefer-event-target': 'warn',
+    'etc/throw-error': 'warn',
+    'rxjs/throw-error': 'warn',
+    'prefer-promise-reject-errors': 'warn',
+    '@typescript-eslint/no-redundant-type-constituents': 'warn',
+    '@typescript-eslint/no-unsafe-enum-comparison': 'warn',
+    '@typescript-eslint/prefer-optional-chain': 'warn',
+    '@typescript-eslint/no-duplicate-enum-values': 'warn',
+    '@typescript-eslint/no-floating-promises': 'warn',
+
+    'jsdoc/check-alignment': 'off',
+
+    'unicorn/no-negated-condition': 'off', // this one reduces code readability, should remove it from @sourcegraph/eslint-config too
   },
   overrides: [
     {
@@ -223,10 +316,23 @@ See https://handbook.sourcegraph.com/community/faq#is-all-of-sourcegraph-open-so
       },
     },
     {
-      files: ['**/gulpfile.js', '**/story/**.tsx', '**/story/**.ts', '*.story.tsx'],
+      files: ['**/dev/**/*.ts', '**/story/**.tsx', '**/story/**.ts', '*.story.tsx', 'client/build-config/**'],
+      rules: {
+        'no-console': 'off',
+        'no-sync': 'off',
+      },
+    },
+    {
+      files: ['client/vscode/**', 'client/browser/**', 'client/jetbrains/**'],
       rules: {
         'no-console': 'off',
       },
+    },
+
+    // client/web
+    {
+      files: ['client/web/src/stores/**.ts', 'client/web/src/__mocks__/zustand.ts'],
+      rules: { 'no-restricted-imports': 'off' },
     },
   ],
 }

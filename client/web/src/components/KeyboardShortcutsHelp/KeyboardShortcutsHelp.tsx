@@ -1,14 +1,19 @@
 import React from 'react'
 
 import { mdiClose } from '@mdi/js'
+import { omit } from 'lodash'
 
 import { Toggle } from '@sourcegraph/branded/src/components/Toggle'
-import { KeyboardShortcut } from '@sourcegraph/shared/src/keyboardShortcuts'
-import { KEYBOARD_SHORTCUTS } from '@sourcegraph/shared/src/keyboardShortcuts/keyboardShortcuts'
-import { ModifierKey, Key } from '@sourcegraph/shared/src/react-shortcuts'
-import { getModKey } from '@sourcegraph/shared/src/react-shortcuts/ShortcutManager'
+import { isMacPlatform } from '@sourcegraph/common'
+import { type Keybinding, type KeyboardShortcut, shortcutDisplayName } from '@sourcegraph/shared/src/keyboardShortcuts'
+import {
+    KEYBOARD_SHORTCUTS,
+    EXPERIMENTAL_BLOB_PAGE_SHORTCUTS,
+} from '@sourcegraph/shared/src/keyboardShortcuts/keyboardShortcuts'
 import { useTemporarySetting } from '@sourcegraph/shared/src/settings/temporary/useTemporarySetting'
 import { Button, Modal, Icon, H4, Label } from '@sourcegraph/wildcard'
+
+import { useFeatureFlag } from '../../featureFlags/useFeatureFlag'
 
 import styles from './KeyboardShortcutsHelp.module.scss'
 
@@ -27,14 +32,6 @@ const LEGACY_KEYBOARD_SHORTCUTS: Record<string, KeyboardShortcut> = {
         keybindings: [{ ordered: ['y'] }],
     },
 }
-
-const KEY_TO_NAMES: { [P in Key | ModifierKey | string]?: string } = {
-    Mod: ((modKey: string) => (modKey === 'Meta' ? 'Cmd' : 'Ctrl'))(getModKey()),
-    Meta: 'Cmd',
-    Control: 'Ctrl',
-    '†': 't',
-}
-
 const MODAL_LABEL_ID = 'keyboard-shortcuts-help-modal-title'
 
 export const KeyboardShortcutsHelp: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
@@ -45,7 +42,7 @@ export const KeyboardShortcutsHelp: React.FunctionComponent<React.PropsWithChild
         'characterKeyShortcuts.enabled',
         true
     )
-
+    const [enableBlobPageSwitchAreasShortcuts] = useFeatureFlag('blob-page-switch-areas-shortcuts')
     return (
         <Modal
             position="center"
@@ -62,7 +59,12 @@ export const KeyboardShortcutsHelp: React.FunctionComponent<React.PropsWithChild
             </div>
             <div>
                 <ul className="list-group list-group-flush">
-                    {Object.values({ ...KEYBOARD_SHORTCUTS, ...LEGACY_KEYBOARD_SHORTCUTS })
+                    {Object.values({
+                        ...(enableBlobPageSwitchAreasShortcuts
+                            ? KEYBOARD_SHORTCUTS
+                            : omit(KEYBOARD_SHORTCUTS, Object.keys(EXPERIMENTAL_BLOB_PAGE_SHORTCUTS))),
+                        ...LEGACY_KEYBOARD_SHORTCUTS,
+                    })
                         .filter(({ hideInHelp }) => !hideInHelp)
                         .map(({ title, keybindings }, index) => (
                             <li
@@ -71,14 +73,7 @@ export const KeyboardShortcutsHelp: React.FunctionComponent<React.PropsWithChild
                             >
                                 {title}
                                 <span>
-                                    {keybindings.map((keybinding, index) => (
-                                        <span key={index}>
-                                            {index !== 0 && ' or '}
-                                            {[...(keybinding.held || []), ...keybinding.ordered].map((key, index) => (
-                                                <kbd key={index}>{KEY_TO_NAMES[key] ?? key}</kbd>
-                                            ))}
-                                        </span>
-                                    ))}
+                                    <Keybindings keybindings={keybindings} />
                                 </span>
                             </li>
                         ))}
@@ -96,3 +91,33 @@ export const KeyboardShortcutsHelp: React.FunctionComponent<React.PropsWithChild
         </Modal>
     )
 }
+
+interface KeybindingProps {
+    keybindings: Keybinding[]
+    uppercaseOrdered?: boolean
+}
+export function plaintextKeybindings(keybindings: Keybinding[]): string {
+    return keybindings
+        .map<string>(keybinding => {
+            const ordered = keybinding.ordered.map(key => key.toUpperCase())
+            const joinString = isMacPlatform() ? '' : '+'
+            return [...(keybinding.held || []), ...ordered].map(key => shortcutDisplayName(key)).join(joinString)
+        })
+        .join(' or ')
+}
+export const Keybindings: React.FunctionComponent<KeybindingProps> = ({ keybindings, uppercaseOrdered }) => (
+    <>
+        {keybindings.map((keybinding, index) => {
+            const ordered = uppercaseOrdered ? keybinding.ordered.map(key => key.toUpperCase()) : keybinding.ordered
+            const joinString = isMacPlatform() ? '' : '+'
+            return (
+                <span key={index}>
+                    {index !== 0 && ' or '}
+                    {[...(keybinding.held || []), ...ordered]
+                        .map<React.ReactNode>((key, index) => <kbd key={index}>{shortcutDisplayName(key)}</kbd>)
+                        .reduce((previous, current) => [previous, joinString, current])}
+                </span>
+            )
+        })}
+    </>
+)

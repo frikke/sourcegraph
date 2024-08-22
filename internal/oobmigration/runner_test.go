@@ -8,6 +8,7 @@ import (
 
 	"github.com/derision-test/glock"
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
 
 	"github.com/sourcegraph/log"
 	"github.com/sourcegraph/log/logtest"
@@ -25,7 +26,7 @@ func TestRunner(t *testing.T) {
 		{ID: 1, Progress: 0.5},
 	}, nil)
 
-	runner := newRunner(store, refreshTicker, &observation.TestContext)
+	runner := newRunner(observation.TestContextTB(t), store, refreshTicker)
 
 	migrator := NewMockMigrator()
 	migrator.ProgressFunc.SetDefaultReturn(0.5, nil)
@@ -34,9 +35,10 @@ func TestRunner(t *testing.T) {
 		t.Fatalf("unexpected error registering migrator: %s", err)
 	}
 
-	go runner.Start()
+	go runner.startInternal(allowAll)
 	tickN(ticker, 3)
-	runner.Stop()
+	err := runner.Stop(context.Background())
+	require.NoError(t, err)
 
 	if callCount := len(migrator.UpFunc.History()); callCount != 3 {
 		t.Errorf("unexpected number of calls to Up. want=%d have=%d", 3, callCount)
@@ -55,7 +57,7 @@ func TestRunnerError(t *testing.T) {
 		{ID: 1, Progress: 0.5},
 	}, nil)
 
-	runner := newRunner(store, refreshTicker, &observation.TestContext)
+	runner := newRunner(observation.TestContextTB(t), store, refreshTicker)
 
 	migrator := NewMockMigrator()
 	migrator.ProgressFunc.SetDefaultReturn(0.5, nil)
@@ -65,9 +67,10 @@ func TestRunnerError(t *testing.T) {
 		t.Fatalf("unexpected error registering migrator: %s", err)
 	}
 
-	go runner.Start()
+	go runner.startInternal(allowAll)
 	tickN(ticker, 1)
-	runner.Stop()
+	err := runner.Stop(context.Background())
+	require.NoError(t, err)
 
 	if calls := store.AddErrorFunc.history; len(calls) != 1 {
 		t.Fatalf("unexpected number of calls to AddError. want=%d have=%d", 1, len(calls))
@@ -94,7 +97,7 @@ func TestRunnerRemovesCompleted(t *testing.T) {
 		{ID: 3, Progress: 0.9},
 	}, nil)
 
-	runner := newRunner(store, refreshTicker, &observation.TestContext)
+	runner := newRunner(observation.TestContextTB(t), store, refreshTicker)
 
 	// Makes no progress
 	migrator1 := NewMockMigrator()
@@ -120,11 +123,12 @@ func TestRunnerRemovesCompleted(t *testing.T) {
 		t.Fatalf("unexpected error registering migrator: %s", err)
 	}
 
-	go runner.Start()
+	go runner.startInternal(allowAll)
 	tickN(ticker1, 5)
 	tickN(ticker2, 5)
 	tickN(ticker3, 5)
-	runner.Stop()
+	err := runner.Stop(context.Background())
+	require.NoError(t, err)
 
 	// not finished
 	if callCount := len(migrator1.UpFunc.History()); callCount != 5 {
@@ -269,7 +273,7 @@ func TestRunMigratorMigrationDesyncedFromData(t *testing.T) {
 	ticker := glock.NewMockTicker(time.Second)
 
 	progressValues := []float64{
-		0.20,                         // inital check
+		0.20,                         // initial check
 		0.25, 0.30, 0.35, 0.40, 0.45, // after up (x5)
 		0.45,                         // re-check
 		0.50, 0.55, 0.60, 0.65, 0.70, // after up (x5)
@@ -330,7 +334,7 @@ func runMigratorWrapped(store storeIface, migrator Migrator, logger log.Logger, 
 
 // tickN advances the given ticker by one second n times with a guaranteed reader.
 func tickN(ticker *glock.MockTicker, n int) {
-	for i := 0; i < n; i++ {
+	for range n {
 		ticker.BlockingAdvance(time.Second)
 	}
 }
@@ -345,7 +349,7 @@ func TestRunnerValidate(t *testing.T) {
 		{ID: 1, Introduced: NewVersion(3, 13), Progress: 0},
 	}, nil)
 
-	runner := newRunner(store, nil, &observation.TestContext)
+	runner := newRunner(observation.TestContextTB(t), store, nil)
 	statusErr := runner.Validate(context.Background(), NewVersion(3, 12), NewVersion(0, 0))
 	if statusErr != nil {
 		t.Errorf("unexpected status error: %s ", statusErr)
@@ -358,7 +362,7 @@ func TestRunnerValidateUnfinishedUp(t *testing.T) {
 		{ID: 1, Introduced: NewVersion(3, 11), Progress: 0.65, Deprecated: newVersionPtr(3, 12)},
 	}, nil)
 
-	runner := newRunner(store, nil, &observation.TestContext)
+	runner := newRunner(observation.TestContextTB(t), store, nil)
 	statusErr := runner.Validate(context.Background(), NewVersion(3, 12), NewVersion(0, 0))
 
 	if diff := cmp.Diff(wrapMigrationErrors(newMigrationStatusError(1, 1, 0.65)).Error(), statusErr.Error()); diff != "" {
@@ -372,10 +376,68 @@ func TestRunnerValidateUnfinishedDown(t *testing.T) {
 		{ID: 1, Introduced: NewVersion(3, 13), Progress: 0.15, Deprecated: newVersionPtr(3, 15), ApplyReverse: true},
 	}, nil)
 
-	runner := newRunner(store, nil, &observation.TestContext)
+	runner := newRunner(observation.TestContextTB(t), store, nil)
 	statusErr := runner.Validate(context.Background(), NewVersion(3, 12), NewVersion(0, 0))
 
 	if diff := cmp.Diff(wrapMigrationErrors(newMigrationStatusError(1, 0, 0.15)).Error(), statusErr.Error()); diff != "" {
 		t.Errorf("unexpected status error (-want +got):\n%s", diff)
 	}
+}
+
+func TestRunnerBoundsFilter(t *testing.T) {
+	store := NewMockStoreIface()
+	ticker := glock.NewMockTicker(time.Second)
+	refreshTicker := glock.NewMockTicker(time.Second * 30)
+
+	d2 := NewVersion(3, 12)
+	d3 := NewVersion(3, 10)
+
+	store.ListFunc.SetDefaultReturn([]Migration{
+		{ID: 1, Progress: 0.5, Introduced: NewVersion(3, 4), Deprecated: nil},
+		{ID: 2, Progress: 0.5, Introduced: NewVersion(3, 5), Deprecated: &d2},
+		{ID: 3, Progress: 0.5, Introduced: NewVersion(3, 6), Deprecated: &d3},
+	}, nil)
+
+	runner := newRunner(observation.TestContextTB(t), store, refreshTicker)
+
+	migrator1 := NewMockMigrator()
+	migrator1.ProgressFunc.SetDefaultReturn(0.5, nil)
+	migrator2 := NewMockMigrator()
+	migrator2.ProgressFunc.SetDefaultReturn(0.5, nil)
+	migrator3 := NewMockMigrator()
+	migrator3.ProgressFunc.SetDefaultReturn(0.5, nil)
+
+	if err := runner.Register(1, migrator1, MigratorOptions{ticker: ticker}); err != nil {
+		t.Fatalf("unexpected error registering migrator: %s", err)
+	}
+	if err := runner.Register(2, migrator2, MigratorOptions{ticker: ticker}); err != nil {
+		t.Fatalf("unexpected error registering migrator: %s", err)
+	}
+	if err := runner.Register(3, migrator3, MigratorOptions{ticker: ticker}); err != nil {
+		t.Fatalf("unexpected error registering migrator: %s", err)
+	}
+
+	go runner.startInternal(func(m Migration) bool {
+		return m.ID != 2
+	})
+	tickN(ticker, 64)
+	err := runner.Stop(context.Background())
+	require.NoError(t, err)
+
+	// not called
+	if callCount := len(migrator2.UpFunc.History()); callCount != 0 {
+		t.Errorf("unexpected number of calls to migrator2's Up method. want=%d have=%d", 0, callCount)
+	}
+
+	// Only called between these two; do not compare direct as they tick independently
+	// and are not guaranteed to be called an equal number of times. We could additionally
+	// ensure neither count is zero, but there's a small chance that would cause it to
+	// flake in CI when the scheduler goes a bit psycho.
+	if callCount := len(migrator1.UpFunc.History()) + len(migrator3.UpFunc.History()); callCount != 64 {
+		t.Errorf("unexpected number of calls to migrator{1,3}'s Up method. want=%d have=%d", 64, callCount)
+	}
+}
+
+func allowAll(m Migration) bool {
+	return true
 }

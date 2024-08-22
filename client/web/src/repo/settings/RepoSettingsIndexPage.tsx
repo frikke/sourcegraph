@@ -1,68 +1,93 @@
-import * as React from 'react'
+import React from 'react'
 
-import { mdiCheckCircle } from '@mdi/js'
+import { mdiAlert, mdiCheckCircle, mdiClockOutline } from '@mdi/js'
 import classNames from 'classnames'
 import prettyBytes from 'pretty-bytes'
-import { RouteComponentProps } from 'react-router'
-import { Observable, Subject, Subscription } from 'rxjs'
+import { type Observable, Subject, Subscription } from 'rxjs'
 import { map, switchMap, tap } from 'rxjs/operators'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
+import { Timestamp } from '@sourcegraph/branded/src/components/Timestamp'
 import { createAggregateError, pluralize } from '@sourcegraph/common'
-import { gql } from '@sourcegraph/http-client'
-import { LinkOrSpan } from '@sourcegraph/shared/src/components/LinkOrSpan'
-import * as GQL from '@sourcegraph/shared/src/schema'
-import { Container, PageHeader, LoadingSpinner, Link, Alert, Icon, Code, H3 } from '@sourcegraph/wildcard'
+import { gql, useMutation } from '@sourcegraph/http-client'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import {
+    Button,
+    Container,
+    PageHeader,
+    LoadingSpinner,
+    Link,
+    Alert,
+    Icon,
+    Tooltip,
+    Code,
+    H3,
+    ErrorAlert,
+    LinkOrSpan,
+} from '@sourcegraph/wildcard'
 
 import { queryGraphQL } from '../../backend/graphql'
 import { PageTitle } from '../../components/PageTitle'
-import { Timestamp } from '../../components/time/Timestamp'
-import { Scalars, SettingsAreaRepositoryFields } from '../../graphql-operations'
-import { eventLogger } from '../../tracking/eventLogger'
+import type {
+    reindexResult,
+    reindexVariables,
+    RepositoryTextSearchIndexRepository,
+    Scalars,
+    SettingsAreaRepositoryFields,
+    RepositoryTextSearchIndexResult,
+} from '../../graphql-operations'
 import { prettyBytesBigint } from '../../util/prettyBytesBigint'
+
+import { BaseActionContainer } from './components/ActionContainer'
 
 import styles from './RepoSettingsIndexPage.module.scss'
 
+type RepositoryTextSearchIndex = RepositoryTextSearchIndexRepository['textSearchIndex']
 /**
  * Fetches a repository's text search index information.
  */
-function fetchRepositoryTextSearchIndex(id: Scalars['ID']): Observable<GQL.IRepositoryTextSearchIndex | null> {
-    return queryGraphQL(
+function fetchRepositoryTextSearchIndex(id: Scalars['ID']): Observable<RepositoryTextSearchIndex> {
+    return queryGraphQL<RepositoryTextSearchIndexResult>(
         gql`
             query RepositoryTextSearchIndex($id: ID!) {
                 node(id: $id) {
-                    ... on Repository {
-                        textSearchIndex {
-                            status {
-                                updatedAt
-                                contentByteSize
-                                contentFilesCount
-                                indexByteSize
-                                indexShardsCount
-                                newLinesCount
-                                defaultBranchNewLinesCount
-                                otherBranchesNewLinesCount
-                            }
-                            refs {
-                                ref {
-                                    displayName
-                                    url
-                                }
-                                skippedIndexed {
-                                    count
-                                    query
-                                }
-                                indexed
-                                current
-                                indexedCommit {
-                                    oid
-                                    abbreviatedOID
-                                    commit {
-                                        url
-                                    }
-                                }
+                    ...RepositoryTextSearchIndexRepository
+                }
+            }
+
+            fragment RepositoryTextSearchIndexRepository on Repository {
+                textSearchIndex {
+                    status {
+                        updatedAt
+                        contentByteSize
+                        contentFilesCount
+                        indexByteSize
+                        indexShardsCount
+                        newLinesCount
+                        defaultBranchNewLinesCount
+                        otherBranchesNewLinesCount
+                    }
+                    refs {
+                        ref {
+                            displayName
+                            url
+                        }
+                        skippedIndexed {
+                            count
+                            query
+                        }
+                        indexed
+                        current
+                        indexedCommit {
+                            oid
+                            abbreviatedOID
+                            commit {
+                                url
                             }
                         }
+                    }
+                    host {
+                        name
                     }
                 }
             }
@@ -70,68 +95,156 @@ function fetchRepositoryTextSearchIndex(id: Scalars['ID']): Observable<GQL.IRepo
         { id }
     ).pipe(
         map(({ data, errors }) => {
-            if (!data || !data.node || errors) {
+            if (!data?.node || errors) {
                 throw createAggregateError(errors)
             }
-            return (data.node as GQL.IRepository).textSearchIndex
+            return (data.node as RepositoryTextSearchIndexRepository).textSearchIndex
         })
     )
 }
 
+const Reindex: React.FunctionComponent<React.PropsWithChildren<{ id: Scalars['ID'] }>> = ({ id }) => {
+    const [error, setError] = React.useState<Error | null>(null)
+    const [success, setSuccess] = React.useState<boolean>(false)
+    const [loading, setLoading] = React.useState<boolean>(false)
+
+    const useForceReindex = (id: Scalars['ID']): (() => void) => {
+        const [submitForceReindex] = useMutation<reindexResult, reindexVariables>(
+            gql`
+                mutation reindex($id: ID!) {
+                    reindexRepository(repository: $id) {
+                        alwaysNil
+                    }
+                }
+            `
+        )
+        const forceReindex = React.useCallback(() => {
+            submitForceReindex({
+                variables: { id },
+            }).then(
+                () => {
+                    setLoading(false)
+                    setSuccess(true)
+                },
+                error => {
+                    setLoading(false)
+                    setError(error)
+                }
+            )
+        }, [submitForceReindex, id])
+        return forceReindex
+    }
+
+    const forceReindex = useForceReindex(id)
+
+    return (
+        <BaseActionContainer
+            title="Trigger Reindex"
+            description={<span>Send a request to Zoekt indexserver and force an immediate reindex.</span>}
+            action={
+                <Button
+                    variant="primary"
+                    onClick={() => {
+                        setLoading(true)
+                        setError(null)
+                        setSuccess(false)
+                        forceReindex()
+                    }}
+                >
+                    Reindex now
+                </Button>
+            }
+            details={
+                <>
+                    {error && <ErrorAlert className="mt-4 mb-0" error={error} />}
+                    {loading && (
+                        <Alert className="mt-4 mb-0" variant="primary">
+                            <LoadingSpinner /> Triggering reindex ...
+                        </Alert>
+                    )}
+                    {success && (
+                        <Alert className="mt-4 mb-0" variant="success">
+                            Reindex triggered
+                        </Alert>
+                    )}
+                </>
+            }
+            className="mt-0 mb-3"
+        />
+    )
+}
+
+// If there's an indexing delay of more than 8 hours, we warn about it
+const largeIndexingDelayMs = 8 * 60 * 60 * 1000
+
 const TextSearchIndexedReference: React.FunctionComponent<
     React.PropsWithChildren<{
         repo: SettingsAreaRepositoryFields
-        indexedRef: GQL.IRepositoryTextSearchIndexedRef
+        indexedRef: NonNullable<RepositoryTextSearchIndex>['refs'][number]
+        lastIndexed: string | undefined
     }>
-> = ({ repo, indexedRef }) => {
+> = ({ repo, indexedRef, lastIndexed }) => {
     const isCurrent = indexedRef.indexed && indexedRef.current
+
+    const lastIndexTime = !indexedRef.current && lastIndexed && new Date(lastIndexed).getTime()
+    const indexingDelayed = lastIndexTime && Date.now() - lastIndexTime > largeIndexingDelayMs
 
     return (
         <li className={styles.ref}>
-            <Icon
-                className={classNames(styles.refIcon, isCurrent && styles.refIconCurrent)}
-                svgPath={isCurrent ? mdiCheckCircle : undefined}
-                as={!isCurrent ? LoadingSpinner : undefined}
-                aria-hidden={true}
-            />
+            {indexingDelayed ? (
+                <Tooltip content="Indexing hasn't completed for over 8 hours, which usually indicates an error. Please check the Zoekt indexserver logs.">
+                    <Icon className={classNames(styles.refIcon)} svgPath={mdiAlert} aria-hidden={true} />
+                </Tooltip>
+            ) : (
+                <Icon
+                    className={classNames(styles.refIcon, isCurrent && styles.refIconCurrent)}
+                    svgPath={isCurrent ? mdiCheckCircle : mdiClockOutline}
+                    aria-hidden={true}
+                />
+            )}
             <LinkOrSpan to={indexedRef.ref.url}>
                 <Code weight="bold">{indexedRef.ref.displayName}</Code>
-            </LinkOrSpan>{' '}
+            </LinkOrSpan>
+            &nbsp;&mdash;&nbsp;
             {indexedRef.indexed ? (
                 <span>
-                    &nbsp;&mdash; indexed at{' '}
+                    {indexedRef.current
+                        ? 'up to date.'
+                        : indexingDelayed
+                        ? 'indexing is delayed.'
+                        : 'queued for indexing.'}
+                    {' Last indexing job ran at '}
                     <Code>
                         <LinkOrSpan
                             to={indexedRef.indexedCommit?.commit ? indexedRef.indexedCommit.commit.url : repo.url}
                         >
                             {indexedRef.indexedCommit!.abbreviatedOID}
                         </LinkOrSpan>
-                    </Code>{' '}
-                    {indexedRef.current ? '(up to date)' : '(index update in progress)'}
-                    {indexedRef.skippedIndexed && indexedRef.skippedIndexed.count > 0 ? (
+                    </Code>
+                    {indexedRef.skippedIndexed && Number(indexedRef.skippedIndexed.count) > 0 ? (
                         <span>
-                            .&nbsp;
+                            {', with '}
                             <Link to={'/search?q=' + encodeURIComponent(indexedRef.skippedIndexed.query)}>
-                                {indexedRef.skippedIndexed.count} {pluralize('file', indexedRef.skippedIndexed.count)}{' '}
-                                skipped during indexing
+                                {indexedRef.skippedIndexed.count} skipped{' '}
+                                {pluralize('file', Number(indexedRef.skippedIndexed.count))}
                             </Link>
                             .
                         </span>
                     ) : null}
                 </span>
             ) : (
-                <span>&nbsp;&mdash; initial indexing in progress</span>
+                <span>queued for initial indexing.</span>
             )}
         </li>
     )
 }
 
-interface Props extends RouteComponentProps<{}> {
+interface Props extends TelemetryV2Props {
     repo: SettingsAreaRepositoryFields
 }
 
 interface State {
-    textSearchIndex?: GQL.IRepositoryTextSearchIndex | null
+    textSearchIndex?: RepositoryTextSearchIndex
     loading: boolean
     error?: Error
 }
@@ -146,7 +259,8 @@ export class RepoSettingsIndexPage extends React.PureComponent<Props, State> {
     private subscriptions = new Subscription()
 
     public componentDidMount(): void {
-        eventLogger.logViewEvent('RepoSettingsIndex')
+        EVENT_LOGGER.logViewEvent('RepoSettingsIndex')
+        this.props.telemetryRecorder.recordEvent('repo.settings.index', 'view')
 
         this.subscriptions.add(
             this.updates
@@ -171,7 +285,7 @@ export class RepoSettingsIndexPage extends React.PureComponent<Props, State> {
             <>
                 <PageTitle title="Index settings" />
                 <PageHeader
-                    path={[{ text: 'Indexing' }]}
+                    path={[{ text: 'Search Indexing' }]}
                     headingElement="h2"
                     className="mb-3"
                     description={
@@ -189,6 +303,7 @@ export class RepoSettingsIndexPage extends React.PureComponent<Props, State> {
                         !this.state.loading &&
                         (this.state.textSearchIndex ? (
                             <>
+                                <Reindex id={this.props.repo.id} />
                                 {this.state.textSearchIndex.refs && (
                                     <ul className={styles.refs}>
                                         {this.state.textSearchIndex.refs.map((reference, index) => (
@@ -196,6 +311,7 @@ export class RepoSettingsIndexPage extends React.PureComponent<Props, State> {
                                                 key={index}
                                                 repo={this.props.repo}
                                                 indexedRef={reference}
+                                                lastIndexed={this.state.textSearchIndex?.status?.updatedAt}
                                             />
                                         ))}
                                     </ul>
@@ -203,10 +319,10 @@ export class RepoSettingsIndexPage extends React.PureComponent<Props, State> {
                                 {this.state.textSearchIndex.status && (
                                     <>
                                         <H3>Statistics</H3>
-                                        <table className={classNames('table mb-0', styles.stats)}>
+                                        <table className={classNames('table mb-3', styles.stats)}>
                                             <tbody>
                                                 <tr>
-                                                    <th>Last updated</th>
+                                                    <th>Last indexed at</th>
                                                     <td>
                                                         <Timestamp date={this.state.textSearchIndex.status.updatedAt} />
                                                     </td>
@@ -248,6 +364,25 @@ export class RepoSettingsIndexPage extends React.PureComponent<Props, State> {
                                         </table>
                                     </>
                                 )}
+                                <>
+                                    <H3>Indexserver</H3>
+                                    {this.state.textSearchIndex.host ? (
+                                        <table className={classNames('table mb-0', styles.stats)}>
+                                            <tbody>
+                                                <tr>
+                                                    <th>Hostname</th>
+                                                    <td>{this.state.textSearchIndex.host.name}</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    ) : (
+                                        <Alert className="mb-0" variant="info">
+                                            We were unable to determine the indexserver that hosts the index. However,
+                                            this does not impact indexed search. The root cause is most likely a
+                                            limitation of the runtime environment.
+                                        </Alert>
+                                    )}
+                                </>
                             </>
                         ) : (
                             <Alert className="mb-0" variant="info">

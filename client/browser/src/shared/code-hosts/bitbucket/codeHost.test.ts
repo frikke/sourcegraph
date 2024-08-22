@@ -1,4 +1,6 @@
-import { LineOrPositionOrRange } from '@sourcegraph/common'
+import { describe, expect, test } from 'vitest'
+
+import type { LineOrPositionOrRange } from '@sourcegraph/common'
 
 import { testCodeHostMountGetters, testToolbarMountGetter } from '../shared/codeHostTestUtils'
 
@@ -6,7 +8,6 @@ import { bitbucketServerCodeHost, getToolbarMount, parseHash } from './codeHost'
 
 describe('bitbucketServerCodeHost', () => {
     testCodeHostMountGetters(bitbucketServerCodeHost, {
-        getCommandPaletteMount: `${__dirname}/__fixtures__/browse.html`,
         getViewContextOnSourcegraphMount: `${__dirname}/__fixtures__/browse.html`,
     })
     describe('getToolbarMount()', () => {

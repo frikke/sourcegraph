@@ -2,28 +2,30 @@ import React, { useMemo, useEffect } from 'react'
 
 import classNames from 'classnames'
 import { startCase } from 'lodash'
-import { RouteComponentProps } from 'react-router'
 
 import { useQuery } from '@sourcegraph/http-client'
-import { Card, LoadingSpinner, H2, Text, H4, AnchorLink, LineChart, Series } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Card, LoadingSpinner, H2, Text, H4, AnchorLink, LineChart, type Series } from '@sourcegraph/wildcard'
 
-import { NotebooksStatisticsResult, NotebooksStatisticsVariables } from '../../../graphql-operations'
-import { eventLogger } from '../../../tracking/eventLogger'
+import type { NotebooksStatisticsResult, NotebooksStatisticsVariables } from '../../../graphql-operations'
 import { AnalyticsPageTitle } from '../components/AnalyticsPageTitle'
 import { ChartContainer } from '../components/ChartContainer'
 import { HorizontalSelect } from '../components/HorizontalSelect'
-import { TimeSavedCalculator } from '../components/TimeSavedCalculatorGroup'
+import { TimeSavedCalculator, type TimeSavedCalculatorProps } from '../components/TimeSavedCalculatorGroup'
 import { ToggleSelect } from '../components/ToggleSelect'
-import { ValueLegendList, ValueLegendListProps } from '../components/ValueLegendList'
+import { ValueLegendList, type ValueLegendListProps } from '../components/ValueLegendList'
 import { useChartFilters } from '../useChartFilters'
-import { StandardDatum } from '../utils'
+import type { StandardDatum } from '../utils'
 
 import { NOTEBOOKS_STATISTICS } from './queries'
 
 import styles from './index.module.scss'
 
-export const AnalyticsNotebooksPage: React.FunctionComponent<RouteComponentProps<{}>> = () => {
-    const { dateRange, aggregation, grouping } = useChartFilters({ name: 'Notebooks' })
+interface Props extends TelemetryV2Props {}
+
+export const AnalyticsNotebooksPage: React.FunctionComponent<Props> = ({ telemetryRecorder }) => {
+    const { dateRange, aggregation, grouping } = useChartFilters({ name: 'Notebooks', telemetryRecorder })
     const { data, error, loading } = useQuery<NotebooksStatisticsResult, NotebooksStatisticsVariables>(
         NOTEBOOKS_STATISTICS,
         {
@@ -34,8 +36,9 @@ export const AnalyticsNotebooksPage: React.FunctionComponent<RouteComponentProps
         }
     )
     useEffect(() => {
-        eventLogger.logPageView('AdminAnalyticsNotebooks')
-    }, [])
+        EVENT_LOGGER.logPageView('AdminAnalyticsNotebooks')
+        telemetryRecorder.recordEvent('admin.analytics.notebooks', 'view')
+    }, [telemetryRecorder])
     const [stats, legends, calculatorProps] = useMemo(() => {
         if (!data) {
             return []
@@ -73,7 +76,7 @@ export const AnalyticsNotebooksPage: React.FunctionComponent<RouteComponentProps
         ]
         const legends: ValueLegendListProps['items'] = [
             {
-                value: creations.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: creations.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description: aggregation.selected === 'count' ? 'Notebooks created' : 'Users created notebooks',
                 color: 'var(--cyan)',
                 tooltip:
@@ -82,7 +85,7 @@ export const AnalyticsNotebooksPage: React.FunctionComponent<RouteComponentProps
                         : 'The number of users who created notebooks in the timeframe.',
             },
             {
-                value: views.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: views.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description: aggregation.selected === 'count' ? 'Notebook views' : 'Users viewed notebooks',
                 color: 'var(--orange)',
                 tooltip:
@@ -91,7 +94,7 @@ export const AnalyticsNotebooksPage: React.FunctionComponent<RouteComponentProps
                         : 'The number of users who viewed notebooks in the timeframe.',
             },
             {
-                value: blockRuns.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalRegisteredUsers'],
+                value: blockRuns.summary[aggregation.selected === 'count' ? 'totalCount' : 'totalUniqueUsers'],
                 description: aggregation.selected === 'count' ? 'Block runs' : 'Users ran blocks',
                 color: 'var(--body-color)',
                 position: 'right',
@@ -102,19 +105,21 @@ export const AnalyticsNotebooksPage: React.FunctionComponent<RouteComponentProps
             },
         ]
 
-        const calculatorProps = {
+        const calculatorProps: TimeSavedCalculatorProps = {
             page: 'Notebooks',
             label: 'Views',
             color: 'var(--body-color)',
             dateRange: dateRange.value,
             value: views.summary.totalCount,
-            minPerItem: 5,
+            defaultMinPerItem: 5,
             description:
                 'Notebooks reduce the time it takes to create living documentation and share it. Each notebook view accounts for time saved by both creators and consumers of notebooks.',
+            temporarySettingsKey: 'search.notebooks.minSavedPerView',
+            telemetryRecorder,
         }
 
         return [stats, legends, calculatorProps]
-    }, [data, dateRange.value, aggregation.selected])
+    }, [data, dateRange.value, aggregation.selected, telemetryRecorder])
 
     if (error) {
         throw error
@@ -161,10 +166,10 @@ export const AnalyticsNotebooksPage: React.FunctionComponent<RouteComponentProps
                     <div className={classNames(styles.border, 'mb-3')} />
                     <ul className="mb-3 pl-3">
                         <Text as="li">
-                            <AnchorLink to="https://about.sourcegraph.com/blog/notebooks-ci" target="_blank">
+                            <AnchorLink to="https://sourcegraph.com/blog/notebooks-ci" target="_blank">
                                 Learn more
                             </AnchorLink>{' '}
-                            about how notebooks improves onbaording, code reuse and saves developers time.
+                            about how notebooks improves onboarding, code reuse and saves developers time.
                         </Text>
                     </ul>
                 </div>

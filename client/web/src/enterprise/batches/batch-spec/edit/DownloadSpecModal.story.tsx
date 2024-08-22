@@ -1,10 +1,12 @@
-import { DecoratorFn, Meta, Story } from '@storybook/react'
+import type { Decorator, Meta, StoryFn } from '@storybook/react'
+
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 
 import { WebStory } from '../../../../components/WebStory'
 
 import { DownloadSpecModal } from './DownloadSpecModal'
 
-const decorator: DecoratorFn = story => <div className="p-3 container">{story()}</div>
+const decorator: Decorator = story => <div className="p-3 container">{story()}</div>
 
 const config: Meta = {
     title: 'web/batches/batch-spec/edit',
@@ -13,7 +15,7 @@ const config: Meta = {
 
 export default config
 
-export const DownloadSpecModalStory: Story = () => (
+export const DownloadSpecModalStory: StoryFn = () => (
     <WebStory>
         {props => (
             <DownloadSpecModal
@@ -29,6 +31,7 @@ export const DownloadSpecModalStory: Story = () => (
                 //     throw new Error('Function not implemented.')
                 // }}
                 {...props}
+                telemetryRecorder={noOpTelemetryRecorder}
             />
         )}
     </WebStory>

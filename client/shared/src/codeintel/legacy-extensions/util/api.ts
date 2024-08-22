@@ -1,11 +1,13 @@
-import { once } from 'lodash'
 import gql from 'tagged-template-noop'
 
-import * as sourcegraph from '../api'
+import { isErrorLike } from '@sourcegraph/common'
+
+import { SearchVersion } from '../../../graphql-operations'
+import type * as sourcegraph from '../api'
 import { cache } from '../util'
 
 import { graphqlIdToRepoId, queryGraphQL } from './graphql'
-import { isDefined, sortUnique } from './helpers'
+import { isDefined } from './helpers'
 import { parseGitURI } from './uri'
 
 /**
@@ -55,192 +57,85 @@ export interface RepoMeta {
     isArchived: boolean
 }
 
+function isKnownSquirrelErrorLike(value: unknown): boolean {
+    return (
+        isErrorLike(value) &&
+        'message' in value &&
+        (value.message.includes('unrecognized file extension') || value.message.includes('unsupported language'))
+    )
+}
+
 export class API {
-    /** Small never-evict map from repo names to their meta. */
-    private cachedMetas = new Map<string, RepoMeta>()
+    /**
+     * Small never-evict map from repo names to a promise of their meta.
+     *
+     * We store a promise so that we can cache two requests to the same repo
+     * before the request resolves
+     */
+    private cachedMetaRequests = new Map<string, Promise<RepoMeta>>()
 
     /**
      * Retrieves the name and fork/archive status of a repository. This method
      * throws an error if the repository is not known to the Sourcegraph instance.
-     *
      * @param name The repository's name.
      */
     public async resolveRepo(name: string): Promise<RepoMeta> {
-        const cachedMeta = this.cachedMetas.get(name)
-        if (cachedMeta !== undefined) {
-            return cachedMeta
+        const cachedMetaRequest = this.cachedMetaRequests.get(name)
+        if (cachedMetaRequest !== undefined) {
+            return cachedMetaRequest
         }
 
-        const queryWithFork = gql`
-            query LegacyResolveRepo($name: String!) {
-                repository(name: $name) {
-                    id
-                    name
-                    isFork
-                    isArchived
+        const metaRequest = (async (name: string): Promise<RepoMeta> => {
+            const query = gql`
+                query LegacyResolveRepo($name: String!) {
+                    repository(name: $name) {
+                        id
+                        name
+                        isFork
+                        isArchived
+                    }
+                }
+            `
+
+            interface Response {
+                repository: {
+                    id: string
+                    name: string
+                    isFork?: boolean
+                    isArchived?: boolean
                 }
             }
-        `
 
-        const queryWithoutFork = gql`
-            query LegacyResolveRepo2($name: String!) {
-                repository(name: $name) {
-                    name
-                }
+            const data = await queryGraphQL<Response>(query, {
+                name,
+            })
+
+            // Assume repo is not a fork/archived for older instances
+            return {
+                isFork: false,
+                isArchived: false,
+                ...data.repository,
+                id: graphqlIdToRepoId(data.repository.id),
             }
-        `
+        })(name)
+        this.cachedMetaRequests.set(name, metaRequest)
 
-        interface Response {
-            repository: {
-                id: string
-                name: string
-                isFork?: boolean
-                isArchived?: boolean
-            }
-        }
-
-        const data = await queryGraphQL<Response>((await this.hasForkField()) ? queryWithFork : queryWithoutFork, {
-            name,
-        })
-
-        // Assume repo is not a fork/archived for older instances
-        const meta = { isFork: false, isArchived: false, ...data.repository, id: graphqlIdToRepoId(data.repository.id) }
-
-        this.cachedMetas.set(name, meta)
-
-        return meta
+        return metaRequest
     }
-
-    /**
-     * Determines via introspection if the GraphQL API has isFork field on the Repository type.
-     *
-     * TODO(efritz) - Remove this when we no longer need to support pre-3.15 instances.
-     */
-    private async hasForkField(): Promise<boolean> {
-        const introspectionQuery = gql`
-            query LegacyRepositoryIntrospection {
-                __type(name: "Repository") {
-                    fields {
-                        name
-                    }
-                }
-            }
-        `
-
-        interface IntrospectionResponse {
-            __type: { fields: { name: string }[] }
-        }
-
-        return (await queryGraphQL<IntrospectionResponse>(introspectionQuery)).__type.fields.some(
-            field => field.name === 'isFork'
-        )
-    }
-
-    /**
-     * Determines via introspection if the GraphQL API has implementations available
-     *
-     * TODO(tjdevries) - Remove this when we no longer need to support pre-3.XX releases (not yet released)
-     */
-    public async hasImplementationsField(): Promise<boolean> {
-        const introspectionQuery = gql`
-            query LegacyImplementationsIntrospectionQuery {
-                __type(name: "GitBlobLSIFData") {
-                    fields {
-                        name
-                    }
-                }
-            }
-        `
-
-        interface IntrospectionResponse {
-            __type: { fields: { name: string }[] }
-        }
-
-        return (await queryGraphQL<IntrospectionResponse>(introspectionQuery)).__type.fields.some(
-            field => field.name === 'implementations'
-        )
-    }
-
-    /**
-     * Determines via introspection if the GraphQL API has local code intelligence available
-     *
-     * TODO(chrismwendt) - Remove this when we no longer need to support versions without local code
-     * intelligence
-     */
-    public hasLocalCodeIntelField = once(async () => {
-        const introspectionQuery = gql`
-            query LegacyLocalCodeIntelIntrospectionQuery {
-                __type(name: "GitBlob") {
-                    fields {
-                        name
-                    }
-                }
-            }
-        `
-
-        interface IntrospectionResponse {
-            __type: { fields: { name: string }[] }
-        }
-
-        return (await queryGraphQL<IntrospectionResponse>(introspectionQuery)).__type.fields.some(
-            field => field.name === 'localCodeIntel'
-        )
-    })
-
-    /**
-     * Determines via introspection if the GraphQL API has symbol info available
-     *
-     * TODO(chrismwendt) - Remove this when we no longer need to support versions without symbol info
-     */
-    public hasSymbolInfo = once(async () => {
-        const introspectionQuery = gql`
-            query LegacySymbolInfoIntrospectionQuery {
-                __type(name: "GitBlob") {
-                    fields {
-                        name
-                    }
-                }
-            }
-        `
-
-        interface IntrospectionResponse {
-            __type: { fields: { name: string }[] }
-        }
-
-        return (await queryGraphQL<IntrospectionResponse>(introspectionQuery)).__type.fields.some(
-            field => field.name === 'symbolInfo'
-        )
-    })
-
-    /**
-     * Determines via introspection if the GraphQL API has symbolInfo.range available
-     *
-     * TODO(chrismwendt) - Remove this when we no longer need to support versions without symbolInfo.range
-     */
-    public hasSymbolLocationRange = once(async () => {
-        const introspectionQuery = gql`
-            query LegacySymbolLocationRangeIntrospectionQuery {
-                __type(name: "SymbolLocation") {
-                    fields {
-                        name
-                    }
-                }
-            }
-        `
-
-        interface IntrospectionResponse {
-            __type: { fields: { name: string }[] }
-        }
-
-        return (await queryGraphQL<IntrospectionResponse>(introspectionQuery)).__type.fields.some(
-            field => field.name === 'range'
-        )
-    })
 
     public fetchLocalCodeIntelPayload = cache(
         async ({ repo, commit, path }: RepoCommitPath): Promise<LocalCodeIntelPayload | undefined> => {
             const vars = { repository: repo, commit, path }
-            const response = await queryGraphQL<LocalCodeIntelResponse>(localCodeIntelQuery, vars)
+            const response = await (async (): Promise<LocalCodeIntelResponse> => {
+                try {
+                    return await queryGraphQL<LocalCodeIntelResponse>(localCodeIntelQuery, vars)
+                } catch (error) {
+                    if (isKnownSquirrelErrorLike(error)) {
+                        return { repository: null }
+                    }
+                    throw error
+                }
+            })()
 
             const payloadString = response?.repository?.commit?.blob?.localCodeIntel
             if (!payloadString) {
@@ -256,25 +151,22 @@ export class API {
         document: sourcegraph.TextDocument,
         position: sourcegraph.Position
     ): Promise<LocalSymbol | undefined> => {
-        if (!(await this.hasLocalCodeIntelField())) {
-            return
-        }
-
-        const { repo, commit, path } = parseGitURI(new URL(document.uri))
+        const { repo, commit, path } = parseGitURI(document.uri)
 
         const payload = await this.fetchLocalCodeIntelPayload({ repo, commit, path })
         if (!payload) {
             return
         }
-
-        for (const symbol of payload.symbols) {
-            if (isInRange(position, symbol.def)) {
-                return symbol
-            }
-
-            for (const reference of symbol.refs ?? []) {
-                if (isInRange(position, reference)) {
+        if (payload.symbols) {
+            for (const symbol of payload.symbols) {
+                if (isInRange(position, symbol.def)) {
                     return symbol
+                }
+
+                for (const reference of symbol.refs ?? []) {
+                    if (isInRange(position, reference)) {
+                        return symbol
+                    }
                 }
             }
         }
@@ -286,18 +178,19 @@ export class API {
         document: sourcegraph.TextDocument,
         position: sourcegraph.Position
     ): Promise<SymbolInfoCanonical | undefined> => {
-        if (!(await this.hasSymbolInfo())) {
-            return
-        }
-
-        const query = (await this.hasSymbolLocationRange())
-            ? symbolInfoDefinitionQueryWithRange
-            : symbolInfoDefinitionQueryWithoutRange
-
-        const { repo, commit, path } = parseGitURI(new URL(document.uri))
+        const { repo, commit, path } = parseGitURI(document.uri)
 
         const vars = { repository: repo, commit, path, line: position.line, character: position.character }
-        const response = await queryGraphQL<SymbolInfoResponse>(query, vars)
+        const response = await (async (): Promise<SymbolInfoResponse> => {
+            try {
+                return await queryGraphQL<SymbolInfoResponse>(symbolInfoDefinitionQuery, vars)
+            } catch (error) {
+                if (isKnownSquirrelErrorLike(error)) {
+                    return { repository: null }
+                }
+                throw error
+            }
+        })()
 
         const symbolInfoFlexible = response?.repository?.commit?.blob?.symbolInfo ?? undefined
         if (!symbolInfoFlexible) {
@@ -307,187 +200,9 @@ export class API {
     }
 
     /**
-     * Retrieves the revhash of an input rev for a repository. Throws an error if the
-     * repository is not known to the Sourcegraph instance. Returns undefined if the
-     * input rev is not known to the Sourcegraph instance.
-     *
-     * @param repoName The repository's name.
-     * @param revision The revision.
-     */
-    public async resolveRev(repoName: string, revision: string): Promise<string | undefined> {
-        const query = gql`
-            query LegacyResolveRev($repoName: String!, $rev: String!) {
-                repository(name: $repoName) {
-                    commit(rev: $rev) {
-                        oid
-                    }
-                }
-            }
-        `
-
-        interface Response {
-            repository: {
-                commit?: {
-                    oid: string
-                }
-            }
-        }
-
-        const data = await queryGraphQL<Response>(query, { repoName, rev: revision })
-        return data.repository.commit?.oid
-    }
-
-    /**
-     * Retrieve a sorted and deduplicated list of repository names that contain the
-     * given search query.
-     *
-     * @param searchQuery The input to the search function.
-     */
-    public async findReposViaSearch(searchQuery: string): Promise<string[]> {
-        const query = gql`
-            query LegacyCodeIntelSearch($query: String!) {
-                search(query: $query) {
-                    results {
-                        results {
-                            ... on FileMatch {
-                                repository {
-                                    name
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        `
-
-        interface Response {
-            search: {
-                results: {
-                    results: {
-                        // empty if not a FileMatch
-                        repository?: { name: string }
-                    }[]
-                }
-            }
-        }
-
-        const data = await queryGraphQL<Response>(query, { query: searchQuery })
-        return sortUnique(data.search.results.results.map(result => result.repository?.name)).filter(isDefined)
-    }
-
-    /**
-     * Retrieve all raw manifests for every extension that exists in the Sourcegraph
-     * extension registry.
-     */
-    public async getExtensionManifests(): Promise<string[]> {
-        const query = gql`
-            query LegacyExtensionManifests {
-                extensionRegistry {
-                    extensions {
-                        nodes {
-                            extensionID
-                            manifest {
-                                raw
-                            }
-                        }
-                    }
-                }
-            }
-        `
-
-        interface Response {
-            extensionRegistry: {
-                extensions: {
-                    nodes: {
-                        manifest?: { raw: string }
-                    }[]
-                }
-            }
-        }
-
-        const data = await queryGraphQL<Response>(query)
-        return data.extensionRegistry.extensions.nodes.map(extension => extension.manifest?.raw).filter(isDefined)
-    }
-
-    /**
-     * Retrieve the version of the Sourcegraph instance.
-     */
-    public async productVersion(): Promise<string> {
-        const query = gql`
-            query LegacyProductVersion {
-                site {
-                    productVersion
-                }
-            }
-        `
-
-        interface Response {
-            site: {
-                productVersion: string
-            }
-        }
-
-        const data = await queryGraphQL<Response>(query)
-        return data.site.productVersion
-    }
-
-    /**
-     * Retrieve the identifier of the current user.
-     *
-     * Note: this method does not throw on an unauthenticated request.
-     */
-    public async getUser(): Promise<string | undefined> {
-        const query = gql`
-            query LegacyCurrentUser {
-                currentUser {
-                    id
-                }
-            }
-        `
-
-        interface Response {
-            currentUser?: { id: string }
-        }
-
-        const data = await queryGraphQL<Response>(query)
-        return data.currentUser?.id
-    }
-
-    /**
-     * Creates a `user:all` scoped access token. Returns the newly created token.
-     *
-     * @param user The identifier of the user for which to create an access token.
-     * @param note A note to attach to the access token.
-     */
-    public async createAccessToken(user: string, note: string): Promise<string> {
-        const query = gql`
-            mutation LegacyCreateAccessToken($user: ID!, $note: String!, $scopes: [String!]!) {
-                createAccessToken(user: $user, note: $note, scopes: $scopes) {
-                    token
-                }
-            }
-        `
-
-        interface Response {
-            createAccessToken: {
-                id: string
-                token: string
-            }
-        }
-
-        const data = await queryGraphQL<Response>(query, {
-            user,
-            note,
-            scopes: ['user:all'],
-        })
-        return data.createAccessToken.token
-    }
-
-    /**
      * Get the content of a file. Throws an error if the repository is not known to
      * the Sourcegraph instance. Returns undefined if the input rev or the file is
      * not known to the Sourcegraph instance.
-     *
      * @param repo The repository in which the file exists.
      * @param revision The revision in which the target version of the file exists.
      * @param path The path of the file.
@@ -496,8 +211,11 @@ export class API {
         const query = gql`
             query LegacyFileContent($repo: String!, $rev: String!, $path: String!) {
                 repository(name: $repo) {
+                    id
                     commit(rev: $rev) {
+                        id
                         file(path: $path) {
+                            canonicalURL
                             content
                         }
                     }
@@ -519,14 +237,10 @@ export class API {
 
     /**
      * Perform a search.
-     *
      * @param searchQuery The input to the search command.
      * @param fileLocal Set to false to not request this field, which is absent in older versions of Sourcegraph.
      */
-    public async search(searchQuery: string, fileLocal = true): Promise<SearchResult[]> {
-        const searchContext = sourcegraph.searchContext()
-        const query = searchContext ? `context:${searchContext} ${searchQuery}` : searchQuery
-
+    public async search(query: string, fileLocal = true): Promise<SearchResult[]> {
         interface Response {
             search: {
                 results: {
@@ -538,34 +252,9 @@ export class API {
 
         const data = await queryGraphQL<Response>(buildSearchQuery(fileLocal), {
             query,
+            version: SearchVersion.V3,
         })
         return data.search.results.results.filter(isDefined)
-    }
-
-    /**
-     * Determines via introspection if the GraphQL API supports stencils
-     *
-     * TODO(chrismwendt) - Remove this when we no longer need to support Sourcegraph versions that don't
-     * have stencil support
-     */
-    public async hasStencils(): Promise<boolean> {
-        const introspectionQuery = gql`
-            query LegacyStencilIntrospectionQuery {
-                __type(name: "GitBlobLSIFData") {
-                    fields {
-                        name
-                    }
-                }
-            }
-        `
-
-        interface IntrospectionResponse {
-            __type: { fields: { name: string }[] }
-        }
-
-        return (await queryGraphQL<IntrospectionResponse>(introspectionQuery)).__type.fields.some(
-            field => field.name === 'stencil'
-        )
     }
 }
 
@@ -578,15 +267,18 @@ function buildSearchQuery(fileLocal: boolean): string {
                     ... on FileMatch {
                         __typename
                         file {
+                            canonicalURL
                             path
                             commit {
                                 oid
                             }
                         }
                         repository {
+                            id
                             name
                         }
                         symbols {
+                            canonicalURL
                             name
                             kind
                             location {
@@ -632,8 +324,8 @@ function buildSearchQuery(fileLocal: boolean): string {
 
     if (fileLocal) {
         return gql`
-            query LegacyCodeIntelSearch2($query: String!) {
-                search(query: $query) {
+            query LegacyCodeIntelSearch2($query: String!, $version: SearchVersion!) {
+                search(query: $query, version: $version) {
                     ...SearchResults
                     ...FileLocal
                 }
@@ -644,8 +336,8 @@ function buildSearchQuery(fileLocal: boolean): string {
     }
 
     return gql`
-        query LegacyCodeIntelSearch3($query: String!) {
-            search(query: $query) {
+        query LegacyCodeIntelSearch3($query: String!, $version: SearchVersion!) {
+            search(query: $query, version: $version) {
                 ...SearchResults
             }
         }
@@ -659,11 +351,11 @@ export interface RepoCommitPath {
     path: string
 }
 
-export type LocalCodeIntelPayload = {
-    symbols: LocalSymbol[]
+type LocalCodeIntelPayload = {
+    symbols: LocalSymbol[] | null
 } | null
 
-export interface LocalSymbol {
+interface LocalSymbol {
     hover?: string
     def: Range
     refs?: Range[]
@@ -689,7 +381,7 @@ const isInRange = (position: sourcegraph.Position, range: Range): boolean => {
 }
 
 /** The response envelope for all blob queries. */
-export interface GenericBlobResponse<R> {
+interface GenericBlobResponse<R> {
     repository: { commit: { blob: R | null } | null } | null
 }
 
@@ -698,8 +390,11 @@ type LocalCodeIntelResponse = GenericBlobResponse<{ localCodeIntel: string }>
 const localCodeIntelQuery = gql`
     query LocalCodeIntel($repository: String!, $commit: String!, $path: String!) {
         repository(name: $repository) {
+            id
             commit(rev: $commit) {
+                id
                 blob(path: $path) {
+                    canonicalURL
                     localCodeIntel
                 }
             }
@@ -742,33 +437,14 @@ const symbolInfoFlexibleToCanonical = (flexible: SymbolInfoFlexible): SymbolInfo
     hover: flexible.hover,
 })
 
-const symbolInfoDefinitionQueryWithoutRange = gql`
-    query LegacySymbolInfo($repository: String!, $commit: String!, $path: String!, $line: Int!, $character: Int!) {
-        repository(name: $repository) {
-            commit(rev: $commit) {
-                blob(path: $path) {
-                    symbolInfo(line: $line, character: $character) {
-                        definition {
-                            repo
-                            commit
-                            path
-                            line
-                            character
-                            length
-                        }
-                        hover
-                    }
-                }
-            }
-        }
-    }
-`
-
-const symbolInfoDefinitionQueryWithRange = gql`
+const symbolInfoDefinitionQuery = gql`
     query LegacySymbolInfo2($repository: String!, $commit: String!, $path: String!, $line: Int!, $character: Int!) {
         repository(name: $repository) {
+            id
             commit(rev: $commit) {
+                id
                 blob(path: $path) {
+                    canonicalURL
                     symbolInfo(line: $line, character: $character) {
                         definition {
                             repo

@@ -1,11 +1,11 @@
 import { compact, find, head } from 'lodash'
-import { interval, Observable, Subject } from 'rxjs'
-import { filter, map, refCount, publishReplay } from 'rxjs/operators'
+import { ReplaySubject, interval, type Observable, type Subject } from 'rxjs'
+import { filter, map, share } from 'rxjs/operators'
 
-import { MutationRecordLike } from '../../util/dom'
-import { CodeHost } from '../shared/codeHost'
-import { CodeView, DOMFunctions } from '../shared/codeViews'
-import { queryWithSelector, ViewResolver, CustomSelectorFunction } from '../shared/views'
+import type { MutationRecordLike } from '../../util/dom'
+import type { CodeHost } from '../shared/codeHost'
+import type { CodeView, DOMFunctions } from '../shared/codeViews'
+import { queryWithSelector, type ViewResolver, type CustomSelectorFunction } from '../shared/views'
 
 import styles from './codeHost.module.scss'
 
@@ -355,8 +355,12 @@ export const observeMutations = (
         filter(({ addedNodes, removedNodes }) => !!addedNodes.length || !!removedNodes.length),
         // Wrap in an array, because that's how mutation observers emit events.
         map(mutationRecord => [mutationRecord]),
-        publishReplay(),
-        refCount()
+        share({
+            connector: () => new ReplaySubject(),
+            resetOnError: false,
+            resetOnComplete: false,
+            resetOnRefCountZero: false,
+        })
     )
 }
 
@@ -365,8 +369,6 @@ export const gerritCodeHost: CodeHost = {
     type: 'gerrit',
     name: 'Gerrit',
     codeViewResolvers,
-    contentViewResolvers: [],
-    nativeTooltipResolvers: [],
     codeViewsRequireTokenization: true,
     // This overrides the default observeMutations because we need to handle shadow DOMS.
     observeMutations,
@@ -379,7 +381,6 @@ export const gerritCodeHost: CodeHost = {
         })
     },
     check: checkIsGerrit,
-    notificationClassNames: { 1: '', 2: '', 3: '', 4: '', 5: '' },
     hoverOverlayClassProps: {
         className: styles.hoverOverlay,
     },
@@ -482,7 +483,7 @@ function querySelectorAcrossShadowRoots(element: ParentNode, selectors: string |
     }
     let currentElement: ParentNode | null = element
     const selectorsExceptLast = selectors.slice(0, -1)
-    const lastSelector = selectors[selectors.length - 1]
+    const lastSelector = selectors.at(-1)!
     for (const selector of selectorsExceptLast) {
         if (!currentElement) {
             return null

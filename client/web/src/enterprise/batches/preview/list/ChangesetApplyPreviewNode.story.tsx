@@ -1,4 +1,4 @@
-import { DecoratorFn, Story, Meta } from '@storybook/react'
+import type { Decorator, StoryFn, Meta } from '@storybook/react'
 import classNames from 'classnames'
 import { of } from 'rxjs'
 
@@ -11,7 +11,7 @@ import styles from './PreviewList.module.scss'
 
 const queryEmptyFileDiffs = () => of({ totalCount: 0, pageInfo: { endCursor: null, hasNextPage: false }, nodes: [] })
 
-const decorator: DecoratorFn = story => (
+const decorator: Decorator = story => (
     <div className={classNames(styles.previewListGrid, 'p-3 container')}>{story()}</div>
 )
 
@@ -22,7 +22,7 @@ const config: Meta = {
 
 export default config
 
-export const Overview: Story = () => {
+export const Overview: StoryFn = () => {
     const nodes = [
         ...Object.values(visibleChangesetApplyPreviewNodeStories(false)),
         ...Object.values(hiddenChangesetApplyPreviewStories),
@@ -40,7 +40,7 @@ export const Overview: Story = () => {
                                 url: '/users/alice',
                                 displayName: 'Alice',
                                 username: 'alice',
-                                email: 'alice@email.test',
+                                emails: [{ email: 'alice@email.test', isPrimary: true, verified: true }],
                             }}
                             queryChangesetSpecFileDiffs={queryEmptyFileDiffs}
                         />

@@ -93,7 +93,7 @@ func SubstituteSearchContexts(lookupQueryString func(contextValue string) (strin
 func For(searchType SearchType) step {
 	var processType step
 	switch searchType {
-	case SearchTypeStandard, SearchTypeLucky, SearchTypeKeyword:
+	case SearchTypeStandard, SearchTypeCodyContext:
 		processType = succeeds(substituteConcat(standard))
 	case SearchTypeLiteral:
 		processType = succeeds(substituteConcat(space))
@@ -101,6 +101,8 @@ func For(searchType SearchType) step {
 		processType = succeeds(escapeParensHeuristic, substituteConcat(fuzzyRegexp))
 	case SearchTypeStructural:
 		processType = succeeds(labelStructural, ellipsesForHoles, substituteConcat(space))
+	case SearchTypeKeyword:
+		processType = succeeds(substituteConcatForKeyword(and))
 	}
 	normalize := succeeds(LowercaseFieldNames, SubstituteAliases(searchType), SubstituteCountAll)
 	return Sequence(normalize, processType)
@@ -153,7 +155,7 @@ func MapPlan(plan Plan, pass BasicPass) Plan {
 	for _, query := range plan {
 		updated = append(updated, pass(query))
 	}
-	return Plan(updated)
+	return updated
 }
 
 // Pipeline processes zero or more steps to produce a query. The first step must

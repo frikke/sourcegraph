@@ -8,6 +8,7 @@ import (
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/sourcegraph/sourcegraph/dev/sg/internal/category"
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/run"
 	"github.com/sourcegraph/sourcegraph/dev/sg/internal/std"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
@@ -22,7 +23,7 @@ var (
 		Name:     "version",
 		Usage:    "View details for this installation of sg",
 		Action:   versionExec,
-		Category: CategoryUtil,
+		Category: category.Util,
 		Subcommands: []*cli.Command{
 			{
 				Name:    "changelog",
@@ -47,8 +48,17 @@ var (
 	}
 )
 
-func versionExec(ctx *cli.Context) error {
-	std.Out.Write(BuildCommit)
+func versionExec(c *cli.Context) error {
+	// Write on stderr to ensure we can use the output in scripts without having to trim
+	// the output from the contextual infos.
+	outErr := std.NewOutput(os.Stderr, verbose)
+	outErr.WriteNoticef("Showing the current version of the sg CLI, if you're looking for deployed Sourcegraph instances version, please use `sg live` instead.")
+	if verbose {
+		std.Out.Writef("Version: %s\nBuild commit: %s",
+			c.App.Version, BuildCommit)
+	} else {
+		std.Out.Write(c.App.Version)
+	}
 	return nil
 }
 
@@ -71,10 +81,10 @@ func changelogExec(ctx *cli.Context) error {
 		current := strings.TrimPrefix(BuildCommit, "dev-")
 		if versionChangelogNext {
 			logArgs = append(logArgs, current+"..origin/main")
-			title = fmt.Sprintf("Changes since sg release %s", BuildCommit)
+			title = fmt.Sprintf("Changes since sg release %s", ReleaseName)
 		} else {
 			logArgs = append(logArgs, current)
-			title = fmt.Sprintf("Changes in sg release %s", BuildCommit)
+			title = fmt.Sprintf("Changes in sg release %s", ReleaseName)
 		}
 	} else {
 		std.Out.WriteWarningf("Dev version detected - just showing recent changes.")
@@ -83,7 +93,7 @@ func changelogExec(ctx *cli.Context) error {
 
 	gitLog := exec.Command("git", append(logArgs, "--", "./dev/sg")...)
 	gitLog.Env = os.Environ()
-	out, err := run.InRoot(gitLog)
+	out, err := run.InRoot(gitLog, run.InRootArgs{})
 	if err != nil {
 		return err
 	}

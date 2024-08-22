@@ -5,15 +5,15 @@ import classNames from 'classnames'
 import { isMacPlatform as isMacPlatformFunc } from '@sourcegraph/common'
 import { isInputElement } from '@sourcegraph/shared/src/util/dom'
 
-import { BlockProps } from '..'
+import type { BlockProps } from '..'
 import { isModifierKeyPressed } from '../notebook/useNotebookEventHandlers'
 
-import { NotebookBlockMenu, NotebookBlockMenuProps } from './menu/NotebookBlockMenu'
+import { NotebookBlockMenu, type NotebookBlockMenuProps } from './menu/NotebookBlockMenu'
 import { useIsBlockInputFocused } from './useIsBlockInputFocused'
 
 import blockStyles from './NotebookBlock.module.scss'
 
-interface NotebookBlockProps extends Pick<BlockProps, 'isSelected' | 'isOtherBlockSelected'>, NotebookBlockMenuProps {
+interface NotebookBlockProps extends Pick<BlockProps, 'isSelected' | 'showMenu'>, NotebookBlockMenuProps {
     className?: string
     'aria-label': string
     onDoubleClick?: () => void
@@ -28,7 +28,7 @@ export const NotebookBlock: React.FunctionComponent<React.PropsWithChildren<Note
     id,
     className,
     isSelected,
-    isOtherBlockSelected,
+    showMenu,
     mainAction,
     actions,
     'aria-label': ariaLabel,
@@ -98,9 +98,7 @@ export const NotebookBlock: React.FunctionComponent<React.PropsWithChildren<Note
             >
                 {children}
             </article>
-            {(isSelected || !isOtherBlockSelected) && (
-                <NotebookBlockMenu id={id} mainAction={mainAction} actions={actions} />
-            )}
+            {showMenu && <NotebookBlockMenu id={id} mainAction={mainAction} actions={actions} />}
         </div>
     )
 }

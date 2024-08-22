@@ -1,19 +1,15 @@
-import { DecoratorFn, Meta, Story } from '@storybook/react'
+import type { Decorator, Meta, StoryFn } from '@storybook/react'
 
 import { WebStory } from '../../components/WebStory'
 
 import { MessagePanel } from './MessagePanel'
 import { BODY_JSON, BODY_PLAIN, HEADERS_JSON, HEADERS_PLAIN } from './story/fixtures'
 
-const decorator: DecoratorFn = story => <div className="p-3 container">{story()}</div>
+const decorator: Decorator = story => <div className="p-3 container">{story()}</div>
 const config: Meta = {
     title: 'web/site-admin/webhooks/MessagePanel',
     decorators: [decorator],
-    parameters: {
-        chromatic: {
-            viewports: [576, 1440],
-        },
-    },
+    parameters: {},
 }
 
 export default config
@@ -23,7 +19,7 @@ const messagePanelObject = {
     plain: { headers: HEADERS_PLAIN, body: BODY_PLAIN },
 }
 
-export const JSONRequest: Story = () => (
+export const JSONRequest: StoryFn = () => (
     <WebStory>
         {() => (
             <MessagePanel
@@ -43,7 +39,7 @@ export const JSONRequest: Story = () => (
 
 JSONRequest.storyName = 'JSON request'
 
-export const JSONResponse: Story = args => (
+export const JSONResponse: StoryFn = args => (
     <WebStory>
         {() => (
             <MessagePanel
@@ -59,13 +55,15 @@ export const JSONResponse: Story = args => (
 JSONResponse.argTypes = {
     requestOrStatusCode: {
         control: { type: 'number', min: 100, max: 599 },
-        defaultValue: 200,
     },
+}
+JSONResponse.args = {
+    requestOrStatusCode: 200,
 }
 
 JSONResponse.storyName = 'JSON response'
 
-export const PlainRequest: Story = () => (
+export const PlainRequest: StoryFn = () => (
     <WebStory>
         {() => (
             <MessagePanel
@@ -85,7 +83,7 @@ export const PlainRequest: Story = () => (
 
 PlainRequest.storyName = 'plain request'
 
-export const PlainResponse: Story = args => (
+export const PlainResponse: StoryFn = args => (
     <WebStory>
         {() => (
             <MessagePanel
@@ -101,8 +99,10 @@ export const PlainResponse: Story = args => (
 PlainResponse.argTypes = {
     requestOrStatusCode: {
         control: { type: 'number', min: 100, max: 599 },
-        defaultValue: 200,
     },
+}
+PlainResponse.args = {
+    requestOrStatusCode: 200,
 }
 
 PlainResponse.storyName = 'plain response'

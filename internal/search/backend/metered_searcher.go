@@ -6,18 +6,17 @@ import (
 	"time"
 
 	"github.com/keegancsmith/rpc"
-	"github.com/opentracing/opentracing-go"
-	"github.com/opentracing/opentracing-go/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	sglog "github.com/sourcegraph/log"
 	"github.com/sourcegraph/zoekt"
 	"github.com/sourcegraph/zoekt/query"
+	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/sourcegraph/sourcegraph/internal/actor"
 	"github.com/sourcegraph/sourcegraph/internal/honey"
 	"github.com/sourcegraph/sourcegraph/internal/trace"
-	"github.com/sourcegraph/sourcegraph/internal/trace/ot"
-	"github.com/sourcegraph/sourcegraph/internal/trace/policy"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
 var requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
@@ -37,7 +36,7 @@ func NewMeteredSearcher(hostname string, z zoekt.Streamer) zoekt.Streamer {
 	return &meteredSearcher{
 		Streamer: z,
 		hostname: hostname,
-		log:      sglog.Scoped("meteredSearcher", "wraps zoekt.Streamer with observability"),
+		log:      sglog.Scoped("meteredSearcher"),
 	}
 }
 
@@ -50,89 +49,74 @@ func (m *meteredSearcher) StreamSearch(ctx context.Context, q query.Q, opts *zoe
 	isLeaf := m.hostname != ""
 
 	var cat string
-	var tags []trace.Tag
+	attrs := []attribute.KeyValue{
+		attribute.String("query", queryString(q)),
+	}
 	if !isLeaf {
 		cat = "SearchAll"
 	} else {
 		cat = "Search"
-		tags = []trace.Tag{
-			{Key: "span.kind", Value: "client"},
-			{Key: "peer.address", Value: m.hostname},
-			{Key: "peer.service", Value: "zoekt"},
-		}
+		attrs = append(attrs,
+			attribute.String("span.kind", "client"),
+			attribute.String("peer.address", m.hostname),
+			attribute.String("peer.service", "zoekt"),
+		)
 	}
 
-	qStr := queryString(q)
+	if opts != nil {
+		attrs = append(attrs, filterDefaultValue(
+			attribute.Bool("opts.estimate_doc_count", opts.EstimateDocCount),
+			attribute.Bool("opts.whole", opts.Whole),
+			attribute.Int("opts.shard_max_match_count", opts.ShardMaxMatchCount),
+			attribute.Int("opts.shard_repo_max_match_count", opts.ShardRepoMaxMatchCount),
+			attribute.Int("opts.total_max_match_count", opts.TotalMaxMatchCount),
+			attribute.Int64("opts.max_wall_time_ms", opts.MaxWallTime.Milliseconds()),
+			attribute.Int64("opts.flush_wall_time_ms", opts.FlushWallTime.Milliseconds()),
+			attribute.Int("opts.max_doc_display_count", opts.MaxDocDisplayCount),
+			attribute.Int("opts.max_match_display_count", opts.MaxMatchDisplayCount),
+			attribute.Int("opts.context_lines", opts.NumContextLines),
+			attribute.Bool("opts.chunk_matches", opts.ChunkMatches),
+			attribute.Bool("opts.use_document_ranks", opts.UseDocumentRanks),
+			attribute.Float64("opts.document_ranks_weight", opts.DocumentRanksWeight),
+			attribute.Bool("opts.use_bm25_scoring", opts.UseBM25Scoring),
+			attribute.Bool("opts.debug_score", opts.DebugScore),
+		)...)
+	}
 
-	event := honey.NoopEvent()
+	event := honey.NonSendingEvent()
 	if honey.Enabled() && cat == "SearchAll" {
 		event = honey.NewEvent("search-zoekt")
-		event.AddField("category", cat)
-		event.AddField("query", qStr)
-		for _, t := range tags {
-			event.AddField(t.Key, t.Value)
-		}
+		event.AddAttributes([]attribute.KeyValue{
+			attribute.String("category", cat),
+			attribute.Int("actor", int(actor.FromContext(ctx).UID)),
+		})
+		event.AddAttributes(attrs)
 	}
 
-	tr, ctx := trace.New(ctx, "zoekt."+cat, qStr, tags...)
-	defer func() {
-		tr.SetErrorIfNotContext(err)
-		tr.Finish()
-	}()
-	if opts != nil {
-		fields := []log.Field{
-			log.Bool("opts.estimate_doc_count", opts.EstimateDocCount),
-			log.Bool("opts.whole", opts.Whole),
-			log.Int("opts.shard_max_match_count", opts.ShardMaxMatchCount),
-			log.Int("opts.shard_repo_max_match_count", opts.ShardRepoMaxMatchCount),
-			log.Int("opts.total_max_match_count", opts.TotalMaxMatchCount),
-			log.Int("opts.shard_max_important_match", opts.ShardMaxImportantMatch),
-			log.Int("opts.total_max_important_match", opts.TotalMaxImportantMatch),
-			log.Int64("opts.max_wall_time_ms", opts.MaxWallTime.Milliseconds()),
-			log.Int("opts.max_doc_display_count", opts.MaxDocDisplayCount),
-		}
-		tr.LogFields(fields...)
-		event.AddLogFields(fields)
-	}
-
-	if isLeaf && opts != nil && policy.ShouldTrace(ctx) {
-		// Replace any existing spanContext with a new one, given we've done additional tracing
-		spanContext := make(map[string]string)
-		if span := opentracing.SpanFromContext(ctx); span == nil {
-			m.log.Warn("ctx does not have a trace span associated with it")
-		} else if err := ot.GetTracer(ctx).Inject(span.Context(), opentracing.TextMap, opentracing.TextMapCarrier(spanContext)); err == nil {
-			newOpts := *opts
-			newOpts.SpanContext = spanContext
-			opts = &newOpts
-		} else {
-			m.log.Warn("error injecting new span context into map", sglog.Error(err))
-		}
-	}
+	tr, ctx := trace.New(ctx, "zoekt."+cat, attrs...)
+	defer tr.EndWithErrIfNotContext(&err)
 
 	// Instrument the RPC layer
 	var writeRequestStart, writeRequestDone time.Time
 	if isLeaf {
 		ctx = rpc.WithClientTrace(ctx, &rpc.ClientTrace{
 			WriteRequestStart: func() {
-				tr.LogFields(log.String("event", "rpc.write_request_start"))
+				tr.SetAttributes(attribute.String("event", "rpc.write_request_start"))
 				writeRequestStart = time.Now()
 			},
 
 			WriteRequestDone: func(err error) {
-				fields := []log.Field{log.String("event", "rpc.write_request_done")}
+				fields := []attribute.KeyValue{}
 				if err != nil {
-					fields = append(fields, log.String("rpc.write_request.error", err.Error()))
+					fields = append(fields, attribute.String("rpc.write_request.error", err.Error()))
 				}
-				tr.LogFields(fields...)
+				tr.AddEvent("rpc.write_request_done", fields...)
 				writeRequestDone = time.Now()
 			},
 		})
 	}
 
-	var (
-		code  = "200" // final code to record
-		first sync.Once
-	)
+	var first sync.Once
 
 	mu := sync.Mutex{}
 	statsAgg := &zoekt.Stats{}
@@ -142,16 +126,18 @@ func (m *meteredSearcher) StreamSearch(ctx context.Context, q query.Q, opts *zoe
 
 	err = m.Streamer.StreamSearch(ctx, q, opts, ZoektStreamFunc(func(zsr *zoekt.SearchResult) {
 		first.Do(func() {
+			latency := attribute.Int64("stream.latency_ms", time.Since(start).Milliseconds())
+			tr.SetAttributes(latency)
+			event.AddAttributes([]attribute.KeyValue{latency})
+
+			// Only leafs do RPC
 			if isLeaf {
 				if !writeRequestStart.IsZero() {
-					tr.LogFields(
-						log.Int64("rpc.queue_latency_ms", writeRequestStart.Sub(start).Milliseconds()),
-						log.Int64("rpc.write_duration_ms", writeRequestDone.Sub(writeRequestStart).Milliseconds()),
+					tr.SetAttributes(
+						attribute.Int64("rpc.queue_latency_ms", writeRequestStart.Sub(start).Milliseconds()),
+						attribute.Int64("rpc.write_duration_ms", writeRequestDone.Sub(writeRequestStart).Milliseconds()),
 					)
 				}
-				tr.LogFields(
-					log.Int64("stream.latency_ms", time.Since(start).Milliseconds()),
-				)
 			}
 		})
 
@@ -172,38 +158,43 @@ func (m *meteredSearcher) StreamSearch(ctx context.Context, q query.Q, opts *zoe
 		}
 	}))
 
-	if err != nil {
-		code = "error"
+	code, maybeErrorStr := codeAndErrorStr(err)
+
+	fields := []attribute.KeyValue{
+		attribute.Int("filematches", nFilesMatches),
+		attribute.Int("events", nEvents),
+		attribute.Int64("stream.total_send_time_ms", totalSendTimeMs),
+		attribute.String("code", code),
 	}
 
-	fields := []log.Field{
-		log.Int("filematches", nFilesMatches),
-		log.Int("events", nEvents),
-		log.Int64("stream.total_send_time_ms", totalSendTimeMs),
-
-		// Zoekt stats.
-		log.Int64("stats.content_bytes_loaded", statsAgg.ContentBytesLoaded),
-		log.Int64("stats.index_bytes_loaded", statsAgg.IndexBytesLoaded),
-		log.Int("stats.crashes", statsAgg.Crashes),
-		log.Int("stats.file_count", statsAgg.FileCount),
-		log.Int("stats.files_considered", statsAgg.FilesConsidered),
-		log.Int("stats.files_loaded", statsAgg.FilesLoaded),
-		log.Int("stats.files_skipped", statsAgg.FilesSkipped),
-		log.Int("stats.match_count", statsAgg.MatchCount),
-		log.Int("stats.ngram_matches", statsAgg.NgramMatches),
-		log.Int("stats.shard_files_considered", statsAgg.ShardFilesConsidered),
-		log.Int("stats.shards_scanned", statsAgg.ShardsScanned),
-		log.Int("stats.shards_skipped", statsAgg.ShardsSkipped),
-		log.Int("stats.shards_skipped_filter", statsAgg.ShardsSkippedFilter),
-		log.Int64("stats.wait_ms", statsAgg.Wait.Milliseconds()),
-		log.Int("stats.regexps_considered", statsAgg.RegexpsConsidered),
-	}
-	tr.LogFields(fields...)
+	// Zoekt stats, filter out default values to aid readability.
+	fields = append(fields, filterDefaultValue(
+		attribute.Int64("stats.content_bytes_loaded", statsAgg.ContentBytesLoaded),
+		attribute.Int64("stats.index_bytes_loaded", statsAgg.IndexBytesLoaded),
+		attribute.Int("stats.crashes", statsAgg.Crashes),
+		attribute.Int("stats.file_count", statsAgg.FileCount),
+		attribute.Int("stats.files_considered", statsAgg.FilesConsidered),
+		attribute.Int("stats.files_loaded", statsAgg.FilesLoaded),
+		attribute.Int("stats.files_skipped", statsAgg.FilesSkipped),
+		attribute.Int("stats.match_count", statsAgg.MatchCount),
+		attribute.Int("stats.ngram_lookups", statsAgg.NgramLookups),
+		attribute.Int("stats.ngram_matches", statsAgg.NgramMatches),
+		attribute.Int("stats.shard_files_considered", statsAgg.ShardFilesConsidered),
+		attribute.Int("stats.shards_scanned", statsAgg.ShardsScanned),
+		attribute.Int("stats.shards_skipped", statsAgg.ShardsSkipped),
+		attribute.Int("stats.shards_skipped_filter", statsAgg.ShardsSkippedFilter),
+		attribute.Int64("stats.wait_ms", statsAgg.Wait.Milliseconds()),
+		attribute.Int64("stats.match_tree_construction_ms", statsAgg.MatchTreeConstruction.Milliseconds()),
+		attribute.Int64("stats.match_tree_search_ms", statsAgg.MatchTreeSearch.Milliseconds()),
+		attribute.Int("stats.regexps_considered", statsAgg.RegexpsConsidered),
+		attribute.String("stats.flush_reason", statsAgg.FlushReason.String()),
+	)...)
+	tr.AddEvent("done", fields...)
 	event.AddField("duration_ms", time.Since(start).Milliseconds())
-	if err != nil {
-		event.AddField("error", err)
+	if maybeErrorStr != "" {
+		event.AddField("error", maybeErrorStr)
 	}
-	event.AddLogFields(fields)
+	event.AddAttributes(fields)
 	event.Send()
 
 	// Record total duration of stream
@@ -216,67 +207,71 @@ func (m *meteredSearcher) Search(ctx context.Context, q query.Q, opts *zoekt.Sea
 	return AggregateStreamSearch(ctx, m.StreamSearch, q, opts)
 }
 
-func (m *meteredSearcher) List(ctx context.Context, q query.Q, opts *zoekt.ListOptions) (*zoekt.RepoList, error) {
+func (m *meteredSearcher) List(ctx context.Context, q query.Q, opts *zoekt.ListOptions) (_ *zoekt.RepoList, err error) {
 	start := time.Now()
 
-	var cat string
-	var tags []trace.Tag
+	// isLeaf is true if this is a zoekt.Searcher which does a network
+	// call. False if we are an aggregator. We use this to decide if we need
+	// to add RPC tracing and adjust how we record metrics.
+	isLeaf := m.hostname != ""
 
-	if m.hostname == "" {
+	// Note: we do not log opts in telemetry directly. It currently only has 1
+	// field, and that is covered by the listCategory function.
+
+	var cat string
+	attrs := []attribute.KeyValue{
+		attribute.String("query", queryString(q)),
+	}
+	if !isLeaf {
 		cat = "ListAll"
 	} else {
-		if opts == nil || !opts.Minimal {
-			cat = "List"
-		} else {
-			cat = "ListMinimal"
-		}
-		tags = []trace.Tag{
-			{Key: "span.kind", Value: "client"},
-			{Key: "peer.address", Value: m.hostname},
-			{Key: "peer.service", Value: "zoekt"},
-		}
+		cat = listCategory(opts)
+		attrs = append(attrs,
+			attribute.String("span.kind", "client"),
+			attribute.String("peer.address", m.hostname),
+			attribute.String("peer.service", "zoekt"),
+		)
 	}
 
-	qStr := queryString(q)
-
-	tr, ctx := trace.New(ctx, "zoekt."+cat, qStr, tags...)
-	tr.LogFields(trace.Stringer("opts", opts))
-
-	event := honey.NoopEvent()
+	event := honey.NonSendingEvent()
 	if honey.Enabled() && cat == "ListAll" {
 		event = honey.NewEvent("search-zoekt")
-		event.AddField("category", cat)
-		event.AddField("query", qStr)
-		event.AddField("opts.minimal", opts != nil && opts.Minimal)
-		for _, t := range tags {
-			event.AddField(t.Key, t.Value)
-		}
+		event.AddAttributes([]attribute.KeyValue{
+			attribute.String("category", cat),
+			attribute.Int("actor", int(actor.FromContext(ctx).UID)),
+		})
+		event.AddAttributes(attrs)
 	}
+
+	tr, ctx := trace.New(ctx, "zoekt."+cat, attrs...)
+	defer tr.EndWithErrIfNotContext(&err)
 
 	zsl, err := m.Streamer.List(ctx, q, opts)
 
-	code := "200"
-	if err != nil {
-		code = "error"
+	code, maybeErrorStr := codeAndErrorStr(err)
+
+	fields := []attribute.KeyValue{
+		attribute.String("code", code),
 	}
 
-	event.AddField("duration_ms", time.Since(start).Milliseconds())
 	if zsl != nil {
-		event.AddField("repos", len(zsl.Repos))
-		event.AddField("minimal_repos", len(zsl.Minimal))
+		fields = []attribute.KeyValue{
+			// the fields are mutually exclusive so we can just add them
+			attribute.Int("repos", len(zsl.Repos)+len(zsl.ReposMap)),
+			attribute.Int("stats.crashes", zsl.Crashes),
+		}
 	}
-	if err != nil {
-		event.AddField("error", err)
+
+	tr.AddEvent("done", fields...)
+
+	event.AddAttributes(fields)
+	event.AddField("duration_ms", time.Since(start).Milliseconds())
+	if maybeErrorStr != "" {
+		event.AddField("error", maybeErrorStr)
 	}
 	event.Send()
 
 	requestDuration.WithLabelValues(m.hostname, cat, code).Observe(time.Since(start).Seconds())
-
-	tr.SetError(err)
-	if zsl != nil {
-		tr.LogFields(log.Int("repos", len(zsl.Repos)))
-	}
-	tr.Finish()
 
 	return zsl, err
 }
@@ -290,4 +285,66 @@ func queryString(q query.Q) string {
 		return "<nil>"
 	}
 	return q.String()
+}
+
+func listCategory(opts *zoekt.ListOptions) string {
+	field, err := opts.GetField()
+	if err != nil {
+		return "ListMisconfigured"
+	}
+
+	switch field {
+	case zoekt.RepoListFieldRepos:
+		return "List"
+	case zoekt.RepoListFieldReposMap:
+		return "ListReposMap"
+	default:
+		return "ListUnknown"
+	}
+}
+
+// filterDefaultValue removes values which are the default. This is used to
+// reduce the amount of options we send over + make it easier for a human to
+// eyeball.
+func filterDefaultValue(attrs ...attribute.KeyValue) []attribute.KeyValue {
+	filtered := attrs[:0]
+
+	for _, kv := range attrs {
+		isDefault := false
+
+		// We do not handle the slice types
+		switch kv.Value.Type() {
+		case attribute.BOOL:
+			isDefault = !kv.Value.AsBool()
+		case attribute.INT64:
+			isDefault = kv.Value.AsInt64() == 0
+		case attribute.FLOAT64:
+			isDefault = kv.Value.AsFloat64() == 0
+		case attribute.STRING:
+			isDefault = kv.Value.Emit() == ""
+		}
+
+		if !isDefault {
+			filtered = append(filtered, kv)
+		}
+	}
+
+	return filtered
+}
+
+func codeAndErrorStr(err error) (code, maybeErrStr string) {
+	if err == nil {
+		return "200", ""
+	}
+	// Canceled is a not an error due to reaching limits.
+	if errors.Is(err, context.Canceled) {
+		return "canceled", ""
+	}
+	// DeadlineExceeded is not an error either, but rather us hitting a
+	// timeout.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout", ""
+	}
+
+	return "error", err.Error()
 }

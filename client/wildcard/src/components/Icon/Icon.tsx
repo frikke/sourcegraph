@@ -1,11 +1,11 @@
-import React, { AriaRole, ComponentType, ElementType, SVGProps } from 'react'
+import React, { type AriaRole, type ComponentType, type ElementType, type SVGProps } from 'react'
 
 import classNames from 'classnames'
-import { MdiReactIconProps } from 'mdi-react'
+import type { MdiReactIconProps } from 'mdi-react'
 
-import { ForwardReferenceComponent } from '../..'
+import type { ForwardReferenceComponent } from '../..'
 
-import { ICON_SIZES } from './constants'
+import type { ICON_SIZES } from './constants'
 
 import styles from './Icon.module.scss'
 
@@ -56,9 +56,11 @@ export type IconProps = HiddenIconProps | ScreenReaderIconProps
  * Note: In order to be accessible, we enforce that either an `aria-label` OR an `aria-hidden` prop is provided.
  * If the icon is not decorative, and adds value to the users journey, we should use a descriptive `aria-label`.
  */
-// eslint-disable-next-line react/display-name
 export const Icon = React.memo(
-    React.forwardRef(function Icon({ children, className, size, role = 'img', inline = true, ...props }, reference) {
+    React.forwardRef(function Icon(
+        { children, className, size, role = 'img', inline = true, svgPath, ...props },
+        reference
+    ) {
         const iconStyle = classNames(
             'mdi-icon',
             inline && styles.iconInline,
@@ -66,15 +68,8 @@ export const Icon = React.memo(
             className
         )
 
-        if (props.svgPath) {
-            const {
-                svgPath,
-                height = 24,
-                width = 24,
-                viewBox = '0 0 24 24',
-                fill = 'currentColor',
-                ...attributes
-            } = props
+        if (svgPath) {
+            const { height = 24, width = 24, viewBox = '0 0 24 24', fill = 'currentColor', ...attributes } = props
 
             return (
                 <svg

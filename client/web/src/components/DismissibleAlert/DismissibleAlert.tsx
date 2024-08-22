@@ -3,7 +3,7 @@ import * as React from 'react'
 import { mdiClose } from '@mdi/js'
 import classNames from 'classnames'
 
-import { Button, Alert, AlertProps, Icon } from '@sourcegraph/wildcard'
+import { Button, Alert, type AlertProps, Icon } from '@sourcegraph/wildcard'
 
 import styles from './DismissibleAlert.module.scss'
 
@@ -28,6 +28,7 @@ export const DismissibleAlert: React.FunctionComponent<React.PropsWithChildren<D
     testId,
     children,
     variant,
+    styleOverrides,
 }) => {
     const [dismissed, setDismissed] = React.useState<boolean>(
         partialStorageKey ? isAlertDismissed(partialStorageKey) : false
@@ -45,9 +46,20 @@ export const DismissibleAlert: React.FunctionComponent<React.PropsWithChildren<D
     }
 
     return (
-        <Alert data-testid={testId} className={classNames(styles.container, className)} variant={variant}>
-            <div className={styles.content}>{children}</div>
-            <Button aria-label="Close alert" variant="icon" className={styles.closeButton} onClick={onDismiss}>
+        <Alert
+            data-testid={testId}
+            className={classNames(styles.container, className)}
+            variant={variant}
+            styleOverrides={styleOverrides}
+        >
+            <div
+                className={classNames(styles.content, {
+                    'justify-content-center': styleOverrides?.textCentered,
+                })}
+            >
+                {children}
+            </div>
+            <Button aria-label="Dismiss alert" variant="icon" className={styles.closeButton} onClick={onDismiss}>
                 <Icon aria-hidden={true} svgPath={mdiClose} />
             </Button>
         </Alert>

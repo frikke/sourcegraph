@@ -1,20 +1,20 @@
 import React, { useState } from 'react'
 
-import { useHistory } from 'react-router'
+import { useNavigate } from 'react-router-dom'
 
-import { Form } from '@sourcegraph/branded/src/components/Form'
 import { useMutation, gql } from '@sourcegraph/http-client'
-import { Button, LoadingSpinner, Label, Text } from '@sourcegraph/wildcard'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Button, LoadingSpinner, Label, Text, Form } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../auth'
-import { SubmitSurveyResult, SubmitSurveyVariables } from '../../graphql-operations'
-import { eventLogger } from '../../tracking/eventLogger'
+import type { AuthenticatedUser } from '../../auth'
+import type { SubmitSurveyResult, SubmitSurveyVariables } from '../../graphql-operations'
 import { SurveyRatingRadio } from '../components/SurveyRatingRadio'
 import { SurveyUseCaseForm } from '../components/SurveyUseCaseForm'
 
 import styles from './SurveyPage.module.scss'
 
-interface SurveyFormProps {
+interface SurveyFormProps extends TelemetryV2Props {
     authenticatedUser: AuthenticatedUser | null
     score?: number
 }
@@ -38,8 +38,9 @@ export interface SurveyFormLocationState {
 export const SurveyForm: React.FunctionComponent<React.PropsWithChildren<SurveyFormProps>> = ({
     authenticatedUser,
     score,
+    telemetryRecorder,
 }) => {
-    const history = useHistory<SurveyFormLocationState>()
+    const navigate = useNavigate()
     const [email, setEmail] = useState('')
     const [validationError, setValidationError] = useState<Error | null>(null)
     const [otherUseCase, setOtherUseCase] = useState<string>('')
@@ -47,14 +48,18 @@ export const SurveyForm: React.FunctionComponent<React.PropsWithChildren<SurveyF
 
     const [submitSurvey, response] = useMutation<SubmitSurveyResult, SubmitSurveyVariables>(SUBMIT_SURVEY, {
         onCompleted: () => {
-            history.push({
-                pathname: '/survey/thanks',
-                state: {
-                    // Mutation is only submitted when score is defined
-                    score: score!,
-                    feedback: better,
+            navigate(
+                {
+                    pathname: '/survey/thanks',
                 },
-            })
+                {
+                    state: {
+                        // Mutation is only submitted when score is defined
+                        score: score!,
+                        feedback: better,
+                    },
+                }
+            )
         },
     })
 
@@ -63,7 +68,7 @@ export const SurveyForm: React.FunctionComponent<React.PropsWithChildren<SurveyF
             setValidationError(null)
         }
 
-        history.push(`/survey/${newScore}`)
+        navigate(`/survey/${newScore}`)
     }
 
     const handleSubmit = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
@@ -74,7 +79,8 @@ export const SurveyForm: React.FunctionComponent<React.PropsWithChildren<SurveyF
             return
         }
 
-        eventLogger.log('SurveySubmitted')
+        EVENT_LOGGER.log('SurveySubmitted')
+        telemetryRecorder.recordEvent('surveyNPS', 'submit')
 
         await submitSurvey({
             variables: {
@@ -94,11 +100,16 @@ export const SurveyForm: React.FunctionComponent<React.PropsWithChildren<SurveyF
         <Form className={styles.surveyForm} onSubmit={handleSubmit}>
             {error && <Text className={styles.error}>{error.message}</Text>}
             {/* Label is associated with control through aria-labelledby */}
-            {/* eslint-disable-next-line jsx-a11y/label-has-associated-control */}
+            {}
             <Label id="survey-form-scores" className={styles.label}>
                 How likely is it that you would recommend Sourcegraph to a friend?
             </Label>
-            <SurveyRatingRadio ariaLabelledby="survey-form-scores" onChange={handleScoreChange} score={score} />
+            <SurveyRatingRadio
+                ariaLabelledby="survey-form-scores"
+                onChange={handleScoreChange}
+                score={score}
+                telemetryRecorder={telemetryRecorder}
+            />
             <SurveyUseCaseForm
                 className="my-2"
                 authenticatedUser={authenticatedUser}

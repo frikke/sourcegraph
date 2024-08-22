@@ -1,18 +1,20 @@
-import { of, Subscription } from 'rxjs'
+import { of, type Subscription } from 'rxjs'
 import { map, switchMap, throttleTime } from 'rxjs/operators'
-import * as vscode from 'vscode'
+import type * as vscode from 'vscode'
 
+import { SearchMode } from '@sourcegraph/shared/src/search'
 import { appendContextFilter } from '@sourcegraph/shared/src/search/query/transformer'
 import { aggregateStreamingSearch } from '@sourcegraph/shared/src/search/stream'
 
-import { ExtensionCoreAPI } from '../contract'
+import type { ExtensionCoreAPI } from '../contract'
 import { SearchPatternType } from '../graphql-operations'
-import { VSCEStateMachine } from '../state'
+import { getAccessToken } from '../settings/accessTokenSetting'
+import type { VSCEStateMachine } from '../state'
 import { focusSearchPanel } from '../webview/commands'
 
 import { isOlderThan, observeInstanceVersionNumber } from './instanceVersion'
 
-export function createStreamSearch({
+export async function createStreamSearch({
     context,
     stateMachine,
     sourcegraphURL,
@@ -20,7 +22,7 @@ export function createStreamSearch({
     context: vscode.ExtensionContext
     stateMachine: VSCEStateMachine
     sourcegraphURL: string
-}): ExtensionCoreAPI['streamSearch'] {
+}): Promise<ExtensionCoreAPI['streamSearch']> {
     // Ensure only one search is active at a time
     let previousSearchSubscription: Subscription | null
 
@@ -29,8 +31,8 @@ export function createStreamSearch({
             previousSearchSubscription?.unsubscribe()
         },
     })
-
-    const instanceVersionNumber = observeInstanceVersionNumber()
+    const token = await getAccessToken()
+    const instanceVersionNumber = observeInstanceVersionNumber(token, sourcegraphURL)
 
     return function streamSearch(query, options) {
         previousSearchSubscription?.unsubscribe()
@@ -41,6 +43,7 @@ export function createStreamSearch({
                 queryState: { query },
                 searchCaseSensitivity: options.caseSensitive,
                 searchPatternType: options.patternType,
+                searchMode: options.searchMode || SearchMode.Precise,
             },
         })
         // Focus search panel if not already focused
@@ -52,7 +55,11 @@ export function createStreamSearch({
                 map(version => {
                     let patternType = options.patternType
 
-                    if (version && isOlderThan(version, { major: 3, minor: 43 })) {
+                    if (
+                        patternType === SearchPatternType.standard &&
+                        version &&
+                        isOlderThan(version, { major: 3, minor: 43 })
+                    ) {
                         /**
                          * SearchPatternType.standard support was added in Sourcegraph v3.43.0.
                          * Use SearchPatternType.literal for earlier versions instead (it was the default before v3.43.0).

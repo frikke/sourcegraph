@@ -1,26 +1,24 @@
 import React, { useCallback, useEffect, useMemo } from 'react'
 
 import { VisuallyHidden } from '@reach/visually-hidden'
-import * as H from 'history'
-import { Observable } from 'rxjs'
+import { useLocation } from 'react-router-dom'
+import type { Observable } from 'rxjs'
 
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
 import { PageHeader, Link } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../auth'
+import type { AuthenticatedUser } from '../../auth'
 import { withAuthenticatedUser } from '../../auth/withAuthenticatedUser'
 import { CodeMonitoringLogo } from '../../code-monitoring/CodeMonitoringLogo'
 import { PageTitle } from '../../components/PageTitle'
-import { CodeMonitorFields } from '../../graphql-operations'
-import { eventLogger } from '../../tracking/eventLogger'
+import type { CodeMonitorFields } from '../../graphql-operations'
 
 import { convertActionsForCreate } from './action-converters'
 import { createCodeMonitor as _createCodeMonitor } from './backend'
 import { CodeMonitorForm } from './components/CodeMonitorForm'
 
-interface CreateCodeMonitorPageProps extends ThemeProps {
-    location: H.Location
-    history: H.History
+interface CreateCodeMonitorPageProps extends TelemetryV2Props {
     authenticatedUser: AuthenticatedUser
 
     createCodeMonitor?: typeof _createCodeMonitor
@@ -30,34 +28,33 @@ interface CreateCodeMonitorPageProps extends ThemeProps {
 
 const AuthenticatedCreateCodeMonitorPage: React.FunctionComponent<
     React.PropsWithChildren<CreateCodeMonitorPageProps>
-> = ({
-    authenticatedUser,
-    history,
-    location,
-    createCodeMonitor = _createCodeMonitor,
-    isLightTheme,
-    isSourcegraphDotCom,
-}) => {
-    const triggerQuery = useMemo(() => new URLSearchParams(location.search).get('trigger-query') ?? undefined, [
-        location.search,
-    ])
+> = ({ authenticatedUser, createCodeMonitor = _createCodeMonitor, isSourcegraphDotCom, telemetryRecorder }) => {
+    const location = useLocation()
 
-    const description = useMemo(() => new URLSearchParams(location.search).get('description') ?? undefined, [
-        location.search,
-    ])
-
-    useEffect(
-        () =>
-            eventLogger.logPageView('CreateCodeMonitorPage', {
-                hasTriggerQuery: !!triggerQuery,
-                hasDescription: !!description,
-            }),
-        [triggerQuery, description]
+    const triggerQuery = useMemo(
+        () => new URLSearchParams(location.search).get('trigger-query') ?? undefined,
+        [location.search]
     )
+
+    const description = useMemo(
+        () => new URLSearchParams(location.search).get('description') ?? undefined,
+        [location.search]
+    )
+
+    useEffect(() => {
+        EVENT_LOGGER.logPageView('CreateCodeMonitorPage', {
+            hasTriggerQuery: !!triggerQuery,
+            hasDescription: !!description,
+        })
+        telemetryRecorder.recordEvent('codeMonitor.create', 'view', {
+            metadata: { hasTriggerQuery: triggerQuery ? 1 : 0, hasDescription: description ? 1 : 0 },
+        })
+    }, [triggerQuery, description, telemetryRecorder])
 
     const createMonitorRequest = useCallback(
         (codeMonitor: CodeMonitorFields): Observable<Partial<CodeMonitorFields>> => {
-            eventLogger.log('CreateCodeMonitorFormSubmitted')
+            EVENT_LOGGER.log('CreateCodeMonitorFormSubmitted')
+            telemetryRecorder.recordEvent('codeMonitor.create', 'submit')
             return createCodeMonitor({
                 monitor: {
                     namespace: authenticatedUser.id,
@@ -69,7 +66,7 @@ const AuthenticatedCreateCodeMonitorPage: React.FunctionComponent<
                 actions: convertActionsForCreate(codeMonitor.actions.nodes, authenticatedUser.id),
             })
         },
-        [authenticatedUser.id, createCodeMonitor]
+        [authenticatedUser.id, createCodeMonitor, telemetryRecorder]
     )
 
     return (
@@ -96,14 +93,11 @@ const AuthenticatedCreateCodeMonitorPage: React.FunctionComponent<
                 </PageHeader.Heading>
             </PageHeader>
             <CodeMonitorForm
-                history={history}
-                location={location}
                 authenticatedUser={authenticatedUser}
                 onSubmit={createMonitorRequest}
                 triggerQuery={triggerQuery}
                 description={description}
                 submitButtonLabel="Create code monitor"
-                isLightTheme={isLightTheme}
                 isSourcegraphDotCom={isSourcegraphDotCom}
             />
         </div>

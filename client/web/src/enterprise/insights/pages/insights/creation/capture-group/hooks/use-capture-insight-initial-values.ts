@@ -4,7 +4,7 @@ import { useLocation } from 'react-router-dom'
 
 import { useLocalStorage } from '@sourcegraph/wildcard'
 
-import { CaptureGroupFormFields } from '../types'
+import type { CaptureGroupFormFields } from '../types'
 import { decodeCaptureInsightURL } from '../utils/capture-insigh-url-parsers/capture-insight-url-parsers'
 
 type UseCaptureInsightInitialValuesResult = [
@@ -22,7 +22,7 @@ export function useCaptureInsightInitialValues(): UseCaptureInsightInitialValues
     // render creation UI form.
     // eslint-disable-next-line no-restricted-syntax
     const [localStorageFormValues, setLocalStorageValues] = useLocalStorage<CaptureGroupFormFields | undefined>(
-        'insights.capture-group-creation-ui',
+        'insights.capture-group-creation-ui-v2',
         undefined
     )
 

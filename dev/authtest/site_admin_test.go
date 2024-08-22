@@ -3,9 +3,13 @@ package authtest
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
+	"github.com/sourcegraph/sourcegraph/internal/auth"
 	"github.com/sourcegraph/sourcegraph/internal/gqltestutil"
 )
 
@@ -13,10 +17,9 @@ func TestSiteAdminEndpoints(t *testing.T) {
 	// Create a test user (authtest-user-1) which is not a site admin, the user
 	// should receive access denied for site admin endpoints.
 	const testUsername = "authtest-user-1"
-	userClient, err := gqltestutil.SignUp(*baseURL, testUsername+"@sourcegraph.com", testUsername, "mysecurepassword")
-	if err != nil {
-		t.Fatal(err)
-	}
+	userClient, err := gqltestutil.NewClient(*baseURL)
+	require.NoError(t, err)
+	require.NoError(t, userClient.SignUp(testUsername+"@sourcegraph.com", testUsername, "mysecurepassword"))
 	defer func() {
 		err := client.DeleteUser(userClient.AuthenticatedUserID(), true)
 		if err != nil {
@@ -45,8 +48,8 @@ func TestSiteAdminEndpoints(t *testing.T) {
 				}
 				defer func() { _ = resp.Body.Close() }()
 
-				if resp.StatusCode != http.StatusUnauthorized {
-					t.Fatalf(`Want status code %d error but got %d`, http.StatusUnauthorized, resp.StatusCode)
+				if resp.StatusCode != http.StatusForbidden {
+					t.Fatalf(`Want status code %d error but got %d`, http.StatusForbidden, resp.StatusCode)
 				}
 			})
 		}
@@ -79,9 +82,11 @@ func TestSiteAdminEndpoints(t *testing.T) {
 	t.Run("GraphQL queries", func(t *testing.T) {
 		type gqlTest struct {
 			name      string
+			errorStr  string
 			query     string
 			variables map[string]any
 		}
+		tokenDurationSeconds := 3600
 		tests := []gqlTest{
 			{
 				name: "resetTriggerQueryTimestamps",
@@ -92,6 +97,15 @@ mutation {
 	}
 }`,
 			}, {
+				name: "reindexRepository",
+				query: `
+mutation {
+	reindexRepository(repository: "UmVwb3NpdG9yeTox") {
+		alwaysNil
+	}
+}`,
+			},
+			{
 				name: "updateMirrorRepository",
 				query: `
 mutation {
@@ -146,10 +160,10 @@ mutation {
 	updateSiteConfiguration(input: "", lastID: 0)
 }`,
 			}, {
-				name: "deleteLSIFUpload",
+				name: "deletePreciseIndex",
 				query: `
 mutation {
-	deleteLSIFUpload(id: "TFNJRjox") {
+	deletePreciseIndex(id: "TFNJRjox") {
 		alwaysNil
 	}
 }`,
@@ -162,10 +176,10 @@ mutation {
 	}
 }`,
 			}, {
-				name: "SetMigrationDirection",
+				name: "setMigrationDirection",
 				query: `
 mutation {
-	SetMigrationDirection(id: "TWlncmF0aW9uOjE=", applyReverse: false) {
+	setMigrationDirection(id: "TWlncmF0aW9uOjE=", applyReverse: false) {
 		alwaysNil
 	}
 }`,
@@ -173,7 +187,7 @@ mutation {
 				name: "createAccessToken.ScopeSiteAdminSudo",
 				query: `
 mutation CreateAccessToken($userID: ID!) {
-	createAccessToken(user: $userID, scopes: ["site-admin:sudo"], note: "") {
+	createAccessToken(user: $userID, scopes: ["site-admin:sudo"], note: "", durationSeconds:` + strconv.Itoa(tokenDurationSeconds) + `) {
 		id
 	}
 }`,
@@ -200,7 +214,8 @@ mutation {
 	}
 }`,
 			}, {
-				name: "scheduleUserPermissionsSync",
+				name:     "scheduleUserPermissionsSync",
+				errorStr: auth.ErrMustBeSiteAdminOrSameUser.Error(),
 				query: `
 mutation {
 	scheduleUserPermissionsSync(user: "VXNlcjox") {
@@ -284,16 +299,6 @@ mutation {
 	}
 }`,
 			}, {
-				name: "users",
-				query: `
-{
-	users {
-		nodes {
-			id
-		}
-	}
-}`,
-			}, {
 				name: "surveyResponses",
 				query: `
 {
@@ -341,14 +346,6 @@ mutation {
 mutation {
 	randomizeUserPassword(user: "VXNlcjox") {
 		resetPasswordURL
-	}
-}`,
-			}, {
-				name: "setTag",
-				query: `
-mutation {
-	setTag(node: "VXNlcjox", tag: "tag", present: true) {
-		alwaysNil
 	}
 }`,
 			},
@@ -441,8 +438,13 @@ mutation {
 			t.Run(test.name, func(t *testing.T) {
 				err := userClient.GraphQL("", test.query, test.variables, nil)
 				got := fmt.Sprintf("%v", err)
-				if !strings.Contains(got, "must be site admin") {
-					t.Fatalf(`Want "must be site admin"" error but got %q`, got)
+				expected := auth.ErrMustBeSiteAdmin.Error()
+				if test.errorStr != "" {
+					expected = test.errorStr
+				}
+				// check if it's one of errors that we expect
+				if !strings.Contains(got, expected) {
+					t.Fatalf(`Want "%s" error, but got "%q"`, expected, got)
 				}
 			})
 		}

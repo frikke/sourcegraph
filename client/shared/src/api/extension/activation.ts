@@ -1,19 +1,23 @@
-import { Remote } from 'comlink'
-import { BehaviorSubject, combineLatest, from, Observable, Subscription } from 'rxjs'
+import type { Remote } from 'comlink'
+import { BehaviorSubject, combineLatest, from, type Observable, of, Subscription } from 'rxjs'
 import { catchError, concatMap, distinctUntilChanged, first, map, switchMap, tap } from 'rxjs/operators'
-import sourcegraph from 'sourcegraph'
+import type sourcegraph from 'sourcegraph'
 
-import { Contributions } from '@sourcegraph/client-api'
-import { asError, ErrorLike, isErrorLike, hashCode, memoizeObservable, logger } from '@sourcegraph/common'
+import type { Contributions } from '@sourcegraph/client-api'
+import { asError, isErrorLike, hashCode, logger } from '@sourcegraph/common'
 
-import { ConfiguredExtension, getScriptURLFromExtensionManifest, splitExtensionID } from '../../extensions/extension'
+import {
+    type ConfiguredExtension,
+    getScriptURLFromExtensionManifest,
+    splitExtensionID,
+} from '../../extensions/extension'
 import { areExtensionsSame, getEnabledExtensionsForSubject } from '../../extensions/extensions'
 import { wrapRemoteObservable } from '../client/api/common'
-import { MainThreadAPI } from '../contract'
+import type { MainThreadAPI } from '../contract'
 import { tryCatchPromise } from '../util'
 
 import { parseContributionExpressions } from './api/contribution'
-import { ExtensionHostState } from './extensionHostState'
+import type { ExtensionHostState } from './extensionHostState'
 
 export function observeActiveExtensions(
     mainAPI: Remote<MainThreadAPI>,
@@ -62,7 +66,7 @@ const DEPRECATED_EXTENSION_IDS = new Set(['sourcegraph/code-stats-insights', 'so
 
 export function activateExtensions(
     state: Pick<ExtensionHostState, 'activeExtensions' | 'contributions' | 'haveInitialExtensionsLoaded' | 'settings'>,
-    mainAPI: Remote<Pick<MainThreadAPI, 'getScriptURLForExtension' | 'logEvent'>>,
+    mainAPI: Remote<Pick<MainThreadAPI, 'logEvent' | 'getTelemetryRecorder'>>,
     createExtensionAPI: (extensionID: string) => typeof sourcegraph,
     mainThreadAPIInitializations: Observable<boolean>,
     /**
@@ -76,31 +80,12 @@ export function activateExtensions(
      * */
     deactivate = deactivateExtension
 ): Subscription {
-    const getScriptURLs = memoizeObservable(
-        () =>
-            mainThreadAPIInitializations.pipe(
-                first(initialized => initialized),
-                switchMap(() =>
-                    from(mainAPI.getScriptURLForExtension()).pipe(
-                        map(getScriptURL => {
-                            function getBundleURLs(urls: string[]): Promise<(string | ErrorLike)[]> {
-                                return getScriptURL ? getScriptURL(urls) : Promise.resolve(urls)
-                            }
-
-                            return getBundleURLs
-                        })
-                    )
-                )
-            ),
-        () => 'getScriptURL'
-    )
-
     const previouslyActivatedExtensions = new Set<string>()
     const extensionContributions = new Map<string, Contributions>()
     const contributionsToAdd = new Map<string, Contributions>()
-    const extensionsSubscription = combineLatest([state.activeExtensions, getScriptURLs(null)])
+    const extensionsSubscription = combineLatest([state.activeExtensions])
         .pipe(
-            concatMap(([activeExtensions, getScriptURLs]) => {
+            concatMap(([activeExtensions]) => {
                 const toDeactivate = new Set<string>()
                 const toActivate = new Map<string, ConfiguredExtension | ExecutableExtension>()
                 const activeExtensionIDs = new Set<string>()
@@ -126,32 +111,24 @@ export function activateExtensions(
                     }
                 }
 
-                return from(
-                    getScriptURLs(
-                        [...toActivate.values()].map(extension => {
-                            if ('scriptURL' in extension) {
-                                // This is already an executable extension (inline extension)
-                                return extension.scriptURL
-                            }
+                const scriptURLs = [...toActivate.values()].map(extension => {
+                    if ('scriptURL' in extension) {
+                        // This is already an executable extension (inline extension)
+                        return extension.scriptURL
+                    }
 
-                            return getScriptURLFromExtensionManifest(extension)
-                        })
-                    ).then(scriptURLs => {
-                        // TODO: (not urgent) add scriptURL cache
+                    return getScriptURLFromExtensionManifest(extension)
+                })
 
-                        const executableExtensionsToActivate: ExecutableExtension[] = [...toActivate.values()]
-                            .map((extension, index) => ({
-                                id: extension.id,
-                                manifest: extension.manifest,
-                                scriptURL: scriptURLs[index],
-                            }))
-                            .filter(
-                                (extension): extension is ExecutableExtension => typeof extension.scriptURL === 'string'
-                            )
+                const executableExtensionsToActivate: ExecutableExtension[] = [...toActivate.values()]
+                    .map((extension, index) => ({
+                        id: extension.id,
+                        manifest: extension.manifest,
+                        scriptURL: scriptURLs[index],
+                    }))
+                    .filter((extension): extension is ExecutableExtension => typeof extension.scriptURL === 'string')
 
-                        return { toActivate: executableExtensionsToActivate, toDeactivate }
-                    })
-                ).pipe(
+                return of({ toActivate: executableExtensionsToActivate, toDeactivate }).pipe(
                     tap(({ toActivate }) => {
                         for (const extension of toActivate) {
                             if (
@@ -191,6 +168,10 @@ export function activateExtensions(
                                                 .catch(() => {
                                                     // noop
                                                 })
+                                            const telemetryRecorder = await mainAPI.getTelemetryRecorder()
+                                            telemetryRecorder.recordEvent('blob.extension', 'activate', {
+                                                privateMetadata: { extensionID: telemetryExtensionID },
+                                            })
                                         } catch (error) {
                                             logger.error(
                                                 `Fail to log ExtensionActivation event for extension ${id}:`,

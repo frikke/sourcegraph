@@ -4,8 +4,11 @@ package main
 
 import (
 	"github.com/sourcegraph/sourcegraph/cmd/symbols/shared"
+	"github.com/sourcegraph/sourcegraph/internal/sanitycheck"
+	"github.com/sourcegraph/sourcegraph/internal/service/svcmain"
 )
 
 func main() {
-	shared.Main(shared.SetupSqlite)
+	sanitycheck.Pass()
+	svcmain.SingleServiceMain(shared.Service)
 }

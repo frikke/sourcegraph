@@ -4,10 +4,11 @@ import (
 	"context"
 	"sync"
 
-	otlog "github.com/opentracing/opentracing-go/log"
 	"github.com/sourcegraph/log"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/sourcegraph/sourcegraph/internal/actor"
+	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/authz"
 	"github.com/sourcegraph/sourcegraph/internal/search"
 	"github.com/sourcegraph/sourcegraph/internal/search/job"
@@ -39,7 +40,7 @@ func (s *subRepoPermsFilterJob) Run(ctx context.Context, clients job.RuntimeClie
 
 	filteredStream := streaming.StreamFunc(func(event streaming.SearchEvent) {
 		var err error
-		event.Results, err = applySubRepoFiltering(ctx, clients.Logger, checker, event.Results)
+		event.Results, err = applySubRepoFiltering(ctx, checker, clients.Logger, event.Results)
 		if err != nil {
 			mu.Lock()
 			errs = errors.Append(errs, err)
@@ -59,7 +60,7 @@ func (s *subRepoPermsFilterJob) Name() string {
 	return "SubRepoPermsFilterJob"
 }
 
-func (s *subRepoPermsFilterJob) Fields(job.Verbosity) []otlog.Field { return nil }
+func (s *subRepoPermsFilterJob) Attributes(job.Verbosity) []attribute.KeyValue { return nil }
 
 func (s *subRepoPermsFilterJob) Children() []job.Describer {
 	return []job.Describer{s.child}
@@ -73,7 +74,7 @@ func (s *subRepoPermsFilterJob) MapChildren(fn job.MapFunc) job.Job {
 
 // applySubRepoFiltering filters a set of matches using the provided
 // authz.SubRepoPermissionChecker
-func applySubRepoFiltering(ctx context.Context, logger log.Logger, checker authz.SubRepoPermissionChecker, matches []result.Match) ([]result.Match, error) {
+func applySubRepoFiltering(ctx context.Context, checker authz.SubRepoPermissionChecker, logger log.Logger, matches []result.Match) ([]result.Match, error) {
 	if !authz.SubRepoEnabled(checker) {
 		return matches, nil
 	}
@@ -84,7 +85,26 @@ func applySubRepoFiltering(ctx context.Context, logger log.Logger, checker authz
 	// Filter matches in place
 	filtered := matches[:0]
 
+	errCache := map[api.RepoName]struct{}{} // cache repos that errored
+
 	for _, m := range matches {
+		// If the check errored before, skip the repo
+		if _, ok := errCache[m.RepoName().Name]; ok {
+			continue
+		}
+		enabled, err := authz.SubRepoEnabledForRepoID(ctx, checker, m.RepoName().ID)
+		if err != nil {
+			// If an error occurs while checking sub-repo perms, we omit it from the results
+			if err != ctx.Err() {
+				logger.Error("Could not determine if sub-repo permissions are enabled for repo, skipping", log.Error(err), log.String("repoName", string(m.RepoName().Name)))
+			}
+			errCache[m.RepoName().Name] = struct{}{}
+			continue
+		}
+		if !enabled {
+			filtered = append(filtered, m)
+			continue
+		}
 		switch mm := m.(type) {
 		case *result.FileMatch:
 			repo := mm.Repo.Name
@@ -115,10 +135,11 @@ func applySubRepoFiltering(ctx context.Context, logger log.Logger, checker authz
 				}
 			}
 		case *result.RepoMatch:
-			// Repo filtering is taking care of by our usual repo filtering logic
+			// Repo filtering is taken care of by our usual repo filtering logic
 			filtered = append(filtered, m)
+			// Owner matches are found after the sub-repo permissions filtering, hence why we don't have
+			// an OwnerMatch case here.
 		}
-
 	}
 
 	if errs == nil {

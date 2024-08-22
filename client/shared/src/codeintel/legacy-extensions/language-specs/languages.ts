@@ -14,7 +14,7 @@ import { cppSpec, cudaSpec } from './cpp'
 import { goSpec } from './go'
 import { createIdentCharPattern, rubyIdentCharPattern } from './identifiers'
 import { javaSpec } from './java'
-import { LanguageSpec } from './language-spec'
+import type { LanguageSpec } from './language-spec'
 import { pythonSpec } from './python'
 import { typescriptSpec } from './typescript'
 
@@ -70,6 +70,7 @@ const dartSpec: LanguageSpec = {
     stylized: 'Dart',
     fileExts: ['dart'],
     commentStyles: [{ lineRegex: tripleSlashPattern }],
+    textDocumentImplemenationSupport: true,
 }
 
 const elixirSpec: LanguageSpec = {
@@ -357,12 +358,27 @@ const stratoSpec: LanguageSpec = {
     commentStyles: [cStyleComment],
 }
 
+const xlsgSpec: LanguageSpec = {
+    languageID: 'xlsg',
+    stylized: 'XLSG',
+    fileExts: ['xlsg'],
+    commentStyles: [pythonStyleComment],
+}
+
+const zigSpec: LanguageSpec = {
+    languageID: 'zig',
+    stylized: 'Zig',
+    fileExts: ['zig'],
+    commentStyles: [{ lineRegex: slashPattern }, { lineRegex: tripleSlashPattern }],
+}
+
 /**
- * The specification of languages for which search-based code intelligence
- * is supported.
+ * The specification of languages for which we register a code intelligence provider.
  *
- * The set of languages come from https://madnight.github.io/githut/#/pull_requests/2018/4.
+ * The set of languages come from https://madnight.github.io/githut/#/pull_requests/2018/4 (with additions)
  * The language names come from https://code.visualstudio.com/docs/languages/identifiers#_known-language-identifiers.
+ *
+ * @deprecated See FIXME(id: language-detection)
  */
 export const languageSpecs: LanguageSpec[] = [
     apexSpec,
@@ -404,19 +420,17 @@ export const languageSpecs: LanguageSpec[] = [
     typescriptSpec,
     verilogSpec,
     vhdlSpec,
+    zigSpec,
+    xlsgSpec,
 ]
 
 /**
  * Returns the language spec with the given language identifier. If no language
  * matches is configured with the given identifier an error is thrown.
+ *
+ * @deprecated See FIXME(id: language-detection)
  */
-export function findLanguageSpec(languageID: string): LanguageSpec {
-    const languageSpec = languageSpecs.find(
-        spec => spec.languageID === languageID || spec.additionalLanguages?.includes(languageID)
-    )
-    if (languageSpec) {
-        return languageSpec
-    }
-
-    throw new Error(`${languageID} is not defined`)
+export function findLanguageSpec(languageID: string): LanguageSpec | undefined {
+    languageID = languageID.toLowerCase()
+    return languageSpecs.find(spec => spec.languageID === languageID || spec.additionalLanguages?.includes(languageID))
 }

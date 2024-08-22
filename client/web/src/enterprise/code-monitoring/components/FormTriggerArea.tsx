@@ -1,23 +1,23 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { mdiCheck, mdiRadioboxBlank, mdiHelpCircle, mdiOpenInNew } from '@mdi/js'
+import { mdiCheck, mdiHelpCircle, mdiOpenInNew, mdiRadioboxBlank } from '@mdi/js'
 import { VisuallyHidden } from '@reach/visually-hidden'
 import classNames from 'classnames'
 
-import { QueryState } from '@sourcegraph/search'
-import { LazyMonacoQueryInput } from '@sourcegraph/search-ui'
+import { LazyQueryInputFormControl } from '@sourcegraph/branded'
+import type { QueryState } from '@sourcegraph/shared/src/search'
 import { FilterType, resolveFilter, validateFilter } from '@sourcegraph/shared/src/search/query/filters'
 import { scanSearchQuery } from '@sourcegraph/shared/src/search/query/scanner'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
+import { useSettingsCascade } from '@sourcegraph/shared/src/settings/settings'
 import { buildSearchURLQuery } from '@sourcegraph/shared/src/util/url'
-import { Button, Link, Card, Icon, Checkbox, Code, H3, Tooltip } from '@sourcegraph/wildcard'
+import { Button, Card, Checkbox, Code, H3, Icon, Link, Tooltip } from '@sourcegraph/wildcard'
 
-import { SearchPatternType } from '../../../graphql-operations'
-import { useExperimentalFeatures } from '../../../stores'
+import type { SearchPatternType } from '../../../graphql-operations'
+import { defaultPatternTypeFromSettings } from '../../../util/settings'
 
 import styles from './FormTriggerArea.module.scss'
 
-interface TriggerAreaProps extends ThemeProps {
+interface TriggerAreaProps {
     query: string
     onQueryChange: (query: string) => void
     triggerCompleted: boolean
@@ -30,7 +30,10 @@ interface TriggerAreaProps extends ThemeProps {
 }
 
 const isDiffOrCommit = (value: string): boolean => value === 'diff' || value === 'commit'
-const isLiteralOrRegexp = (value: string): boolean => value === 'literal' || value === 'regexp'
+
+// Code monitors don't support pattern type "structural"
+const isValidPatternType = (value: string): boolean =>
+    value === 'keyword' || value === 'standard' || value === 'literal' || value === 'regexp'
 
 const ValidQueryChecklistItem: React.FunctionComponent<
     React.PropsWithChildren<{
@@ -94,7 +97,6 @@ export const FormTriggerArea: React.FunctionComponent<React.PropsWithChildren<Tr
     cardClassName,
     cardBtnClassName,
     cardLinkClassName,
-    isLightTheme,
     isSourcegraphDotCom,
 }) => {
     const [expanded, setExpanded] = useState(startExpanded)
@@ -126,10 +128,6 @@ export const FormTriggerArea: React.FunctionComponent<React.PropsWithChildren<Tr
     )
 
     const [queryState, setQueryState] = useState<QueryState>({ query: query || '' })
-
-    const editorComponent = useExperimentalFeatures(features => features.editor ?? 'codemirror6')
-    const applySuggestionsOnEnter =
-        useExperimentalFeatures(features => features.applySearchQuerySuggestionOnEnter) ?? true
 
     useEffect(() => {
         const value = queryState.query
@@ -168,8 +166,7 @@ export const FormTriggerArea: React.FunctionComponent<React.PropsWithChildren<Tr
                     validateFilter(filter.field.value, filter.value)
             )
 
-            // No explicit patternType filter means we default
-            // to patternType:literal
+            // No explicit patternType filter means we use the default pattern type
             hasValidPatternTypeFilter =
                 !hasPatternTypeFilter ||
                 filters.some(
@@ -177,7 +174,7 @@ export const FormTriggerArea: React.FunctionComponent<React.PropsWithChildren<Tr
                         filter.type === 'filter' &&
                         resolveFilter(filter.field.value)?.type === FilterType.patterntype &&
                         filter.value &&
-                        isLiteralOrRegexp(filter.value.value)
+                        isValidPatternType(filter.value.value)
                 )
         }
 
@@ -187,14 +184,16 @@ export const FormTriggerArea: React.FunctionComponent<React.PropsWithChildren<Tr
         setHasValidPatternTypeFilter(hasValidPatternTypeFilter)
     }, [queryState.query])
 
+    const defaultPatternType: SearchPatternType = defaultPatternTypeFromSettings(useSettingsCascade())
+
     const completeForm: React.FormEventHandler = useCallback(
         event => {
             event.preventDefault()
             closeCard()
             setTriggerCompleted(true)
-            onQueryChange(`${queryState.query}${hasPatternTypeFilter ? '' : ' patternType:literal'}`)
+            onQueryChange(`${queryState.query}${hasPatternTypeFilter ? '' : ` patternType:${defaultPatternType}`}`)
         },
-        [closeCard, setTriggerCompleted, onQueryChange, queryState.query, hasPatternTypeFilter]
+        [closeCard, setTriggerCompleted, onQueryChange, queryState.query, hasPatternTypeFilter, defaultPatternType]
     )
 
     const cancelForm: React.FormEventHandler = useCallback(
@@ -227,59 +226,42 @@ export const FormTriggerArea: React.FunctionComponent<React.PropsWithChildren<Tr
                     </span>
                     <span className="mt-4">Search query</span>
                     <div>
-                        <div className={classNames(styles.queryInput, 'my-2')}>
+                        <div className="my-2">
                             <div
-                                className={classNames(
-                                    'form-control',
-                                    styles.queryInputField,
-                                    `test-${derivedInputClassName}`
-                                )}
+                                className={classNames(`test-${derivedInputClassName}`)}
                                 data-testid="trigger-query-edit"
                             >
-                                <LazyMonacoQueryInput
+                                <LazyQueryInputFormControl
                                     className="test-trigger-input"
-                                    editorComponent={editorComponent}
-                                    isLightTheme={isLightTheme}
-                                    patternType={SearchPatternType.standard}
+                                    patternType={defaultPatternType}
                                     isSourcegraphDotCom={isSourcegraphDotCom}
                                     caseSensitive={false}
                                     queryState={queryState}
                                     onChange={setQueryState}
-                                    globbing={false}
                                     preventNewLine={true}
                                     autoFocus={true}
-                                    applySuggestionsOnEnter={applySuggestionsOnEnter}
                                 />
                             </div>
-                            <div className={styles.queryInputPreviewLink}>
-                                <Link
-                                    to={`/search?${buildSearchURLQuery(
-                                        queryState.query,
-                                        SearchPatternType.standard,
-                                        false
-                                    )}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="test-preview-link"
-                                >
-                                    Preview results{' '}
-                                    <Icon
-                                        aria-label="Open in new window"
-                                        className={classNames('ml-1', styles.queryInputPreviewLinkIcon)}
-                                        svgPath={mdiOpenInNew}
-                                    />
-                                </Link>
-                            </div>
+                            <Link
+                                to={`/search?${buildSearchURLQuery(queryState.query, defaultPatternType, false)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="test-preview-link d-flex align-items-center flex-gap-1 my-1"
+                            >
+                                Preview results{' '}
+                                <Icon aria-label="Open in new window" className="ml-1" svgPath={mdiOpenInNew} />
+                            </Link>
                         </div>
 
                         <ul className={classNames(styles.checklist, 'mb-4')}>
                             <li>
                                 <ValidQueryChecklistItem
                                     checked={hasValidPatternTypeFilter}
-                                    hint="Code monitors support literal and regex search. Searches are literal by default."
+                                    hint={`Code monitors support keyword, standard, literal and regex search. The default is ${defaultPatternType}`}
                                     dataTestid="patterntype-checkbox"
                                 >
-                                    Is <Code>patternType:literal</Code> or <Code>patternType:regexp</Code>
+                                    Is <Code>patternType:keyword</Code>, <Code>standard</Code>, <Code>literal</Code> or{' '}
+                                    <Code>regexp</Code>
                                 </ValidQueryChecklistItem>
                             </li>
                             <li>

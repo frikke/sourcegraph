@@ -1,8 +1,8 @@
-import { FC, forwardRef, PropsWithChildren, SVGProps } from 'react'
+import { type FC, forwardRef, type PropsWithChildren, type SVGProps } from 'react'
 
 import classNames from 'classnames'
 
-import { ForwardReferenceComponent } from '@sourcegraph/wildcard'
+import type { ForwardReferenceComponent } from '@sourcegraph/wildcard'
 
 import styles from './AggregationLayouts.module.scss'
 
@@ -57,6 +57,7 @@ const BarsBackground: FC<BarsBackgroundProps> = props => {
 
     return (
         <svg
+            role="presentation"
             {...attributes}
             className={classNames(className, styles.zeroStateBackground)}
             xmlns="http://www.w3.org/2000/svg"

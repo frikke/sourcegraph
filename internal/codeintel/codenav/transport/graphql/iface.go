@@ -2,58 +2,41 @@ package graphql
 
 import (
 	"context"
-	"time"
 
-	"github.com/sourcegraph/go-diff/diff"
+	"github.com/sourcegraph/scip/bindings/go/scip"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	"github.com/sourcegraph/sourcegraph/internal/authz"
 	"github.com/sourcegraph/sourcegraph/internal/codeintel/codenav"
 	"github.com/sourcegraph/sourcegraph/internal/codeintel/codenav/shared"
-	"github.com/sourcegraph/sourcegraph/internal/codeintel/stores/gitserver"
-	"github.com/sourcegraph/sourcegraph/internal/codeintel/types"
-	"github.com/sourcegraph/sourcegraph/internal/database"
-	"github.com/sourcegraph/sourcegraph/internal/gitserver/gitdomain"
+	"github.com/sourcegraph/sourcegraph/internal/codeintel/core"
+	uploadsshared "github.com/sourcegraph/sourcegraph/internal/codeintel/uploads/shared"
 )
 
-type Service interface {
-	GetHover(ctx context.Context, args shared.RequestArgs, requestState codenav.RequestState) (_ string, _ types.Range, _ bool, err error)
-	GetReferences(ctx context.Context, args shared.RequestArgs, requestState codenav.RequestState, cursor shared.ReferencesCursor) (_ []types.UploadLocation, nextCursor shared.ReferencesCursor, err error)
-	GetImplementations(ctx context.Context, args shared.RequestArgs, requestState codenav.RequestState, cursor shared.ImplementationsCursor) (_ []types.UploadLocation, nextCursor shared.ImplementationsCursor, err error)
-	GetDefinitions(ctx context.Context, args shared.RequestArgs, requestState codenav.RequestState) (_ []types.UploadLocation, err error)
-	GetDiagnostics(ctx context.Context, args shared.RequestArgs, requestState codenav.RequestState) (diagnosticsAtUploads []shared.DiagnosticAtUpload, _ int, err error)
-	GetRanges(ctx context.Context, args shared.RequestArgs, requestState codenav.RequestState, startLine, endLine int) (adjustedRanges []shared.AdjustedCodeIntelligenceRange, err error)
-	GetStencil(ctx context.Context, args shared.RequestArgs, requestState codenav.RequestState) (adjustedRanges []types.Range, err error)
-
-	// Uploads Service
-	GetDumpsByIDs(ctx context.Context, ids []int) (_ []types.Dump, err error)
-	GetClosestDumpsForBlob(ctx context.Context, repositoryID int, commit, path string, exactPath bool, indexer string) (_ []types.Dump, err error)
-
-	GetUnsafeDB() database.DB
+type CodeNavService interface {
+	GetHover(ctx context.Context, args codenav.PositionalRequestArgs, requestState codenav.RequestState) (_ string, _ shared.Range, _ bool, err error)
+	GetReferences(ctx context.Context, args codenav.OccurrenceRequestArgs, requestState codenav.RequestState, cursor codenav.PreciseCursor) (_ []shared.UploadUsage, nextCursor codenav.PreciseCursor, err error)
+	GetImplementations(ctx context.Context, args codenav.OccurrenceRequestArgs, requestState codenav.RequestState, cursor codenav.PreciseCursor) (_ []shared.UploadUsage, nextCursor codenav.PreciseCursor, err error)
+	GetPrototypes(ctx context.Context, args codenav.OccurrenceRequestArgs, requestState codenav.RequestState, cursor codenav.PreciseCursor) (_ []shared.UploadUsage, nextCursor codenav.PreciseCursor, err error)
+	GetDefinitions(ctx context.Context, args codenav.OccurrenceRequestArgs, requestState codenav.RequestState, cursor codenav.PreciseCursor) (_ []shared.UploadUsage, nextCursor codenav.PreciseCursor, err error)
+	GetDiagnostics(ctx context.Context, args codenav.PositionalRequestArgs, requestState codenav.RequestState) (diagnosticsAtUploads []codenav.DiagnosticAtUpload, _ int, err error)
+	GetRanges(ctx context.Context, args codenav.PositionalRequestArgs, requestState codenav.RequestState, startLine, endLine int) (adjustedRanges []codenav.AdjustedCodeIntelligenceRange, err error)
+	GetStencil(ctx context.Context, args codenav.PositionalRequestArgs, requestState codenav.RequestState) (adjustedRanges []shared.Range, err error)
+	// The resulting uploads are guaranteed to be unique per (indexer, root) pair,
+	// see NOTE(id: closest-uploads-postcondition).
+	GetClosestCompletedUploadsForBlob(context.Context, uploadsshared.UploadMatchingOptions) (_ []uploadsshared.CompletedUpload, err error)
+	VisibleUploadsForPath(ctx context.Context, requestState codenav.RequestState) ([]uploadsshared.CompletedUpload, error)
+	SnapshotForDocument(ctx context.Context, repositoryID api.RepoID, commit api.CommitID, path core.RepoRelPath, uploadID int) (data []shared.SnapshotData, err error)
+	SCIPDocument(_ context.Context, _ codenav.GitTreeTranslator, _ core.UploadLike, targetCommit api.CommitID, _ core.RepoRelPath) (*scip.Document, error)
+	// PreciseUsages implements the precise part of usagesForSymbol.
+	//
+	// Subsequent calls can pass the returned cursor (if non-empty) via args.Cursor.
+	PreciseUsages(ctx context.Context, requestState codenav.RequestState, args codenav.UsagesForSymbolResolvedArgs) (_ []shared.UploadUsage, nextCursor core.Option[codenav.UsagesCursor], err error)
+	SyntacticUsages(context.Context, codenav.GitTreeTranslator, codenav.UsagesForSymbolArgs) (codenav.SyntacticUsagesResult, *codenav.SyntacticUsagesError)
+	SearchBasedUsages(context.Context, codenav.GitTreeTranslator, codenav.UsagesForSymbolArgs, codenav.SearchBasedSyntacticFilter) (codenav.SearchBasedUsagesResult, error)
 }
 
-type GitserverClient interface {
-	CommitsExist(ctx context.Context, commits []gitserver.RepositoryCommit) ([]bool, error)
-	DiffPath(ctx context.Context, checker authz.SubRepoPermissionChecker, repo api.RepoName, sourceCommit, targetCommit, path string) ([]*diff.Hunk, error)
-}
+var _ CodeNavService = &codenav.Service{}
 
 type AutoIndexingService interface {
-	GetIndexes(ctx context.Context, opts types.GetIndexesOptions) (_ []types.Index, _ int, err error)
-	GetIndexByID(ctx context.Context, id int) (_ types.Index, _ bool, err error)
-	GetIndexesByIDs(ctx context.Context, ids ...int) (_ []types.Index, err error)
-	GetUnsafeDB() database.DB
-	GetListTags(ctx context.Context, repo api.RepoName, commitObjs ...string) (_ []*gitdomain.Tag, err error)
 	QueueRepoRev(ctx context.Context, repositoryID int, rev string) error
-}
-
-type UploadsService interface {
-	GetUploads(ctx context.Context, opts types.GetUploadsOptions) (uploads []types.Upload, totalCount int, err error)
-	GetAuditLogsForUpload(ctx context.Context, uploadID int) (_ []types.UploadLog, err error)
-	GetListTags(ctx context.Context, repo api.RepoName, commitObjs ...string) (_ []*gitdomain.Tag, err error)
-	GetUploadDocumentsForPath(ctx context.Context, bundleID int, pathPattern string) ([]string, int, error)
-	GetUploadsByIDs(ctx context.Context, ids ...int) (_ []types.Upload, err error)
-}
-
-type PolicyService interface {
-	GetRetentionPolicyOverview(ctx context.Context, upload types.Upload, matchesOnly bool, first int, after int64, query string, now time.Time) (matches []types.RetentionPolicyMatchCandidate, totalCount int, err error)
 }

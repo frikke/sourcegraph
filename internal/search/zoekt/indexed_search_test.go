@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/RoaringBitmap/roaring"
+
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/search"
 	searchbackend "github.com/sourcegraph/sourcegraph/internal/search/backend"
@@ -93,8 +94,8 @@ func TestIndexedSearch(t *testing.T) {
 			},
 			wantCommon: streaming.Stats{
 				Status: mkStatusMap(map[string]search.RepoStatus{
-					"foo/bar":    search.RepoStatusTimedout,
-					"foo/foobar": search.RepoStatusTimedout,
+					"foo/bar":    search.RepoStatusTimedOut,
+					"foo/foobar": search.RepoStatusTimedOut,
 				}),
 			},
 		},
@@ -273,9 +274,9 @@ func TestIndexedSearch(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			zoekt := &searchbackend.FakeSearcher{
-				Result: &zoekt.SearchResult{Files: tt.args.results},
-				Repos:  zoektRepos,
+			fakeZoekt := &searchbackend.FakeStreamer{
+				Results: []*zoekt.SearchResult{{Files: tt.args.results}},
+				Repos:   zoektRepos,
 			}
 
 			var resultTypes result.Types
@@ -293,7 +294,7 @@ func TestIndexedSearch(t *testing.T) {
 				context.Background(),
 				logtest.Scoped(t),
 				tt.args.repos,
-				zoekt,
+				fakeZoekt,
 				search.TextRequest,
 				query.Yes,
 				query.ContainsRefGlobs(q),
@@ -306,16 +307,21 @@ func TestIndexedSearch(t *testing.T) {
 				t.Errorf("unindexed mismatch (-want +got):\n%s", diff)
 			}
 
-			zoektJob := &RepoSubsetTextSearchJob{
-				Repos:          indexed,
-				Query:          zoektQuery,
-				Typ:            search.TextRequest,
+			zoektParams := &search.ZoektParameters{
 				FileMatchLimit: tt.args.fileMatchLimit,
 				Select:         tt.args.selectPath,
-				Since:          tt.args.since,
+				Typ:            search.TextRequest,
 			}
 
-			_, err = zoektJob.Run(tt.args.ctx, job.RuntimeClients{Zoekt: zoekt}, agg)
+			zoektJob := &RepoSubsetTextSearchJob{
+				Repos:       indexed,
+				Query:       zoektQuery,
+				Typ:         search.TextRequest,
+				ZoektParams: zoektParams,
+				Since:       tt.args.since,
+			}
+
+			_, err = zoektJob.Run(tt.args.ctx, job.RuntimeClients{Zoekt: fakeZoekt}, agg)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("zoektSearchHEAD() error = %v, wantErr = %v", err, tt.wantErr)
 				return
@@ -370,7 +376,7 @@ func TestZoektIndexedRepos(t *testing.T) {
 		"foo/unindexed-two",
 	)
 
-	zoektRepos := map[uint32]*zoekt.MinimalRepoListEntry{}
+	zoektRepos := zoekt.ReposMap{}
 	for i, branches := range [][]zoekt.RepositoryBranch{
 		{
 			{Name: "HEAD", Version: "deadbeef"},
@@ -388,7 +394,7 @@ func TestZoektIndexedRepos(t *testing.T) {
 	} {
 		r := repos[i]
 		branches := branches
-		zoektRepos[uint32(r.Repo.ID)] = &zoekt.MinimalRepoListEntry{Branches: branches}
+		zoektRepos[uint32(r.Repo.ID)] = zoekt.MinimalRepoListEntry{Branches: branches}
 	}
 
 	cases := []struct {
@@ -433,67 +439,6 @@ func TestZoektIndexedRepos(t *testing.T) {
 	}
 }
 
-func TestZoektResultCountFactor(t *testing.T) {
-	cases := []struct {
-		name         string
-		numRepos     int
-		globalSearch bool
-		pattern      *search.TextPatternInfo
-		want         int
-	}{
-		{
-			name:     "One repo implies max scaling factor",
-			numRepos: 1,
-			pattern:  &search.TextPatternInfo{},
-			want:     100,
-		},
-		{
-			name:     "Eleven repos implies a scaling factor between min and max",
-			numRepos: 11,
-			pattern:  &search.TextPatternInfo{},
-			want:     8,
-		},
-		{
-			name:     "More than 500 repos implies a min scaling factor",
-			numRepos: 501,
-			pattern:  &search.TextPatternInfo{},
-			want:     1,
-		},
-		{
-			name:     "Setting a count greater than defautl max results (30) adapts scaling factor",
-			numRepos: 501,
-			pattern:  &search.TextPatternInfo{FileMatchLimit: 100},
-			want:     10,
-		},
-		{
-			name:         "for global searches, k should be 1",
-			numRepos:     0,
-			globalSearch: true,
-			pattern:      &search.TextPatternInfo{},
-			want:         1,
-		},
-		{
-			name:         "for global searches, k should be 1, adjusted by the FileMatchLimit",
-			numRepos:     0,
-			globalSearch: true,
-			pattern:      &search.TextPatternInfo{FileMatchLimit: 100},
-			want:         10,
-		},
-	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			got := (&Options{
-				NumRepos:       tt.numRepos,
-				FileMatchLimit: tt.pattern.FileMatchLimit,
-				GlobalSearch:   tt.globalSearch,
-			}).resultCountFactor()
-			if tt.want != got {
-				t.Fatalf("Want scaling factor %d but got %d", tt.want, got)
-			}
-		})
-	}
-}
-
 func TestZoektIndexedRepos_single(t *testing.T) {
 	branchesRepos := func(branch string, repo api.RepoID) map[string]*zoektquery.BranchRepos {
 		return map[string]*zoektquery.BranchRepos{
@@ -509,7 +454,7 @@ func TestZoektIndexedRepos_single(t *testing.T) {
 			Revs: []string{revSpec},
 		}
 	}
-	zoektRepos := map[uint32]*zoekt.MinimalRepoListEntry{
+	zoektRepos := zoekt.ReposMap{
 		1: {
 			Branches: []zoekt.RepositoryBranch{
 				{
@@ -654,6 +599,18 @@ func TestZoektFileMatchToSymbolResults(t *testing.T) {
 				Start: zoekt.Location{LineNumber: 20, Column: 38},
 			}},
 			SymbolInfo: []*zoekt.Symbol{symbolInfo("baz")},
+		}, {
+			// Test we dedup when we have two results for foobar.
+			Content:      []byte("symbol foobar symbol bam"),
+			ContentStart: zoekt.Location{LineNumber: 25, Column: 1},
+			Ranges: []zoekt.Range{{
+				Start: zoekt.Location{LineNumber: 25, Column: 8},
+			}, {
+				Start: zoekt.Location{LineNumber: 25, Column: 11},
+			}, {
+				Start: zoekt.Location{LineNumber: 25, Column: 23},
+			}},
+			SymbolInfo: []*zoekt.Symbol{symbolInfo("foobar"), symbolInfo("foobar"), symbolInfo("bam")},
 		}},
 	}
 
@@ -679,6 +636,14 @@ func TestZoektFileMatchToSymbolResults(t *testing.T) {
 		Name:      "baz",
 		Line:      20,
 		Character: 37,
+	}, {
+		Name:      "foobar",
+		Line:      25,
+		Character: 7,
+	}, {
+		Name:      "bam",
+		Line:      25,
+		Character: 22,
 	},
 	}
 	for i := range want {
@@ -774,7 +739,7 @@ func TestContextWithoutDeadline(t *testing.T) {
 	ctxWithDeadline, cancelWithDeadline := context.WithTimeout(context.Background(), time.Minute)
 	defer cancelWithDeadline()
 
-	tr, ctxWithDeadline := trace.New(ctxWithDeadline, "", "")
+	tr, ctxWithDeadline := trace.New(ctxWithDeadline, "")
 
 	if _, ok := ctxWithDeadline.Deadline(); !ok {
 		t.Fatal("expected context to have deadline")
@@ -788,7 +753,7 @@ func TestContextWithoutDeadline(t *testing.T) {
 	}
 
 	// We want to keep trace info
-	if tr2 := trace.TraceFromContext(ctxNoDeadline); tr != tr2 {
+	if tr2 := trace.FromContext(ctxNoDeadline); !tr.SpanContext().Equal(tr2.SpanContext()) {
 		t.Error("trace information not propogated")
 	}
 
@@ -817,18 +782,31 @@ func TestContextWithoutDeadline_cancel(t *testing.T) {
 func makeRepositoryRevisions(repos ...string) []*search.RepositoryRevisions {
 	r := make([]*search.RepositoryRevisions, len(repos))
 	for i, repospec := range repos {
-		repoName, revSpecs := search.ParseRepositoryRevisions(repospec)
-		revs := make([]string, 0, len(revSpecs))
-		for _, revSpec := range revSpecs {
+		repoRevs, err := query.ParseRepositoryRevisions(repospec)
+		if err != nil {
+			panic(errors.Errorf("unexpected error parsing repo spec %s", repospec))
+		}
+
+		revs := make([]string, 0, len(repoRevs.Revs))
+		for _, revSpec := range repoRevs.Revs {
 			revs = append(revs, revSpec.RevSpec)
 		}
 		if len(revs) == 0 {
 			// treat empty list as HEAD
 			revs = []string{"HEAD"}
 		}
-		r[i] = &search.RepositoryRevisions{Repo: mkRepos(repoName)[0], Revs: revs}
+		r[i] = &search.RepositoryRevisions{Repo: mkRepos(repoRevs.Repo)[0], Revs: revs}
 	}
 	return r
+}
+
+func makeRepositoryRevisionsMap(repos ...string) map[api.RepoID]*search.RepositoryRevisions {
+	r := makeRepositoryRevisions(repos...)
+	rMap := make(map[api.RepoID]*search.RepositoryRevisions, len(r))
+	for _, repoRev := range r {
+		rMap[repoRev.Repo.ID] = repoRev
+	}
+	return rMap
 }
 
 func mkRepos(names ...string) []types.MinimalRepo {
@@ -882,7 +860,7 @@ func TestZoektFileMatchToMultilineMatches(t *testing.T) {
 		},
 		// One chunk per line, not one per fragment
 		output: result.ChunkMatches{{
-			Content:      string("testing 1 2 3"),
+			Content:      "testing 1 2 3",
 			ContentStart: result.Location{0, 0, 0},
 			Ranges: result.Ranges{{
 				Start: result.Location{8, 0, 8},
@@ -947,6 +925,100 @@ func TestZoektFileMatchToPathMatchRanges(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := zoektFileMatchToPathMatchRanges(tc.input, zoektQueryRegexps)
 			require.Equal(t, tc.output, got)
+		})
+	}
+}
+
+func TestGetRepoRevsFromBranchRepos_SingleRepo(t *testing.T) {
+	cases := []struct {
+		name            string
+		revisions       []string
+		indexedBranches []string
+		wantRepoRevs    []string
+	}{
+		{
+			name:            "no revisions specified for the indexed branch",
+			indexedBranches: []string{"HEAD"},
+			wantRepoRevs:    []string{"HEAD"},
+		}, {
+			name:            "specific revision is the latest commit ID indexed for the default branch of repo",
+			revisions:       []string{"latestCommitID"},
+			indexedBranches: []string{"HEAD"},
+			wantRepoRevs:    []string{"HEAD"},
+		}, {
+			name:            "specific revision that is also a non default branch which is indexed",
+			revisions:       []string{"myIndexedRevision"},
+			indexedBranches: []string{"myIndexedRevision"},
+			wantRepoRevs:    []string{"myIndexedRevision"},
+		}, {
+			name:            "specific revision is the latest commit ID indexed for a non default branch which is indexed",
+			revisions:       []string{"latestCommitID"},
+			indexedBranches: []string{"myIndexedFeatureBranch"},
+			wantRepoRevs:    []string{"myIndexedFeatureBranch"},
+		}, {
+			name:            "specific revision is the latest commit ID indexed for one of multiple indexed branches",
+			revisions:       []string{"someCommitID"},
+			indexedBranches: []string{"HEAD", "myIndexedFeatureBranch", "myIndexedRevision"},
+			wantRepoRevs:    []string{""},
+		}, {
+			name:            "specific revision is the latest commit ID indexed for one of multiple indexed branches, including the specified revision",
+			revisions:       []string{"someCommitID"},
+			indexedBranches: []string{"HEAD", "myIndexedFeatureBranch", "someCommitID"},
+			wantRepoRevs:    []string{"someCommitID"},
+		}, {
+			name:            "multiple specified revisions: one is indexed default branch and one is an indexed revision",
+			revisions:       []string{"someCommitID0", "someCommitID1"},
+			indexedBranches: []string{"HEAD", "someCommitID0"},
+			wantRepoRevs:    []string{"someCommitID0", ""},
+		}, {
+			name:            "multiple specified revisions: one is an indexed revision and the other cannot be matched by branch name so default to empty string",
+			revisions:       []string{"someCommitID0", "someCommitID1"},
+			indexedBranches: []string{"myIndexedFeatureBranch", "someCommitID0"},
+			wantRepoRevs:    []string{"someCommitID0", ""},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoWithRevs := "foo/indexed-one"
+
+			if len(tc.revisions) > 1 {
+				repoWithRevs = fmt.Sprintf("%v@%v", repoWithRevs, strings.Join(tc.revisions, ":"))
+			} else if len(tc.revisions) > 0 {
+				repoWithRevs = fmt.Sprintf("%v@%v", repoWithRevs, tc.revisions[0])
+			}
+
+			repoRevs := makeRepositoryRevisionsMap(repoWithRevs)
+
+			inputBranchRepos := make(map[string]*zoektquery.BranchRepos, len(tc.indexedBranches))
+
+			if len(repoRevs) != 1 {
+				t.Fatal("repoRevs map should represent revisions for no more than one repo with ID")
+			}
+
+			var wantRepoID api.RepoID
+			for repoID := range repoRevs {
+				wantRepoID = repoID
+				break
+			}
+
+			for _, branch := range tc.indexedBranches {
+				repos := roaring.New()
+				repos.Add(uint32(wantRepoID))
+				inputBranchRepos[branch] = &zoektquery.BranchRepos{Branch: branch, Repos: repos}
+			}
+
+			indexed := IndexedRepoRevs{
+				RepoRevs:    repoRevs,
+				branchRepos: inputBranchRepos,
+			}
+
+			gotRepoRevs := indexed.GetRepoRevsFromBranchRepos()
+			for _, revs := range gotRepoRevs {
+				if diff := cmp.Diff(tc.wantRepoRevs, revs.Revs); diff != "" {
+					t.Errorf("unindexed mismatch (-want +got):\n%s", diff)
+				}
+			}
 		})
 	}
 }

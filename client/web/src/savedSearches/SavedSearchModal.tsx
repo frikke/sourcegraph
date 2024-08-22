@@ -1,22 +1,21 @@
 import * as React from 'react'
 
 import classNames from 'classnames'
-import * as H from 'history'
+import type { NavigateFunction } from 'react-router-dom'
 
-import { Form } from '@sourcegraph/branded/src/components/Form'
-import { SearchPatternTypeProps } from '@sourcegraph/search'
-import { Button, Modal, Select, H3 } from '@sourcegraph/wildcard'
+import type { SearchPatternTypeProps } from '@sourcegraph/shared/src/search'
+import { type TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { Button, Form, H3, Modal, Select } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../auth'
+import type { AuthenticatedUser } from '../auth'
 
 import styles from './SavedSearchModal.module.scss'
 
-interface Props extends SearchPatternTypeProps {
-    location: H.Location
-    history: H.History
-    authenticatedUser: AuthenticatedUser | null
+interface Props extends SearchPatternTypeProps, TelemetryV2Props {
+    authenticatedUser: Pick<AuthenticatedUser, 'organizations' | 'username'> | null
     query?: string
     onDidCancel: () => void
+    navigate: NavigateFunction
 }
 
 enum UserOrOrg {
@@ -37,6 +36,7 @@ export class SavedSearchModal extends React.Component<Props, State> {
         this.state = {
             saveLocation: UserOrOrg.User,
         }
+        props.telemetryRecorder.recordEvent('search.resultsInfoBar.savedQueriesModal', 'view')
     }
 
     private onLocationChange = (event: React.ChangeEvent<HTMLSelectElement>): void => {
@@ -82,7 +82,7 @@ export class SavedSearchModal extends React.Component<Props, State> {
                                     </option>
                                     {this.props.authenticatedUser.organizations.nodes.map(org => (
                                         <option value={org.name} key={org.name}>
-                                            {org.displayName ? org.displayName : org.name}
+                                            {org.name}
                                         </option>
                                     ))}
                                 </Select>
@@ -105,10 +105,10 @@ export class SavedSearchModal extends React.Component<Props, State> {
     private onSubmit = (): void => {
         if (this.props.query && this.props.authenticatedUser) {
             const encodedQuery = encodeURIComponent(this.props.query)
-            this.props.history.push(
+            this.props.navigate(
                 this.state.saveLocation.toLowerCase() === 'user'
-                    ? `/users/${this.props.authenticatedUser.username}/searches/add?query=${encodedQuery}&patternType=${this.props.patternType}`
-                    : `/organizations/${this.state.organization!}/searches/add?query=${encodedQuery}&patternType=${
+                    ? `/users/${this.props.authenticatedUser.username}/searches/new?query=${encodedQuery}&patternType=${this.props.patternType}`
+                    : `/organizations/${this.state.organization!}/searches/new?query=${encodedQuery}&patternType=${
                           this.props.patternType
                       }`
             )

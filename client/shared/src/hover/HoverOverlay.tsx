@@ -1,22 +1,18 @@
-import React, { CSSProperties, useCallback, useState } from 'react'
+import React, { type CSSProperties, useCallback, useState } from 'react'
 
 import { mdiClose } from '@mdi/js'
 import classNames from 'classnames'
 
 import { isErrorLike, sanitizeClass } from '@sourcegraph/common'
-// eslint-disable-next-line no-restricted-imports
 import { Card, Icon, Button } from '@sourcegraph/wildcard'
 
-import { ActionItem, ActionItemComponentProps } from '../actions/ActionItem'
-import { NotificationType } from '../api/extension/extensionHostApi'
-import { PlatformContextProps } from '../platform/context'
-import { TelemetryProps } from '../telemetry/telemetryService'
-import { ThemeProps } from '../theme'
+import { ActionItem, type ActionItemComponentProps } from '../actions/ActionItem'
+import type { TelemetryV2Props } from '../telemetry'
+import type { TelemetryProps } from '../telemetry/telemetryService'
 
 import { CopyLinkIcon } from './CopyLinkIcon'
 import { toNativeEvent } from './helpers'
-import type { HoverContext, HoverOverlayBaseProps, GetAlertClassName, GetAlertVariant } from './HoverOverlay.types'
-import { HoverOverlayAlerts, HoverOverlayAlertsProps } from './HoverOverlayAlerts'
+import type { HoverContext, HoverOverlayBaseProps } from './HoverOverlay.types'
 import { HoverOverlayContents } from './HoverOverlayContents'
 import { HoverOverlayLogo } from './HoverOverlayLogo'
 import { useLogTelemetryEvent } from './useLogTelemetryEvent'
@@ -43,16 +39,7 @@ export interface HoverOverlayClassProps {
     actionItemPressedClassName?: string
 
     contentClassName?: string
-
-    /**
-     * Allows providing any custom className to style the notifications as desired.
-     */
-    getAlertClassName?: GetAlertClassName
-
-    /**
-     * Allows providing a specific variant style for use in branded Sourcegraph applications.
-     */
-    getAlertVariant?: GetAlertVariant
+    actionsClassName?: string
 }
 
 export interface HoverOverlayProps
@@ -60,9 +47,7 @@ export interface HoverOverlayProps
         ActionItemComponentProps,
         HoverOverlayClassProps,
         TelemetryProps,
-        ThemeProps,
-        Pick<HoverOverlayAlertsProps, 'onAlertDismissed'>,
-        PlatformContextProps<'settings'> {
+        TelemetryV2Props {
     /** A ref callback to get the root overlay element. Use this to calculate the position. */
     hoverRef?: React.Ref<HTMLDivElement>
 
@@ -108,8 +93,8 @@ export const HoverOverlay: React.FunctionComponent<React.PropsWithChildren<Hover
         hoverRef,
         overlayPosition,
         actionsOrError,
-        platformContext,
         telemetryService,
+        telemetryRecorder,
         extensionsController,
         pinOptions,
         location,
@@ -121,12 +106,9 @@ export const HoverOverlay: React.FunctionComponent<React.PropsWithChildren<Hover
         actionItemClassName,
         actionItemPressedClassName,
         contentClassName,
+        actionsClassName,
 
         actionItemStyleProps,
-
-        getAlertClassName,
-        getAlertVariant,
-        onAlertDismissed,
 
         useBrandedLogo,
     } = props
@@ -149,7 +131,6 @@ export const HoverOverlay: React.FunctionComponent<React.PropsWithChildren<Hover
         <Card
             // needed for dynamic styling
             data-testid="hover-overlay"
-            // eslint-disable-next-line react/forbid-dom-props
             style={getOverlayStyle(overlayPosition)}
             className={classNames(hoverOverlayStyle.card, hoverOverlayStyle.hoverOverlay, className)}
             ref={hoverRef}
@@ -183,24 +164,9 @@ export const HoverOverlay: React.FunctionComponent<React.PropsWithChildren<Hover
                     hoverOrError={hoverOrError}
                     iconClassName={iconClassName}
                     badgeClassName={badgeClassName}
-                    errorAlertClassName={getAlertClassName?.(NotificationType.Error)}
-                    errorAlertVariant={getAlertVariant?.(NotificationType.Error)}
                     contentClassName={contentClassName}
                 />
             </div>
-            {hoverOrError &&
-                hoverOrError !== LOADING &&
-                !isErrorLike(hoverOrError) &&
-                hoverOrError.alerts &&
-                hoverOrError.alerts.length > 0 && (
-                    <HoverOverlayAlerts
-                        hoverAlerts={hoverOrError.alerts}
-                        iconClassName={iconClassName}
-                        getAlertClassName={getAlertClassName}
-                        getAlertVariant={getAlertVariant}
-                        onAlertDismissed={onAlertDismissed}
-                    />
-                )}
             <div className={hoverOverlayStyle.actionsContainer}>
                 {actionsOrError !== undefined &&
                     actionsOrError !== null &&
@@ -208,7 +174,7 @@ export const HoverOverlay: React.FunctionComponent<React.PropsWithChildren<Hover
                     !isErrorLike(actionsOrError) &&
                     actionsOrError.length > 0 && (
                         <div className={hoverOverlayStyle.actions}>
-                            <div className={hoverOverlayStyle.actionsInner}>
+                            <div className={classNames(hoverOverlayStyle.actionsInner, actionsClassName)}>
                                 {actionsOrError.map((action, index) => (
                                     <ActionItem
                                         key={index}
@@ -224,9 +190,8 @@ export const HoverOverlay: React.FunctionComponent<React.PropsWithChildren<Hover
                                         variant="actionItem"
                                         disabledDuringExecution={true}
                                         showLoadingSpinnerDuringExecution={true}
-                                        showInlineError={true}
-                                        platformContext={platformContext}
                                         telemetryService={telemetryService}
+                                        telemetryRecorder={telemetryRecorder}
                                         extensionsController={extensionsController}
                                         location={location}
                                         actionItemStyleProps={actionItemStyleProps}
@@ -240,6 +205,7 @@ export const HoverOverlay: React.FunctionComponent<React.PropsWithChildren<Hover
 
                 {pinOptions && (
                     <button
+                        data-testid="hover-copy-link"
                         className={classNames('d-flex', 'align-items-center', hoverOverlayStyle.actionsCopyLink)}
                         onClick={onCopyLink}
                         onKeyPress={onCopyLink}

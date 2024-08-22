@@ -1,10 +1,8 @@
 import * as React from 'react'
 
-import * as H from 'history'
-
-import { Connection } from './ConnectionType'
-import { ConnectionList, ShowMoreButton, SummaryContainer, ConnectionSummary } from './ui'
-import { hasID, hasNextPage, hasDisplayName } from './utils'
+import type { Connection } from './ConnectionType'
+import { ConnectionList, ConnectionSummary, ShowMoreButton, SummaryContainer } from './ui'
+import { hasDisplayName, hasID, hasNextPage } from './utils'
 
 /**
  * Props for the FilteredConnection component's result nodes and associated summary/pagination controls.
@@ -83,7 +81,7 @@ export interface ConnectionNodesDisplayProps {
 
     withCenteredSummary?: boolean
 
-    /** A function that generates an aria label given a node display name */
+    /** A function that generates an aria label given a node display name. */
     ariaLabelFunction?: (displayName: string) => string
 }
 
@@ -93,28 +91,7 @@ interface ConnectionNodesProps<C extends Connection<N>, N, NP = {}, HP = {}>
     /** The fetched connection data or an error (if an error occurred). */
     connection: C
 
-    location: H.Location
-
     onShowMore: () => void
-}
-
-export const getTotalCount = <N,>({ totalCount, nodes, pageInfo }: Connection<N>, first: number): number | null => {
-    if (typeof totalCount === 'number') {
-        return totalCount
-    }
-
-    if (
-        // TODO(sqs): this line below is wrong because `first` might've just been changed and
-        // `nodes` is still the data fetched from before `first` was changed.
-        // this causes the UI to incorrectly show "N items total" even when the count is indeterminate right
-        // after the user clicks "Show more" but before the new data is loaded.
-        nodes.length < first ||
-        (nodes.length === first && pageInfo && typeof pageInfo.hasNextPage === 'boolean' && !pageInfo.hasNextPage)
-    ) {
-        return nodes.length
-    }
-
-    return null
 }
 
 export const ConnectionNodes = <C extends Connection<N>, N, NP = {}, HP = {}>({
@@ -130,7 +107,6 @@ export const ConnectionNodes = <C extends Connection<N>, N, NP = {}, HP = {}>({
     emptyElement,
     totalCountSummaryComponent,
     connection,
-    first,
     noSummaryIfAllNodesVisible,
     noun,
     pluralNoun,
@@ -146,7 +122,6 @@ export const ConnectionNodes = <C extends Connection<N>, N, NP = {}, HP = {}>({
 
     const summary = (
         <ConnectionSummary
-            first={first}
             noSummaryIfAllNodesVisible={noSummaryIfAllNodesVisible}
             totalCountSummaryComponent={totalCountSummaryComponent}
             noun={noun}

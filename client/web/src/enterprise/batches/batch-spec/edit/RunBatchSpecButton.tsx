@@ -4,6 +4,8 @@ import { mdiInformationOutline, mdiChevronDown } from '@mdi/js'
 import { VisuallyHidden } from '@reach/visually-hidden'
 import { animated } from 'react-spring'
 
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
 import {
     Button,
     Checkbox,
@@ -19,12 +21,11 @@ import {
     Tooltip,
 } from '@sourcegraph/wildcard'
 
-import { eventLogger } from '../../../../tracking/eventLogger'
-import { ExecutionOptions } from '../BatchSpecContext'
+import type { ExecutionOptions } from '../BatchSpecContext'
 
 import styles from './RunBatchSpecButton.module.scss'
 
-interface RunBatchSpecButtonProps {
+interface RunBatchSpecButtonProps extends TelemetryV2Props {
     execute: () => void
     /**
      * Whether or not the button should be disabled. An optional tooltip string to display
@@ -40,6 +41,7 @@ export const RunBatchSpecButton: React.FunctionComponent<React.PropsWithChildren
     isExecutionDisabled = false,
     options,
     onChangeOptions,
+    telemetryRecorder,
 }) => {
     const [isOpen, setIsOpen] = useState(false)
 
@@ -54,8 +56,10 @@ export const RunBatchSpecButton: React.FunctionComponent<React.PropsWithChildren
                         variant="primary"
                         onClick={() => {
                             execute()
-                            eventLogger.log('batch_change_editor:run_batch_spec:clicked')
+                            EVENT_LOGGER.log('batch_change_editor:run_batch_spec:clicked')
+                            telemetryRecorder.recordEvent('batchChange.editor.runSpec', 'click')
                         }}
+                        aria-label={typeof isExecutionDisabled === 'string' ? isExecutionDisabled : undefined}
                         disabled={!!isExecutionDisabled}
                     >
                         Run batch spec
@@ -74,8 +78,7 @@ export const RunBatchSpecButton: React.FunctionComponent<React.PropsWithChildren
 
             <PopoverContent className={styles.menuList} position={Position.bottomEnd}>
                 <H3 className="pb-2 pt-3 pl-3 pr-3 m-0">Execution options</H3>
-                {/* TODO: Once the execution mutation honors execution options, this can be removed. */}
-                <ExecutionOption moreInfo="When this batch spec is executed, it will not use cached results from any previous execution. Currently, toggling this option also requires updating the workspaces preview.">
+                <ExecutionOption moreInfo="Toggle to run workspace executions even if cache entries exist.">
                     <Checkbox
                         name="run-without-cache"
                         id="run-without-cache"

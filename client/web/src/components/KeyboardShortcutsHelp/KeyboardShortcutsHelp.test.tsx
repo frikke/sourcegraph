@@ -1,9 +1,11 @@
 import { useState } from 'react'
 
 import { fireEvent, screen } from '@testing-library/react'
+import { describe, expect, test } from 'vitest'
 
 import { Shortcut, ShortcutProvider } from '@sourcegraph/shared/src/react-shortcuts'
-import { renderWithBrandedContext } from '@sourcegraph/shared/src/testing'
+import { MockedTestProvider } from '@sourcegraph/shared/src/testing/apollo'
+import { renderWithBrandedContext } from '@sourcegraph/wildcard/src/testing'
 
 import { KeyboardShortcutsHelp } from './KeyboardShortcutsHelp'
 
@@ -13,10 +15,12 @@ const showHelpShortcut = 'Y'
 const ShortcutTriggerExample = () => {
     const [isOpen, setIsOpen] = useState(false)
     return (
-        <ShortcutProvider>
-            <Shortcut ordered={[showHelpShortcut]} onMatch={() => setIsOpen(true)} />
-            <KeyboardShortcutsHelp isOpen={isOpen} onDismiss={() => setIsOpen(false)} />
-        </ShortcutProvider>
+        <MockedTestProvider mocks={[]}>
+            <ShortcutProvider>
+                <Shortcut ordered={[showHelpShortcut]} onMatch={() => setIsOpen(true)} />
+                <KeyboardShortcutsHelp isOpen={isOpen} onDismiss={() => setIsOpen(false)} />
+            </ShortcutProvider>
+        </MockedTestProvider>
     )
 }
 

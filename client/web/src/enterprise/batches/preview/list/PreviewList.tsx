@@ -1,37 +1,37 @@
 import React, { useCallback, useContext, useState } from 'react'
 
 import { mdiMagnify } from '@mdi/js'
-import * as H from 'history'
 import { tap } from 'rxjs/operators'
 
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
 import { Container, Icon } from '@sourcegraph/wildcard'
 
 import { DismissibleAlert } from '../../../../components/DismissibleAlert'
-import { FilteredConnection, FilteredConnectionQueryArguments } from '../../../../components/FilteredConnection'
-import { BatchSpecApplyPreviewVariables, ChangesetApplyPreviewFields, Scalars } from '../../../../graphql-operations'
+import { FilteredConnection, type FilteredConnectionQueryArguments } from '../../../../components/FilteredConnection'
+import type {
+    BatchSpecApplyPreviewVariables,
+    ChangesetApplyPreviewFields,
+    Scalars,
+} from '../../../../graphql-operations'
 import { MultiSelectContext } from '../../MultiSelectContext'
 import { BatchChangePreviewContext } from '../BatchChangePreviewContext'
-import { PreviewPageAuthenticatedUser } from '../BatchChangePreviewPage'
+import type { PreviewPageAuthenticatedUser } from '../BatchChangePreviewPage'
 import { filterPublishableIDs } from '../utils'
 
 import {
     queryChangesetApplyPreview as _queryChangesetApplyPreview,
-    queryChangesetSpecFileDiffs,
-    queryPublishableChangesetSpecIDs as _queryPublishableChangesetSpecIDs,
+    type queryChangesetSpecFileDiffs,
+    type queryPublishableChangesetSpecIDs as _queryPublishableChangesetSpecIDs,
 } from './backend'
-import { ChangesetApplyPreviewNode, ChangesetApplyPreviewNodeProps } from './ChangesetApplyPreviewNode'
+import { ChangesetApplyPreviewNode, type ChangesetApplyPreviewNodeProps } from './ChangesetApplyPreviewNode'
 import { EmptyPreviewListElement } from './EmptyPreviewListElement'
 import { PreviewFilterRow } from './PreviewFilterRow'
-import { PreviewListHeader, PreviewListHeaderProps } from './PreviewListHeader'
+import { PreviewListHeader, type PreviewListHeaderProps } from './PreviewListHeader'
 import { PreviewSelectRow } from './PreviewSelectRow'
 
 import styles from './PreviewList.module.scss'
 
-interface Props extends ThemeProps {
+interface Props {
     batchSpecID: Scalars['ID']
-    history: H.History
-    location: H.Location
     authenticatedUser: PreviewPageAuthenticatedUser
 
     /** For testing only. */
@@ -49,19 +49,15 @@ interface Props extends ThemeProps {
  */
 export const PreviewList: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
     batchSpecID,
-    history,
-    location,
     authenticatedUser,
-    isLightTheme,
 
     queryChangesetApplyPreview = _queryChangesetApplyPreview,
     queryChangesetSpecFileDiffs,
     expandChangesetDescriptions,
     queryPublishableChangesetSpecIDs,
 }) => {
-    const { selected, areAllVisibleSelected, isSelected, toggleSingle, toggleVisible, setVisible } = useContext(
-        MultiSelectContext
-    )
+    const { selected, areAllVisibleSelected, isSelected, toggleSingle, toggleVisible, setVisible } =
+        useContext(MultiSelectContext)
     // The user can modify the desired publication states for changesets in this preview
     // list from the UI. However, these modifications are transient and are not persisted
     // to the backend (until the user applies the batch change and the publication states
@@ -70,9 +66,8 @@ export const PreviewList: React.FunctionComponent<React.PropsWithChildren<Props>
     // override the original publication states computed by the reconciler on the backend.
     // `BatchChangePreviewContext` is responsible for managing these publication states,
     // as well as filter arguments to the connection query, clientside.
-    const { filters, filtersChanged, setFiltersChanged, publicationStates, resolveRecalculationUpdates } = useContext(
-        BatchChangePreviewContext
-    )
+    const { filters, filtersChanged, setFiltersChanged, publicationStates, resolveRecalculationUpdates } =
+        useContext(BatchChangePreviewContext)
 
     const [queryArguments, setQueryArguments] = useState<BatchSpecApplyPreviewVariables>()
 
@@ -121,14 +116,14 @@ export const PreviewList: React.FunctionComponent<React.PropsWithChildren<Props>
     const showSelectRow = selected === 'all' || selected.size > 0
 
     return (
-        <Container>
+        <Container role="region" aria-label="preview changesets">
             {showSelectRow && queryArguments ? (
                 <PreviewSelectRow
                     queryPublishableChangesetSpecIDs={queryPublishableChangesetSpecIDs}
                     queryArguments={queryArguments}
                 />
             ) : (
-                <PreviewFilterRow history={history} location={location} />
+                <PreviewFilterRow />
             )}
             <PublicationStatesUpdateAlerts />
             <FilteredConnection<
@@ -139,9 +134,6 @@ export const PreviewList: React.FunctionComponent<React.PropsWithChildren<Props>
                 className="mt-2"
                 nodeComponent={ChangesetApplyPreviewNode}
                 nodeComponentProps={{
-                    isLightTheme,
-                    history,
-                    location,
                     authenticatedUser,
                     queryChangesetSpecFileDiffs,
                     expandChangesetDescriptions,
@@ -152,10 +144,7 @@ export const PreviewList: React.FunctionComponent<React.PropsWithChildren<Props>
                 defaultFirst={15}
                 noun="changeset"
                 pluralNoun="changesets"
-                history={history}
-                location={location}
                 useURLQuery={true}
-                listComponent="div"
                 listClassName={styles.previewListGrid}
                 headComponent={PreviewListHeader}
                 headComponentProps={{

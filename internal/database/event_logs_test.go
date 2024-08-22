@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/keegancsmith/sqlf"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
@@ -21,10 +23,14 @@ import (
 	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/database/basestore"
 	"github.com/sourcegraph/sourcegraph/internal/database/dbtest"
+	"github.com/sourcegraph/sourcegraph/internal/extsvc"
 	"github.com/sourcegraph/sourcegraph/internal/timeutil"
+	"github.com/sourcegraph/sourcegraph/internal/trace"
+	"github.com/sourcegraph/sourcegraph/internal/trace/tracetest"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/internal/version"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
+	"github.com/sourcegraph/sourcegraph/lib/pointers"
 	"github.com/sourcegraph/sourcegraph/schema"
 )
 
@@ -34,9 +40,9 @@ func TestSanitizeEventURL(t *testing.T) {
 		externalURL string
 		output      string
 	}{{
-		input:       "https://about.sourcegraph.com/test",
+		input:       "https://sourcegraph.com/test", // CI:URL_OK
 		externalURL: "https://sourcegraph.com",
-		output:      "https://about.sourcegraph.com/test",
+		output:      "https://sourcegraph.com/test", // CI:URL_OK
 	}, {
 		input:       "https://test.sourcegraph.com/test",
 		externalURL: "https://sourcegraph.com",
@@ -82,10 +88,10 @@ func TestEventLogs_ValidInfo(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
-	var testCases = []struct {
+	testCases := []struct {
 		name  string
 		event *Event
 		err   string // Stringified error
@@ -113,6 +119,7 @@ func TestEventLogs_ValidInfo(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 			err := db.EventLogs().Insert(ctx, tc.event)
 
 			if have, want := fmt.Sprint(errors.Unwrap(err)), tc.err; have != want {
@@ -128,14 +135,14 @@ func TestEventLogs_CountUsersWithSetting(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	usersStore := db.Users()
 	settingsStore := db.TemporarySettings()
 	eventLogsStore := &eventLogStore{Store: basestore.NewWithHandle(db.Handle())}
 
-	for i := 0; i < 24; i++ {
+	for i := range 24 {
 		user, err := usersStore.Create(ctx, NewUser{Username: fmt.Sprintf("u%d", i)})
 		if err != nil {
 			t.Fatal(err)
@@ -197,45 +204,81 @@ func TestEventLogs_SiteUsageMultiplePeriods(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
+
+	// Several of the events will belong to Sourcegraph employee admin user and Sourcegraph Operator user account
+	sgAdmin, err := db.Users().Create(ctx, NewUser{Username: "sourcegraph-admin"})
+	require.NoError(t, err)
+	err = db.UserEmails().Add(ctx, sgAdmin.ID, "admin@sourcegraph.com", nil)
+	require.NoError(t, err)
+	soLoganID, err := db.Users().CreateWithExternalAccount(
+		ctx,
+		NewUser{
+			Username: "sourcegraph-operator-logan",
+		},
+		&extsvc.Account{
+			AccountSpec: extsvc.AccountSpec{
+				ServiceType: "sourcegraph-operator",
+			},
+		})
+	require.NoError(t, err)
+
+	user1, err := db.Users().Create(ctx, NewUser{Username: "a"})
+	require.NoError(t, err)
+	user2, err := db.Users().Create(ctx, NewUser{Username: "b"})
+	require.NoError(t, err)
+	user3, err := db.Users().Create(ctx, NewUser{Username: "c"})
+	require.NoError(t, err)
+	user4, err := db.Users().Create(ctx, NewUser{Username: "d"})
+	require.NoError(t, err)
 
 	now := time.Now()
 	startDate, _ := calcStartDate(now, Daily, 3)
 	secondDay := startDate.Add(time.Hour * 24)
 	thirdDay := startDate.Add(time.Hour * 24 * 2)
 
+	soPublicArgument := json.RawMessage(fmt.Sprintf(`{"%s": true}`, EventLogsSourcegraphOperatorKey))
 	events := []*Event{
-		makeTestEvent(&Event{UserID: 1, Timestamp: startDate}),
-		makeTestEvent(&Event{UserID: 1, Timestamp: startDate}),
-		makeTestEvent(&Event{UserID: 2, Timestamp: startDate}),
-		makeTestEvent(&Event{UserID: 2, Timestamp: startDate}),
+		makeTestEvent(&Event{UserID: uint32(sgAdmin.ID), Timestamp: startDate}),
+		makeTestEvent(&Event{UserID: uint32(sgAdmin.ID), Timestamp: startDate}),
+		makeTestEvent(&Event{UserID: uint32(soLoganID.ID), Timestamp: startDate, PublicArgument: soPublicArgument}),
+		makeTestEvent(&Event{UserID: uint32(soLoganID.ID), Timestamp: startDate, PublicArgument: soPublicArgument}),
+		makeTestEvent(&Event{UserID: uint32(user1.ID), Timestamp: startDate}),
+		makeTestEvent(&Event{UserID: uint32(user1.ID), Timestamp: startDate}),
 
-		makeTestEvent(&Event{UserID: 1, Timestamp: secondDay}),
-		makeTestEvent(&Event{UserID: 2, Timestamp: secondDay}),
-		makeTestEvent(&Event{UserID: 3, Timestamp: secondDay}),
-		makeTestEvent(&Event{UserID: 1, Timestamp: secondDay}),
+		makeTestEvent(&Event{UserID: uint32(sgAdmin.ID), Timestamp: secondDay}),
+		makeTestEvent(&Event{UserID: uint32(user1.ID), Timestamp: secondDay}),
+		makeTestEvent(&Event{UserID: uint32(user2.ID), Timestamp: secondDay}),
+		makeTestEvent(&Event{UserID: uint32(sgAdmin.ID), Timestamp: secondDay}),
+		makeTestEvent(&Event{UserID: uint32(soLoganID.ID), Timestamp: secondDay, PublicArgument: soPublicArgument}),
+		makeTestEvent(&Event{UserID: uint32(soLoganID.ID), Timestamp: secondDay, PublicArgument: soPublicArgument}),
 
-		makeTestEvent(&Event{UserID: 5, Timestamp: thirdDay}),
-		makeTestEvent(&Event{UserID: 6, Timestamp: thirdDay}),
-		makeTestEvent(&Event{UserID: 7, Timestamp: thirdDay}),
-		makeTestEvent(&Event{UserID: 8, Timestamp: thirdDay}),
+		makeTestEvent(&Event{UserID: uint32(user1.ID), Timestamp: thirdDay}),
+		makeTestEvent(&Event{UserID: uint32(user2.ID), Timestamp: thirdDay}),
+		makeTestEvent(&Event{UserID: uint32(user3.ID), Timestamp: thirdDay}),
+		makeTestEvent(&Event{UserID: uint32(user4.ID), Timestamp: thirdDay}),
 	}
 
-	for _, e := range events {
-		if err := db.EventLogs().Insert(ctx, e); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// TODO generate this ping from V2 events recorded using EventRecorder
+	// from internal/telemetryrecorder instead.
+	//lint:ignore SA1019 existing usage of deprecated functionality.
+	err = db.EventLogs().BulkInsert(ctx, events)
+	require.NoError(t, err)
 
 	values, err := db.EventLogs().SiteUsageMultiplePeriods(ctx, now, 3, 0, 0, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	assertUsageValue(t, values.DAUs[0], startDate.Add(time.Hour*24*2), 4, 4, 0, 0)
-	assertUsageValue(t, values.DAUs[1], startDate.Add(time.Hour*24), 3, 3, 0, 0)
-	assertUsageValue(t, values.DAUs[2], startDate, 2, 2, 0, 0)
+	assertUsageValue(t, values.DAUs[1], startDate.Add(time.Hour*24), 4, 4, 0, 0)
+	assertUsageValue(t, values.DAUs[2], startDate, 3, 3, 0, 0)
+
+	values, err = db.EventLogs().SiteUsageMultiplePeriods(ctx, now, 3, 0, 0, &CountUniqueUsersOptions{CommonUsageOptions{ExcludeSourcegraphAdmins: true, ExcludeSourcegraphOperators: true}, nil})
+	require.NoError(t, err)
+
+	assertUsageValue(t, values.DAUs[0], startDate.Add(time.Hour*24*2), 4, 4, 0, 0)
+	assertUsageValue(t, values.DAUs[1], startDate.Add(time.Hour*24), 2, 2, 0, 0)
+	assertUsageValue(t, values.DAUs[2], startDate, 1, 1, 0, 0)
 }
 
 func TestEventLogs_UsersUsageCounts(t *testing.T) {
@@ -244,7 +287,7 @@ func TestEventLogs_UsersUsageCounts(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	now := time.Now()
@@ -260,7 +303,7 @@ func TestEventLogs_UsersUsageCounts(t *testing.T) {
 	for _, day := range days {
 		for _, user := range users {
 			for _, name := range names {
-				for i := 0; i < 25; i++ {
+				for range 25 {
 					e := &Event{
 						UserID:    user,
 						Name:      name,
@@ -269,6 +312,7 @@ func TestEventLogs_UsersUsageCounts(t *testing.T) {
 						Timestamp: day.Add(time.Minute * time.Duration(rand.Intn(60*12))),
 					}
 
+					//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 					if err := db.EventLogs().Insert(ctx, e); err != nil {
 						t.Fatal(err)
 					}
@@ -302,7 +346,7 @@ func TestEventLogs_SiteUsage(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	// This unix timestamp is equivalent to `Friday, May 15, 2020 10:30:00 PM GMT` and is set to
@@ -357,7 +401,7 @@ func TestEventLogs_SiteUsage(t *testing.T) {
 		for _, user := range data.users {
 			for _, name := range data.names {
 				for _, source := range data.sources {
-					for i := 0; i < 5; i++ {
+					for range 5 {
 						e := &Event{
 							UserID: user,
 							Name:   name,
@@ -371,6 +415,7 @@ func TestEventLogs_SiteUsage(t *testing.T) {
 							e.AnonymousUserID = "deadbeef"
 						}
 
+						//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 						if err := db.EventLogs().Insert(ctx, e); err != nil {
 							t.Fatal(err)
 						}
@@ -387,22 +432,172 @@ func TestEventLogs_SiteUsage(t *testing.T) {
 	}
 
 	expectedSummary := types.SiteUsageSummary{
-		Month:                   time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC),
-		Week:                    now.Truncate(time.Hour * 24).Add(-time.Hour * 24 * 5), // the previous Sunday
-		Day:                     now.Truncate(time.Hour * 24),
-		UniquesMonth:            11,
-		UniquesWeek:             7,
-		UniquesDay:              5,
-		RegisteredUniquesMonth:  10,
-		RegisteredUniquesWeek:   6,
-		RegisteredUniquesDay:    5,
-		IntegrationUniquesMonth: 11,
-		IntegrationUniquesWeek:  7,
-		IntegrationUniquesDay:   5,
+		RollingMonth:                   time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -30),
+		Month:                          time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC),
+		Week:                           now.Truncate(time.Hour * 24).Add(-time.Hour * 24 * 5), // the previous Sunday
+		Day:                            now.Truncate(time.Hour * 24),
+		UniquesRollingMonth:            11,
+		UniquesMonth:                   11,
+		UniquesWeek:                    7,
+		UniquesDay:                     5,
+		RegisteredUniquesRollingMonth:  10,
+		RegisteredUniquesMonth:         10,
+		RegisteredUniquesWeek:          6,
+		RegisteredUniquesDay:           5,
+		IntegrationUniquesRollingMonth: 11,
+		IntegrationUniquesMonth:        11,
+		IntegrationUniquesWeek:         7,
+		IntegrationUniquesDay:          5,
 	}
 	if diff := cmp.Diff(expectedSummary, summary); diff != "" {
 		t.Fatal(diff)
 	}
+}
+
+func TestEventLogs_SiteUsage_ExcludeSourcegraphAdmins(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	logger := logtest.Scoped(t)
+	t.Parallel()
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+
+	// This unix timestamp is equivalent to `Friday, May 15, 2020 10:30:00 PM GMT` and is set to
+	// be a consistent value so that the tests don't fail when someone runs it at some particular
+	// time that falls too near the edge of a week.
+	now := time.Unix(1589581800, 0).UTC()
+
+	// Several of the events will belong to Sourcegraph employee admin user and Sourcegraph Operator user account
+	sgAdmin, err := db.Users().Create(ctx, NewUser{Username: "sourcegraph-admin"})
+	require.NoError(t, err)
+	err = db.UserEmails().Add(ctx, sgAdmin.ID, "admin@sourcegraph.com", nil)
+	require.NoError(t, err)
+	soLogan, err := db.Users().CreateWithExternalAccount(
+		ctx,
+		NewUser{
+			Username: "sourcegraph-operator-logan",
+		},
+		&extsvc.Account{
+			AccountSpec: extsvc.AccountSpec{
+				ServiceType: "sourcegraph-operator",
+			},
+		})
+	require.NoError(t, err)
+
+	user1, err := db.Users().Create(ctx, NewUser{Username: "a"})
+	require.NoError(t, err)
+	user2, err := db.Users().Create(ctx, NewUser{Username: "b"})
+	require.NoError(t, err)
+
+	days := map[time.Time]struct {
+		userIDs []uint32
+		names   []string
+		sources []string
+	}{
+		// Today
+		now: {
+			[]uint32{uint32(sgAdmin.ID)},
+			[]string{"ViewSiteAdminX"},
+			[]string{"test", "CODEHOSTINTEGRATION"},
+		},
+		now.Add(-time.Hour): {
+			[]uint32{uint32(soLogan.ID)},
+			[]string{"ViewSiteAdminX"},
+			[]string{"test", "CODEHOSTINTEGRATION"},
+		},
+		// This week
+		now.Add(-time.Hour * 24 * 3): {
+			[]uint32{uint32(sgAdmin.ID), uint32(user1.ID)},
+			[]string{"ViewRepository", "ViewTree"},
+			[]string{"test", "CODEHOSTINTEGRATION"},
+		},
+		now.Add(-time.Hour * 24 * 4): {
+			[]uint32{uint32(soLogan.ID), uint32(user1.ID)},
+			[]string{"ViewRepository", "ViewTree"},
+			[]string{"test", "CODEHOSTINTEGRATION"},
+		},
+		// This month
+		now.Add(-time.Hour * 24 * 6): {
+			[]uint32{uint32(user2.ID)},
+			[]string{"ViewSiteAdminX", "SavedSearchSlackClicked"},
+			[]string{"test", "CODEHOSTINTEGRATION"},
+		},
+	}
+
+	for day, data := range days {
+		for _, userID := range data.userIDs {
+			for _, name := range data.names {
+				for _, source := range data.sources {
+					for range 5 {
+						e := &Event{
+							UserID: userID,
+							Name:   name,
+							URL:    "http://sourcegraph.com",
+							Source: source,
+							// Jitter current time +/- 30 minutes
+							Timestamp: day.Add(time.Minute * time.Duration(rand.Intn(60)-30)),
+						}
+
+						if userID == uint32(soLogan.ID) {
+							e.PublicArgument = json.RawMessage(fmt.Sprintf(`{"%s": true}`, EventLogsSourcegraphOperatorKey))
+						}
+
+						//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
+						err := db.EventLogs().Insert(ctx, e)
+						require.NoError(t, err)
+					}
+				}
+			}
+		}
+	}
+
+	el := &eventLogStore{Store: basestore.NewWithHandle(db.Handle())}
+	summary, err := el.siteUsageCurrentPeriods(ctx, now, &SiteUsageOptions{CommonUsageOptions{ExcludeSourcegraphAdmins: false}})
+	require.NoError(t, err)
+
+	expectedSummary := types.SiteUsageSummary{
+		RollingMonth:                   time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -30),
+		Month:                          time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC),
+		Week:                           now.Truncate(time.Hour * 24).Add(-time.Hour * 24 * 5), // the previous Sunday
+		Day:                            now.Truncate(time.Hour * 24),
+		UniquesRollingMonth:            4,
+		UniquesMonth:                   4,
+		UniquesWeek:                    3,
+		UniquesDay:                     2,
+		RegisteredUniquesRollingMonth:  4,
+		RegisteredUniquesMonth:         4,
+		RegisteredUniquesWeek:          3,
+		RegisteredUniquesDay:           2,
+		IntegrationUniquesRollingMonth: 4,
+		IntegrationUniquesMonth:        4,
+		IntegrationUniquesWeek:         3,
+		IntegrationUniquesDay:          2,
+	}
+	assert.Equal(t, expectedSummary, summary)
+
+	summary, err = el.siteUsageCurrentPeriods(ctx, now, &SiteUsageOptions{CommonUsageOptions{ExcludeSourcegraphAdmins: true, ExcludeSourcegraphOperators: true}})
+	require.NoError(t, err)
+
+	expectedSummary = types.SiteUsageSummary{
+		RollingMonth:                   time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -30),
+		Month:                          time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC),
+		Week:                           now.Truncate(time.Hour * 24).Add(-time.Hour * 24 * 5), // the previous Sunday
+		Day:                            now.Truncate(time.Hour * 24),
+		UniquesRollingMonth:            2,
+		UniquesMonth:                   2,
+		UniquesWeek:                    1,
+		UniquesDay:                     0,
+		RegisteredUniquesRollingMonth:  2,
+		RegisteredUniquesMonth:         2,
+		RegisteredUniquesWeek:          1,
+		RegisteredUniquesDay:           0,
+		IntegrationUniquesRollingMonth: 2,
+		IntegrationUniquesMonth:        2,
+		IntegrationUniquesWeek:         1,
+		IntegrationUniquesDay:          0,
+	}
+	assert.Equal(t, expectedSummary, summary)
 }
 
 func TestEventLogs_codeIntelligenceWeeklyUsersCount(t *testing.T) {
@@ -411,7 +606,7 @@ func TestEventLogs_codeIntelligenceWeeklyUsersCount(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	names := []string{"codeintel.lsifHover", "codeintel.searchReferences", "unknown event"}
@@ -433,6 +628,7 @@ func TestEventLogs_codeIntelligenceWeeklyUsersCount(t *testing.T) {
 				Timestamp: now.Add(-time.Hour * 24 * 3).Add(time.Minute * time.Duration(rand.Intn(60)-30)),
 			}
 
+			//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 			if err := db.EventLogs().Insert(ctx, e); err != nil {
 				t.Fatal(err)
 			}
@@ -447,6 +643,7 @@ func TestEventLogs_codeIntelligenceWeeklyUsersCount(t *testing.T) {
 				Timestamp: now.Add(-time.Hour * 24 * 12).Add(time.Minute * time.Duration(rand.Intn(60)-30)),
 			}
 
+			//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 			if err := db.EventLogs().Insert(ctx, e); err != nil {
 				t.Fatal(err)
 			}
@@ -475,7 +672,7 @@ func TestEventLogs_TestCodeIntelligenceRepositoryCounts(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 	now := time.Now()
 
@@ -618,7 +815,7 @@ func TestEventLogs_CodeIntelligenceSettingsPageViewCounts(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	names := []string{
@@ -648,7 +845,7 @@ func TestEventLogs_CodeIntelligenceSettingsPageViewCounts(t *testing.T) {
 
 	for _, name := range names {
 		for _, day := range days {
-			for i := 0; i < 25; i++ {
+			for i := range 25 {
 				e := &Event{
 					UserID:   1,
 					Name:     name,
@@ -660,6 +857,7 @@ func TestEventLogs_CodeIntelligenceSettingsPageViewCounts(t *testing.T) {
 				}
 
 				g.Go(func() error {
+					//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 					return db.EventLogs().Insert(gctx, e)
 				})
 			}
@@ -687,7 +885,7 @@ func TestEventLogs_AggregatedCodeIntelEvents(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	names := []string{"codeintel.lsifHover", "codeintel.searchReferences.xrepo", "unknown event"}
@@ -712,7 +910,7 @@ func TestEventLogs_AggregatedCodeIntelEvents(t *testing.T) {
 	for _, user := range users {
 		for _, name := range names {
 			for _, day := range days {
-				for i := 0; i < 25; i++ {
+				for i := range 25 {
 					e := &Event{
 						UserID:   user,
 						Name:     name,
@@ -724,6 +922,7 @@ func TestEventLogs_AggregatedCodeIntelEvents(t *testing.T) {
 					}
 
 					g.Go(func() error {
+						//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 						return db.EventLogs().Insert(gctx, e)
 					})
 				}
@@ -767,7 +966,7 @@ func TestEventLogs_AggregatedSparseCodeIntelEvents(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	// This unix timestamp is equivalent to `Friday, May 15, 2020 10:30:00 PM GMT` and is set to
@@ -775,7 +974,7 @@ func TestEventLogs_AggregatedSparseCodeIntelEvents(t *testing.T) {
 	// time that falls too near the edge of a week.
 	now := time.Unix(1589581800, 0).UTC()
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		e := &Event{
 			UserID:    1,
 			Name:      "codeintel.searchReferences.xrepo",
@@ -785,6 +984,7 @@ func TestEventLogs_AggregatedSparseCodeIntelEvents(t *testing.T) {
 			Timestamp: now.Add(-time.Hour * 24 * 3), // This week
 		}
 
+		//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 		if err := db.EventLogs().Insert(ctx, e); err != nil {
 			t.Fatal(err)
 		}
@@ -819,7 +1019,7 @@ func TestEventLogs_AggregatedCodeIntelInvestigationEvents(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	names := []string{
@@ -827,7 +1027,8 @@ func TestEventLogs_AggregatedCodeIntelInvestigationEvents(t *testing.T) {
 		"CodeIntelligenceIndexerSetupInvestigated", // duplicate
 		"CodeIntelligenceUploadErrorInvestigated",
 		"CodeIntelligenceIndexErrorInvestigated",
-		"unknown event"}
+		"unknown event",
+	}
 	users := []uint32{1, 2}
 
 	// This unix timestamp is equivalent to `Friday, May 15, 2020 10:30:00 PM GMT` and is set to
@@ -849,7 +1050,7 @@ func TestEventLogs_AggregatedCodeIntelInvestigationEvents(t *testing.T) {
 	for _, user := range users {
 		for _, name := range names {
 			for _, day := range days {
-				for i := 0; i < 25; i++ {
+				for range 25 {
 					e := &Event{
 						UserID: user,
 						Name:   name,
@@ -860,6 +1061,7 @@ func TestEventLogs_AggregatedCodeIntelInvestigationEvents(t *testing.T) {
 					}
 
 					g.Go(func() error {
+						//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 						return db.EventLogs().Insert(gctx, e)
 					})
 				}
@@ -896,7 +1098,7 @@ func TestEventLogs_AggregatedSparseSearchEvents(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	// This unix timestamp is equivalent to `Friday, May 15, 2020 10:30:00 PM GMT` and is set to
@@ -904,7 +1106,7 @@ func TestEventLogs_AggregatedSparseSearchEvents(t *testing.T) {
 	// time that falls too near the edge of a week.
 	now := time.Unix(1589581800, 0).UTC()
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		e := &Event{
 			UserID: 1,
 			Name:   "search.latencies.structural",
@@ -918,6 +1120,7 @@ func TestEventLogs_AggregatedSparseSearchEvents(t *testing.T) {
 			Timestamp: now.Add(-time.Hour * 24 * 6), // This month
 		}
 
+		//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 		if err := db.EventLogs().Insert(ctx, e); err != nil {
 			t.Fatal(err)
 		}
@@ -956,7 +1159,7 @@ func TestEventLogs_AggregatedSearchEvents(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	names := []string{"search.latencies.literal", "search.latencies.structural", "unknown event"}
@@ -985,7 +1188,7 @@ func TestEventLogs_AggregatedSearchEvents(t *testing.T) {
 		for _, name := range names {
 			for _, duration := range durations {
 				for _, day := range days {
-					for i := 0; i < 25; i++ {
+					for range 25 {
 						durationOffset++
 
 						e := &Event{
@@ -1003,6 +1206,7 @@ func TestEventLogs_AggregatedSearchEvents(t *testing.T) {
 						}
 
 						g.Go(func() error {
+							//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 							return db.EventLogs().Insert(gctx, e)
 						})
 					}
@@ -1034,6 +1238,7 @@ func TestEventLogs_AggregatedSearchEvents(t *testing.T) {
 		Timestamp: now.Add(-time.Hour * 24 * 3).Add(time.Minute * time.Duration(rand.Intn(60)-30)),
 	}
 
+	//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 	if err := db.EventLogs().Insert(gctx, e); err != nil {
 		t.Fatal(err)
 	}
@@ -1117,13 +1322,125 @@ func TestEventLogs_AggregatedSearchEvents(t *testing.T) {
 	}
 }
 
+func TestEventLogs_AggregatedCodyUsage(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	logger := logtest.Scoped(t)
+	t.Parallel()
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+
+	// This unix timestamp is equivalent to `Friday, May 15, 2020 10:30:00 PM GMT` and is set to
+	// be a consistent value so that the tests don't fail when someone runs it at some particular
+	// time that falls too near the edge of a week.
+	now := time.Unix(1589581800, 0).UTC()
+
+	codyNonProductEventNames := []string{
+		"CodyVSCodeExtension:completion:suggested",
+		"non-cody-event",
+	}
+	codyProductEventNames := []string{
+		"CodyVSCodeExtension:recipe:rewrite-to-functional:executed",
+		"CodyVSCodeExtension:recipe:context-search:executed",
+	}
+	users := []uint32{1, 2}
+
+	days := []time.Time{
+		now,                          // Today
+		now.Add(-time.Hour * 24 * 3), // This week
+		now.Add(-time.Hour * 24 * 4), // This week
+		now.Add(-time.Hour * 24 * 9), // This month
+	}
+
+	clients := []string{
+		"VSCODE_CODY_EXTENSION",
+		"JETBRAINS_CODY_EXTENSION",
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+
+	// add some Cody events
+	for _, day := range days {
+		for _, name := range codyNonProductEventNames {
+			for range 15 {
+				e := &Event{
+					UserID: users[0],
+					Name:   name,
+					URL:    "http://sourcegraph.com",
+					Source: "test",
+					Client: &clients[0],
+					// Jitter current time +/- 30 minutes
+					Timestamp: day.Add(time.Minute * time.Duration(rand.Intn(60)-30)),
+				}
+
+				g.Go(func() error {
+					//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
+					return db.EventLogs().Insert(gctx, e)
+				})
+			}
+		}
+		for _, name := range codyProductEventNames {
+			for range 15 {
+				e := &Event{
+					UserID: users[1],
+					Name:   name,
+					URL:    "http://sourcegraph.com",
+					Source: "test",
+					Client: &clients[1],
+					// Jitter current time +/- 30 minutes
+					Timestamp: day.Add(time.Minute * time.Duration(rand.Intn(60)-30)),
+				}
+
+				g.Go(func() error {
+					//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
+					return db.EventLogs().Insert(gctx, e)
+				})
+			}
+		}
+	}
+
+	if err := g.Wait(); err != nil {
+		t.Fatal(err)
+	}
+
+	usage, err := db.EventLogs().AggregatedCodyUsage(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectedUsage := &types.CodyAggregatedUsage{
+		Month:                      time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC),
+		Week:                       now.Truncate(time.Hour * 24).Add(-time.Hour * 24 * 5),
+		Day:                        now.Truncate(time.Hour * 24),
+		TotalMonth:                 180,
+		TotalWeek:                  135,
+		TotalDay:                   45,
+		UniquesMonth:               2,
+		UniquesWeek:                2,
+		UniquesDay:                 2,
+		ProductUsersMonth:          1,
+		ProductUsersWeek:           1,
+		ProductUsersDay:            1,
+		VSCodeProductUsersMonth:    0,
+		JetBrainsProductUsersMonth: 1,
+		NeovimProductUsersMonth:    0,
+		EmacsProductUsersMonth:     0,
+		WebProductUsersMonth:       0,
+	}
+
+	if diff := cmp.Diff(expectedUsage, usage); diff != "" {
+		t.Fatal(diff)
+	}
+}
+
 func TestEventLogs_ListAll(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	now := time.Now()
@@ -1137,7 +1454,8 @@ func TestEventLogs_ListAll(t *testing.T) {
 			URL:       "http://sourcegraph.com",
 			Source:    "test",
 			Timestamp: startDate,
-		}, {
+		},
+		{
 			UserID:    2,
 			Name:      "codeintel",
 			URL:       "http://sourcegraph.com",
@@ -1145,37 +1463,74 @@ func TestEventLogs_ListAll(t *testing.T) {
 			Timestamp: startDate,
 		},
 		{
-			UserID:    2,
+			UserID:    42,
 			Name:      "ViewRepository",
 			URL:       "http://sourcegraph.com",
 			Source:    "test",
 			Timestamp: startDate,
 		},
 		{
-			UserID:    2,
+			UserID:    3,
 			Name:      "SearchResultsQueried",
 			URL:       "http://sourcegraph.com",
 			Source:    "test",
 			Timestamp: startDate,
-		}}
+		},
+	}
+
+	// Run all the inserts under a mock trace so we can test trace data being
+	// attached
+	tracetest.ConfigureStaticTracerProvider(t)
+	var tr trace.Trace
+	tr, ctx = trace.New(ctx, t.Name())
 
 	for _, event := range events {
+		//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 		if err := db.EventLogs().Insert(ctx, event); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	searchResultQueriedEvent := "SearchResultsQueried"
-	have, err := db.EventLogs().ListAll(ctx, EventLogsListOptions{EventName: &searchResultQueriedEvent})
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Run("listed all SearchResultsQueried events", func(t *testing.T) {
+		have, err := db.EventLogs().ListAll(ctx, EventLogsListOptions{EventName: pointers.Ptr("SearchResultsQueried")})
+		require.NoError(t, err)
+		assert.Len(t, have, 2)
+	})
 
-	want := 2
+	t.Run("listed one ViewRepository event", func(t *testing.T) {
+		opts := EventLogsListOptions{EventName: pointers.Ptr("ViewRepository"), LimitOffset: &LimitOffset{Limit: 1}}
+		have, err := db.EventLogs().ListAll(ctx, opts)
+		require.NoError(t, err)
+		assert.Len(t, have, 1)
+		assert.Equal(t, uint32(42), have[0].UserID)
+	})
 
-	if diff := cmp.Diff(want, len(have)); diff != "" {
-		t.Error(diff)
-	}
+	t.Run("listed zero events because of after parameter", func(t *testing.T) {
+		opts := EventLogsListOptions{EventName: pointers.Ptr("ViewRepository"), AfterID: 3}
+		have, err := db.EventLogs().ListAll(ctx, opts)
+		require.NoError(t, err)
+		require.Empty(t, have)
+	})
+
+	t.Run("listed one SearchResultsQueried event because of after parameter", func(t *testing.T) {
+		opts := EventLogsListOptions{EventName: pointers.Ptr("SearchResultsQueried"), AfterID: 1}
+		have, err := db.EventLogs().ListAll(ctx, opts)
+		require.NoError(t, err)
+		assert.Len(t, have, 1)
+		assert.Equal(t, uint32(3), have[0].UserID)
+	})
+
+	t.Run("all events have trace context", func(t *testing.T) {
+		got, err := db.EventLogs().ListAll(ctx, EventLogsListOptions{})
+		require.NoError(t, err)
+		assert.Len(t, got, len(events))
+		for _, e := range got {
+			args := make(map[string]any)
+			require.NoError(t, json.Unmarshal(e.PublicArgument, &args))
+			assert.NotEmpty(t, args["interaction.trace_id"])
+			assert.Equal(t, tr.SpanContext().TraceID().String(), args["interaction.trace_id"])
+		}
+	})
 }
 
 func TestEventLogs_LatestPing(t *testing.T) {
@@ -1184,7 +1539,7 @@ func TestEventLogs_LatestPing(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 
 	t.Run("with no pings in database", func(t *testing.T) {
 		ctx := context.Background()
@@ -1196,10 +1551,6 @@ func TestEventLogs_LatestPing(t *testing.T) {
 			t.Fatalf("have err %+v, expected no rows error", err)
 		}
 	})
-
-	ptr := func(s string) *string {
-		return &s
-	}
 
 	t.Run("with existing pings in database", func(t *testing.T) {
 		userID := int32(0)
@@ -1215,8 +1566,9 @@ func TestEventLogs_LatestPing(t *testing.T) {
 				Source:          "test",
 				Timestamp:       timestamp,
 				Argument:        json.RawMessage(`{"key": "value1"}`),
-				DeviceID:        ptr("device-id"),
-				InsertID:        ptr("insert-id"),
+				PublicArgument:  json.RawMessage("{}"),
+				DeviceID:        pointers.Ptr("device-id"),
+				InsertID:        pointers.Ptr("insert-id"),
 			}, {
 				UserID:          0,
 				Name:            "ping",
@@ -1225,11 +1577,13 @@ func TestEventLogs_LatestPing(t *testing.T) {
 				Source:          "test",
 				Timestamp:       timestamp,
 				Argument:        json.RawMessage(`{"key": "value2"}`),
-				DeviceID:        ptr("device-id"),
-				InsertID:        ptr("insert-id"),
+				PublicArgument:  json.RawMessage("{}"),
+				DeviceID:        pointers.Ptr("device-id"),
+				InsertID:        pointers.Ptr("insert-id"),
 			},
 		}
 		for _, event := range events {
+			//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
 			if err := db.EventLogs().Insert(ctx, event); err != nil {
 				t.Fatal(err)
 			}
@@ -1247,11 +1601,12 @@ func TestEventLogs_LatestPing(t *testing.T) {
 			AnonymousUserID: events[1].AnonymousUserID,
 			Version:         version.Version(),
 			Argument:        events[1].Argument,
+			PublicArgument:  events[1].PublicArgument,
 			Source:          events[1].Source,
 			Timestamp:       timestamp,
 		}
-		expectedPing.DeviceID = ptr("device-id")
-		expectedPing.InsertID = ptr("insert-id") // set these values for test determinism
+		expectedPing.DeviceID = pointers.Ptr("device-id")
+		expectedPing.InsertID = pointers.Ptr("insert-id") // set these values for test determinism
 		if diff := cmp.Diff(gotPing, expectedPing); diff != "" {
 			t.Fatal(diff)
 		}
@@ -1272,20 +1627,22 @@ func makeTestEvent(e *Event) *Event {
 }
 
 func assertUsageValue(t *testing.T, v *types.SiteActivityPeriod, start time.Time, userCount, registeredUserCount, anonymousUserCount, integrationUserCount int) {
+	t.Helper()
+
 	if v.StartTime != start {
-		t.Errorf("got Start %q, want %q", v.StartTime, start)
+		t.Errorf("got StartTime %q, want %q", v.StartTime, start)
 	}
 	if int(v.UserCount) != userCount {
-		t.Errorf("got Count %d, want %d", v.UserCount, userCount)
+		t.Errorf("got UserCount %d, want %d", v.UserCount, userCount)
 	}
 	if int(v.RegisteredUserCount) != registeredUserCount {
-		t.Errorf("got Count %d, want %d", v.RegisteredUserCount, registeredUserCount)
+		t.Errorf("got RegisteredUserCount %d, want %d", v.RegisteredUserCount, registeredUserCount)
 	}
 	if int(v.AnonymousUserCount) != anonymousUserCount {
-		t.Errorf("got Count %d, want %d", v.AnonymousUserCount, anonymousUserCount)
+		t.Errorf("got AnonymousUserCount %d, want %d", v.AnonymousUserCount, anonymousUserCount)
 	}
 	if int(v.IntegrationUserCount) != integrationUserCount {
-		t.Errorf("got Count %d, want %d", v.IntegrationUserCount, integrationUserCount)
+		t.Errorf("got IntegrationUserCount %d, want %d", v.IntegrationUserCount, integrationUserCount)
 	}
 }
 
@@ -1295,7 +1652,7 @@ func TestEventLogs_RequestsByLanguage(t *testing.T) {
 	}
 	logger := logtest.Scoped(t)
 	t.Parallel()
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	if _, err := db.Handle().ExecContext(ctx, `
@@ -1326,4 +1683,544 @@ func TestEventLogs_RequestsByLanguage(t *testing.T) {
 	if diff := cmp.Diff(expectedRequests, requests); diff != "" {
 		t.Fatal(diff)
 	}
+}
+
+func TestEventLogs_IllegalPeriodType(t *testing.T) {
+	t.Run("calcStartDate", func(t *testing.T) {
+		_, err := calcStartDate(time.Now(), "hackerman", 3)
+		if err == nil {
+			t.Error("want err to not be nil")
+		}
+	})
+	t.Run("calcEndDate", func(t *testing.T) {
+		_, err := calcEndDate(time.Now(), "hackerman", 3)
+		if err == nil {
+			t.Error("want err to not be nil")
+		}
+	})
+}
+
+func TestEventLogs_OwnershipFeatureActivity(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	t.Parallel()
+
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+
+	for name, testCase := range map[string]struct {
+		now             time.Time
+		events          []*Event
+		queryEventNames []string
+		stats           map[string]*types.OwnershipUsageStatisticsActiveUsers
+	}{
+		"same day events count as MAU, WAU & DAU": {
+			now: time.Date(2000, time.January, 20, 12, 0, 0, 0, time.UTC), // Thursday
+			events: []*Event{
+				{
+					UserID:    1,
+					Name:      "horse",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.January, 20, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    2,
+					Name:      "horse",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.January, 20, 12, 0, 0, 0, time.UTC),
+				},
+			},
+			queryEventNames: []string{"horse"},
+			stats: map[string]*types.OwnershipUsageStatisticsActiveUsers{
+				"horse": {
+					DAU: pointers.Ptr(int32(2)),
+					WAU: pointers.Ptr(int32(2)),
+					MAU: pointers.Ptr(int32(2)),
+				},
+			},
+		},
+		"previous day, same week events count as MAU, WAU but not DAU": {
+			now: time.Date(2000, time.March, 18, 12, 0, 0, 0, time.UTC), // Saturday
+			events: []*Event{
+				{
+					UserID:    1,
+					Name:      "horse",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.March, 17, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    2,
+					Name:      "horse",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.March, 17, 12, 0, 0, 0, time.UTC),
+				},
+			},
+			queryEventNames: []string{"horse"},
+			stats: map[string]*types.OwnershipUsageStatisticsActiveUsers{
+				"horse": {
+					DAU: pointers.Ptr(int32(0)),
+					WAU: pointers.Ptr(int32(2)),
+					MAU: pointers.Ptr(int32(2)),
+				},
+			},
+		},
+		"previous day, different week events count as MAU, but not WAU or DAU": {
+			now: time.Date(2000, time.May, 21, 12, 0, 0, 0, time.UTC), // Sunday
+			events: []*Event{
+				{
+					UserID:    1,
+					Name:      "horse",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.May, 20, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    2,
+					Name:      "horse",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.May, 20, 12, 0, 0, 0, time.UTC),
+				},
+			},
+			queryEventNames: []string{"horse"},
+			stats: map[string]*types.OwnershipUsageStatisticsActiveUsers{
+				"horse": {
+					DAU: pointers.Ptr(int32(0)),
+					WAU: pointers.Ptr(int32(0)),
+					MAU: pointers.Ptr(int32(2)),
+				},
+			},
+		},
+		"previous day, different month events count as WAU but not MAU or DAU": {
+			now: time.Date(2000, time.August, 1, 12, 0, 0, 0, time.UTC), // Tuesday
+			events: []*Event{
+				{
+					UserID:    1,
+					Name:      "horse",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.July, 31, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    2,
+					Name:      "horse",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.July, 31, 12, 0, 0, 0, time.UTC),
+				},
+			},
+			queryEventNames: []string{"horse"},
+			stats: map[string]*types.OwnershipUsageStatisticsActiveUsers{
+				"horse": {
+					DAU: pointers.Ptr(int32(0)),
+					WAU: pointers.Ptr(int32(2)),
+					MAU: pointers.Ptr(int32(0)),
+				},
+			},
+		},
+		"return zeroes on missing events": {
+			now: time.Date(2000, time.September, 20, 12, 0, 0, 0, time.UTC),
+			events: []*Event{
+				{
+					UserID:    1,
+					Name:      "horse",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.September, 20, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    2,
+					Name:      "mice",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.September, 20, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    2,
+					Name:      "ram",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.September, 20, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    3,
+					Name:      "crane",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.September, 20, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    3,
+					Name:      "wolf",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.September, 20, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    4,
+					Name:      "coyote",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.September, 20, 12, 0, 0, 0, time.UTC),
+				},
+			},
+			queryEventNames: []string{"cat", "dog"},
+			stats: map[string]*types.OwnershipUsageStatisticsActiveUsers{
+				"cat": {
+					DAU: pointers.Ptr(int32(0)),
+					WAU: pointers.Ptr(int32(0)),
+					MAU: pointers.Ptr(int32(0)),
+				},
+				"dog": {
+					DAU: pointers.Ptr(int32(0)),
+					WAU: pointers.Ptr(int32(0)),
+					MAU: pointers.Ptr(int32(0)),
+				},
+			},
+		},
+		"only include events by name": {
+			now: time.Date(2000, time.November, 20, 12, 0, 0, 0, time.UTC),
+			events: []*Event{
+				{
+					UserID:    1,
+					Name:      "horse",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.November, 20, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    2,
+					Name:      "horse",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.November, 20, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    2,
+					Name:      "ram",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.November, 20, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    3,
+					Name:      "ram",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.November, 20, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    3,
+					Name:      "coyote",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.November, 20, 12, 0, 0, 0, time.UTC),
+				},
+				{
+					UserID:    4,
+					Name:      "coyote",
+					Source:    "BACKEND",
+					Timestamp: time.Date(2000, time.November, 20, 12, 0, 0, 0, time.UTC),
+				},
+			},
+			queryEventNames: []string{"horse", "ram"},
+			stats: map[string]*types.OwnershipUsageStatisticsActiveUsers{
+				"horse": {
+					DAU: pointers.Ptr(int32(2)),
+					WAU: pointers.Ptr(int32(2)),
+					MAU: pointers.Ptr(int32(2)),
+				},
+				"ram": {
+					DAU: pointers.Ptr(int32(2)),
+					WAU: pointers.Ptr(int32(2)),
+					MAU: pointers.Ptr(int32(2)),
+				},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Cleanup(func() {
+				_, err := db.ExecContext(ctx, "DELETE FROM event_logs")
+				require.NoError(t, err)
+			})
+
+			for _, e := range testCase.events {
+				//lint:ignore SA1019 existing usage of deprecated functionality.
+				// Use EventRecorder from internal/telemetryrecorder instead.
+				if err := db.EventLogs().Insert(ctx, e); err != nil {
+					t.Fatalf("failed inserting test data: %s", err)
+				}
+			}
+			stats, err := db.EventLogs().OwnershipFeatureActivity(ctx, testCase.now, testCase.queryEventNames...)
+			if err != nil {
+				t.Fatalf("querying activity failed: %s", err)
+			}
+			if diff := cmp.Diff(testCase.stats, stats); diff != "" {
+				t.Errorf("unexpected statistics returned:\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestEventLogs_AggregatedRepoMetadataStats(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	t.Parallel()
+	now := time.Date(2000, time.January, 20, 12, 0, 0, 0, time.UTC)
+	events := []*Event{
+		{
+			UserID:    1,
+			Name:      "RepoMetadataAdded",
+			Source:    "BACKEND",
+			Timestamp: now,
+		},
+		{
+			UserID:    1,
+			Name:      "RepoMetadataAdded",
+			Source:    "BACKEND",
+			Timestamp: now,
+		},
+		{
+			UserID:    1,
+			Name:      "RepoMetadataAdded",
+			Source:    "BACKEND",
+			Timestamp: time.Date(now.Year(), now.Month(), now.Day()-1, now.Hour(), 0, 0, 0, time.UTC),
+		},
+		{
+			UserID:    1,
+			Name:      "RepoMetadataUpdated",
+			Source:    "BACKEND",
+			Timestamp: now,
+		},
+		{
+			UserID:    1,
+			Name:      "RepoMetadataDeleted",
+			Source:    "BACKEND",
+			Timestamp: now,
+		},
+		{
+			UserID:    1,
+			Name:      "SearchSubmitted",
+			Argument:  json.RawMessage(`{"query": "repo:has(some:meta)"}`),
+			Source:    "BACKEND",
+			Timestamp: now,
+		},
+	}
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+	for _, e := range events {
+		//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
+		if err := db.EventLogs().Insert(ctx, e); err != nil {
+			t.Fatalf("failed inserting test data: %s", err)
+		}
+	}
+
+	for name, testCase := range map[string]struct {
+		now    time.Time
+		period PeriodType
+		stats  *types.RepoMetadataAggregatedEvents
+	}{
+		"daily": {
+			now:    now,
+			period: Daily,
+			stats: &types.RepoMetadataAggregatedEvents{
+				StartTime: time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC),
+				CreateRepoMetadata: &types.EventStats{
+					UsersCount:  pointers.Ptr(int32(1)),
+					EventsCount: pointers.Ptr(int32(2)),
+				},
+				UpdateRepoMetadata: &types.EventStats{
+					UsersCount:  pointers.Ptr(int32(1)),
+					EventsCount: pointers.Ptr(int32(1)),
+				},
+				DeleteRepoMetadata: &types.EventStats{
+					UsersCount:  pointers.Ptr(int32(1)),
+					EventsCount: pointers.Ptr(int32(1)),
+				},
+				SearchFilterUsage: &types.EventStats{
+					UsersCount:  pointers.Ptr(int32(1)),
+					EventsCount: pointers.Ptr(int32(1)),
+				},
+			},
+		},
+		"weekly": {
+			now:    now,
+			period: Weekly,
+			stats: &types.RepoMetadataAggregatedEvents{
+				StartTime: time.Date(now.Year(), now.Month(), now.Day()-int(now.Weekday()), 0, 0, 0, 0, time.UTC),
+				CreateRepoMetadata: &types.EventStats{
+					UsersCount:  pointers.Ptr(int32(1)),
+					EventsCount: pointers.Ptr(int32(3)),
+				},
+				UpdateRepoMetadata: &types.EventStats{
+					UsersCount:  pointers.Ptr(int32(1)),
+					EventsCount: pointers.Ptr(int32(1)),
+				},
+				DeleteRepoMetadata: &types.EventStats{
+					UsersCount:  pointers.Ptr(int32(1)),
+					EventsCount: pointers.Ptr(int32(1)),
+				},
+				SearchFilterUsage: &types.EventStats{
+					UsersCount:  pointers.Ptr(int32(1)),
+					EventsCount: pointers.Ptr(int32(1)),
+				},
+			},
+		},
+		"monthly": {
+			now:    now,
+			period: Monthly,
+			stats: &types.RepoMetadataAggregatedEvents{
+				StartTime: time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC),
+				CreateRepoMetadata: &types.EventStats{
+					UsersCount:  pointers.Ptr(int32(1)),
+					EventsCount: pointers.Ptr(int32(3)),
+				},
+				UpdateRepoMetadata: &types.EventStats{
+					UsersCount:  pointers.Ptr(int32(1)),
+					EventsCount: pointers.Ptr(int32(1)),
+				},
+				DeleteRepoMetadata: &types.EventStats{
+					UsersCount:  pointers.Ptr(int32(1)),
+					EventsCount: pointers.Ptr(int32(1)),
+				},
+				SearchFilterUsage: &types.EventStats{
+					UsersCount:  pointers.Ptr(int32(1)),
+					EventsCount: pointers.Ptr(int32(1)),
+				},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stats, err := db.EventLogs().AggregatedRepoMetadataEvents(ctx, testCase.now, testCase.period)
+			if err != nil {
+				t.Fatalf("querying activity failed: %s", err)
+			}
+			if diff := cmp.Diff(testCase.stats, stats); diff != "" {
+				t.Errorf("unexpected statistics returned:\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestMakeDateTruncExpression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long test")
+	}
+
+	logger := logtest.Scoped(t)
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+
+	cases := []struct {
+		name     string
+		unit     string
+		expr     string
+		expected string
+	}{
+		{
+			name:     "truncates to beginning of day in UTC",
+			unit:     "day",
+			expr:     "'2023-02-14T20:53:24Z'",
+			expected: "2023-02-14T00:00:00Z",
+		},
+		{
+			name:     "truncates to beginning of day in UTC, regardless of input timezone",
+			unit:     "day",
+			expr:     "'2023-02-14T20:53:24-09:00'",
+			expected: "2023-02-15T00:00:00Z",
+		},
+		{
+			name:     "truncates to beginning of week in UTC, starting with Sunday",
+			unit:     "week",
+			expr:     "'2023-02-14T20:53:24Z'",
+			expected: "2023-02-12T00:00:00Z",
+		},
+		{
+			name:     "truncates to beginning of month in UTC",
+			unit:     "month",
+			expr:     "'2023-02-14T20:53:24Z'",
+			expected: "2023-02-01T00:00:00Z",
+		},
+		{
+			name:     "truncates to rolling month in UTC, if month has 30 days",
+			unit:     "rolling_month",
+			expr:     "'2023-04-20T20:53:24Z'",
+			expected: "2023-03-20T00:00:00Z",
+		},
+		{
+			name:     "truncates to rolling month in UTC, even if March has 31 days",
+			unit:     "rolling_month",
+			expr:     "'2023-03-14T20:53:24Z'",
+			expected: "2023-02-14T00:00:00Z",
+		},
+		{
+			name:     "truncates to rolling month in UTC, even if Feb only has 28 days",
+			unit:     "rolling_month",
+			expr:     "'2023-02-14T20:53:24Z'",
+			expected: "2023-01-14T00:00:00Z",
+		},
+		{
+			name:     "truncates to rolling month in UTC, even for leap year February",
+			unit:     "rolling_month",
+			expr:     "'2024-02-29T20:53:24Z'",
+			expected: "2024-01-29T00:00:00Z",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			format := fmt.Sprintf("SELECT %s AS date", makeDateTruncExpression(tc.unit, tc.expr))
+			q := sqlf.Sprintf(format)
+			date, _, err := basestore.ScanFirstTime(db.Handle().QueryContext(ctx, q.Query(sqlf.PostgresBindVar), q.Args()...))
+			require.NoError(t, err)
+
+			require.Equal(t, tc.expected, date.Format(time.RFC3339))
+		})
+	}
+}
+
+func TestEventLogs_ID_INT64(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	logger := logtest.Scoped(t)
+	t.Parallel()
+	db := NewDB(logger, dbtest.NewDB(t))
+	ctx := context.Background()
+
+	now := time.Now()
+
+	startDate, _ := calcStartDate(now, Daily, 3)
+
+	// The Event struct's ID field needs to be int64 to support the event_logs table's bigint "id" column.
+	// This test is a bit of a circular reference, since the ID field must be int64 in order to populate the database.
+	events := []*Event{
+		{
+			ID:        int64(math.MaxInt64),
+			UserID:    1,
+			Name:      "SearchResultsQueried",
+			URL:       "http://sourcegraph.com",
+			Source:    "test",
+			Timestamp: startDate,
+		},
+		// this ID value happens to be the one that caused the error exposing the int32 struct type
+		{
+			ID:        2524326457,
+			UserID:    2,
+			Name:      "SearchResultsQueried",
+			URL:       "http://sourcegraph.com",
+			Source:    "test",
+			Timestamp: startDate,
+		},
+		{
+			ID:        int64(math.MinInt64),
+			UserID:    3,
+			Name:      "SearchResultsQueried",
+			URL:       "http://sourcegraph.com",
+			Source:    "test",
+			Timestamp: startDate,
+		},
+	}
+
+	for _, event := range events {
+		//lint:ignore SA1019 existing usage of deprecated functionality. Use EventRecorder from internal/telemetryrecorder instead.
+		if err := db.EventLogs().Insert(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("Ensure we can Scan all events", func(t *testing.T) {
+		have, err := db.EventLogs().ListAll(ctx, EventLogsListOptions{EventName: pointers.Ptr("SearchResultsQueried")})
+		require.NoError(t, err)
+		assert.Len(t, have, 3)
+	})
 }

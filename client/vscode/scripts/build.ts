@@ -5,17 +5,12 @@ import * as esbuild from 'esbuild'
 import { rm } from 'shelljs'
 
 import {
-    buildMonaco,
-    monacoPlugin,
-    MONACO_LANGUAGES_AND_FEATURES,
     packageResolutionPlugin,
     stylePlugin,
     workerPlugin,
-    RXJS_RESOLUTIONS,
     buildTimerPlugin,
-} from '@sourcegraph/build-config'
+} from '@sourcegraph/build-config/src/esbuild/plugins'
 
-const watch = !!process.env.WATCH
 const minify = process.env.NODE_ENV === 'production'
 const outdir = path.join(__dirname, '../dist')
 const isTest = !!process.env.IS_TEST
@@ -24,7 +19,6 @@ const TARGET_TYPE = process.env.TARGET_TYPE
 
 const SHARED_CONFIG = {
     outdir,
-    watch,
     minify,
     sourcemap: true,
 }
@@ -34,11 +28,11 @@ export async function build(): Promise<void> {
         rm('-rf', outdir)
     }
 
-    const buildPromises = []
+    const buildPromises: Promise<esbuild.BuildContext>[] = []
 
     if (TARGET_TYPE === 'node' || !TARGET_TYPE) {
         buildPromises.push(
-            esbuild.build({
+            esbuild.context({
                 entryPoints: { extension: path.join(__dirname, '/../src/extension.ts') },
                 bundle: true,
                 format: 'cjs',
@@ -50,12 +44,13 @@ export async function build(): Promise<void> {
                 },
                 ...SHARED_CONFIG,
                 outdir: path.join(SHARED_CONFIG.outdir, 'node'),
+                mainFields: ['module', 'main'], // for node-jsonc-parser; see https://github.com/microsoft/node-jsonc-parser/issues/57#issuecomment-1634726605
             })
         )
     }
     if (TARGET_TYPE === 'webworker' || !TARGET_TYPE) {
         buildPromises.push(
-            esbuild.build({
+            esbuild.context({
                 entryPoints: { extension: path.join(__dirname, '/../src/extension.ts') },
                 bundle: true,
                 format: 'cjs',
@@ -77,6 +72,19 @@ export async function build(): Promise<void> {
                         events: require.resolve('events'),
                         buffer: require.resolve('buffer/'),
                         './browserActionsNode': path.resolve(__dirname, '../src', 'commands', 'browserActionsWeb'),
+                        'http-proxy-agent': path.resolve(
+                            __dirname,
+                            '../src',
+                            'backend',
+                            'proxy-agent-fake-for-browser.ts'
+                        ),
+                        'https-proxy-agent': path.resolve(
+                            __dirname,
+                            '../src',
+                            'backend',
+                            'proxy-agent-fake-for-browser.ts'
+                        ),
+                        'node-fetch': path.resolve(__dirname, '../src', 'backend', 'node-fetch-fake-for-browser.ts'),
                     }),
                 ],
                 ...SHARED_CONFIG,
@@ -86,7 +94,7 @@ export async function build(): Promise<void> {
     }
 
     buildPromises.push(
-        esbuild.build({
+        esbuild.context({
             entryPoints: {
                 helpSidebar: path.join(__dirname, '../src/webview/sidebars/help'),
                 searchSidebar: path.join(__dirname, '../src/webview/sidebars/search'),
@@ -102,48 +110,45 @@ export async function build(): Promise<void> {
                 workerPlugin,
                 packageResolutionPlugin({
                     path: require.resolve('path-browserify'),
-                    ...RXJS_RESOLUTIONS,
-                    './Link': require.resolve('../src/webview/search-panel/alias/Link'),
-                    '../Link': require.resolve('../src/webview/search-panel/alias/Link'),
+                    process: require.resolve('process/browser'),
+                    http: require.resolve('stream-http'), // for stream search - event source polyfills
+                    https: require.resolve('https-browserify'), // for stream search - event source polyfills
                     './RepoSearchResult': require.resolve('../src/webview/search-panel/alias/RepoSearchResult'),
                     './CommitSearchResult': require.resolve('../src/webview/search-panel/alias/CommitSearchResult'),
+                    './SymbolSearchResult': require.resolve('../src/webview/search-panel/alias/SymbolSearchResult'),
                     './FileMatchChildren': require.resolve('../src/webview/search-panel/alias/FileMatchChildren'),
                     './RepoFileLink': require.resolve('../src/webview/search-panel/alias/RepoFileLink'),
                     '../documentation/ModalVideo': require.resolve('../src/webview/search-panel/alias/ModalVideo'),
                 }),
-                // Note: leads to "file has no exports" warnings
-                monacoPlugin(MONACO_LANGUAGES_AND_FEATURES),
                 buildTimerPlugin,
-                {
-                    name: 'codiconsDeduplicator',
-                    setup(build): void {
-                        build.onLoad({ filter: /\.ttf$/ }, args => {
-                            // Both `@vscode/codicons` and `monaco-editor`
-                            // node modules include a `codicons.ttf` file,
-                            // so null one out.
-                            if (!args.path.includes('@vscode/codicons')) {
-                                return {
-                                    contents: '',
-                                    loader: 'text',
-                                }
-                            }
-                            return null
-                        })
-                    },
-                },
             ],
             loader: {
                 '.ttf': 'file',
             },
+            define: {
+                'process.env.INTEGRATION_TESTS': isTest ? 'true' : 'false',
+            },
             assetNames: '[name]',
-            ignoreAnnotations: true,
-            treeShaking: false,
             ...SHARED_CONFIG,
             outdir: path.join(SHARED_CONFIG.outdir, 'webview'),
         })
     )
 
-    buildPromises.push(buildMonaco(outdir))
+    const ctxs = await Promise.all(buildPromises)
 
-    await Promise.all(buildPromises)
+    await Promise.all(ctxs.map(ctx => ctx.rebuild()))
+
+    if (process.env.WATCH) {
+        await Promise.all(ctxs.map(ctx => ctx.watch()))
+        await new Promise(() => {}) // wait forever
+    }
+
+    await Promise.all(ctxs.map(ctx => ctx.dispose()))
+}
+
+if (require.main === module) {
+    build().catch(error => {
+        console.error('Error:', error)
+        process.exit(1)
+    })
 }

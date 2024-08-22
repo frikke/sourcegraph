@@ -1,30 +1,35 @@
 import React, { useMemo, useRef } from 'react'
 
 import classNames from 'classnames'
-import { isEqual } from 'lodash'
-import ChartLineVariantIcon from 'mdi-react/ChartLineVariantIcon'
 import MapSearchIcon from 'mdi-react/MapSearchIcon'
-import { Route, RouteComponentProps, Switch } from 'react-router'
+import { Route, Routes } from 'react-router-dom'
 
-import { ActivationProps } from '@sourcegraph/shared/src/components/activation/Activation'
-import { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
-import * as GQL from '@sourcegraph/shared/src/schema'
-import { SettingsCascadeProps } from '@sourcegraph/shared/src/settings/settings'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { lazyComponent } from '@sourcegraph/shared/src/util/lazyComponent'
-import { PageHeader, LoadingSpinner } from '@sourcegraph/wildcard'
+import type { SiteSettingFields } from '@sourcegraph/shared/src/graphql-operations'
+import type { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
+import type { SettingsCascadeProps } from '@sourcegraph/shared/src/settings/settings'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { LoadingSpinner, PageHeader } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../auth'
+import type { AuthenticatedUser } from '../auth'
 import { withAuthenticatedUser } from '../auth/withAuthenticatedUser'
-import { BatchChangesProps } from '../batches'
-import { ErrorBoundary } from '../components/ErrorBoundary'
+import type { BatchChangesProps } from '../batches'
+import { RouteError } from '../components/ErrorBoundary'
 import { HeroPage } from '../components/HeroPage'
 import { Page } from '../components/Page'
 import { useFeatureFlag } from '../featureFlags/useFeatureFlag'
-import { RouteDescriptor } from '../util/contributions'
+import { useUserExternalAccounts } from '../hooks/useUserExternalAccounts'
+import type { RouteV6Descriptor } from '../util/contributions'
 
-import { overviewGroup } from './sidebaritems'
-import { SiteAdminSidebar, SiteAdminSideBarGroup, SiteAdminSideBarGroups } from './SiteAdminSidebar'
+import {
+    maintenanceGroupHeaderLabel,
+    maintenanceGroupInstrumentationItemLabel,
+    maintenanceGroupMigrationsItemLabel,
+    maintenanceGroupMonitoringItemLabel,
+    maintenanceGroupTracingItemLabel,
+    maintenanceGroupUpdatesItemLabel,
+} from './sidebaritems'
+import { SiteAdminSidebar, type SiteAdminSideBarGroups } from './SiteAdminSidebar'
 
 import styles from './SiteAdminArea.module.scss'
 
@@ -43,140 +48,83 @@ const NotSiteAdminPage: React.ComponentType<React.PropsWithChildren<{}>> = () =>
 export interface SiteAdminAreaRouteContext
     extends PlatformContextProps,
         SettingsCascadeProps,
-        ActivationProps,
         BatchChangesProps,
-        TelemetryProps {
-    site: Pick<GQL.ISite, '__typename' | 'id'>
+        TelemetryProps,
+        TelemetryV2Props {
+    site: Pick<SiteSettingFields, '__typename' | 'id'>
     authenticatedUser: AuthenticatedUser
-    isLightTheme: boolean
     isSourcegraphDotCom: boolean
 
     /** This property is only used by {@link SiteAdminOverviewPage}. */
     overviewComponents: readonly React.ComponentType<React.PropsWithChildren<{}>>[]
+
+    codeInsightsEnabled: boolean
+    applianceUpdateTarget: string
+
+    endUserOnboardingEnabled: boolean
 }
 
-export interface SiteAdminAreaRoute extends RouteDescriptor<SiteAdminAreaRouteContext> {}
+export interface SiteAdminAreaRoute extends RouteV6Descriptor<SiteAdminAreaRouteContext> {}
 
 interface SiteAdminAreaProps
-    extends RouteComponentProps<{}>,
-        PlatformContextProps,
+    extends PlatformContextProps,
         SettingsCascadeProps,
-        ActivationProps,
         BatchChangesProps,
-        TelemetryProps {
+        TelemetryProps,
+        TelemetryV2Props {
     routes: readonly SiteAdminAreaRoute[]
     sideBarGroups: SiteAdminSideBarGroups
     overviewComponents: readonly React.ComponentType<React.PropsWithChildren<unknown>>[]
     authenticatedUser: AuthenticatedUser
-    isLightTheme: boolean
     isSourcegraphDotCom: boolean
+    codeInsightsEnabled: boolean
+    applianceUpdateTarget: string
 }
 
-export const analyticsGroup: SiteAdminSideBarGroup = {
-    header: {
-        label: 'Analytics',
-        icon: ChartLineVariantIcon,
-    },
-    items: [
-        {
-            label: 'Overview',
-            to: '/site-admin/',
-            exact: true,
-        },
-        {
-            label: 'Search',
-            to: '/site-admin/analytics/search',
-        },
-        {
-            label: 'Code navigation',
-            to: '/site-admin/analytics/code-intel',
-        },
-        {
-            label: 'Users',
-            to: '/site-admin/analytics/users',
-        },
-        {
-            label: 'Insights',
-            to: '/site-admin/analytics/code-insights',
-        },
-        {
-            label: 'Batch changes',
-            to: '/site-admin/analytics/batch-changes',
-        },
-        {
-            label: 'Notebooks',
-            to: '/site-admin/analytics/notebooks',
-        },
-        {
-            label: 'Extensions',
-            to: '/site-admin/analytics/extensions',
-        },
-        {
-            label: 'Feedback survey',
-            to: '/site-admin/surveys',
-        },
-    ],
-}
-
-export const analyticsRoutes: readonly SiteAdminAreaRoute[] = [
-    {
-        path: '/analytics/search',
-        render: lazyComponent(() => import('./analytics/AnalyticsSearchPage'), 'AnalyticsSearchPage'),
-        exact: true,
-    },
-    {
-        path: '/analytics/code-intel',
-        render: lazyComponent(() => import('./analytics/AnalyticsCodeIntelPage'), 'AnalyticsCodeIntelPage'),
-        exact: true,
-    },
-    {
-        path: '/analytics/extensions',
-        render: lazyComponent(() => import('./analytics/AnalyticsExtensionsPage'), 'AnalyticsExtensionsPage'),
-        exact: true,
-    },
-    {
-        path: '/analytics/users',
-        render: lazyComponent(() => import('./analytics/AnalyticsUsersPage'), 'AnalyticsUsersPage'),
-        exact: true,
-    },
-    {
-        path: '/analytics/code-insights',
-        render: lazyComponent(() => import('./analytics/AnalyticsCodeInsightsPage'), 'AnalyticsCodeInsightsPage'),
-        exact: true,
-    },
-    {
-        path: '/analytics/batch-changes',
-        render: lazyComponent(() => import('./analytics/AnalyticsBatchChangesPage'), 'AnalyticsBatchChangesPage'),
-        exact: true,
-    },
-    {
-        path: '/analytics/notebooks',
-        render: lazyComponent(() => import('./analytics/AnalyticsNotebooksPage'), 'AnalyticsNotebooksPage'),
-        exact: true,
-    },
-    {
-        path: '/',
-        render: lazyComponent(() => import('./analytics/AnalyticsOverviewPage'), 'AnalyticsOverviewPage'),
-        exact: true,
-    },
-]
+const sourcegraphOperatorSiteAdminMaintenanceBlockItems = new Set([
+    maintenanceGroupInstrumentationItemLabel,
+    maintenanceGroupMonitoringItemLabel,
+    maintenanceGroupMigrationsItemLabel,
+    maintenanceGroupUpdatesItemLabel,
+    maintenanceGroupTracingItemLabel,
+])
 
 const AuthenticatedSiteAdminArea: React.FunctionComponent<React.PropsWithChildren<SiteAdminAreaProps>> = props => {
     const reference = useRef<HTMLDivElement>(null)
 
-    const [isAdminAnalyticsDisabled] = useFeatureFlag('admin-analytics-disabled', false)
+    const { data: externalAccounts, loading: isExternalAccountsLoading } = useUserExternalAccounts(
+        props.authenticatedUser.username
+    )
+    const [endUserOnboardingEnabled] = useFeatureFlag('end-user-onboarding')
+    const [isSourcegraphOperatorSiteAdminHideMaintenance] = useFeatureFlag(
+        'sourcegraph-operator-site-admin-hide-maintenance'
+    )
+    const adminSideBarGroups = useMemo(
+        () =>
+            props.sideBarGroups.map(group => {
+                if (
+                    !isSourcegraphOperatorSiteAdminHideMaintenance ||
+                    group.header?.label !== maintenanceGroupHeaderLabel ||
+                    (!isExternalAccountsLoading &&
+                        externalAccounts.some(account => account.serviceType === 'sourcegraph-operator'))
+                ) {
+                    return group
+                }
 
-    const adminSideBarGroups = useMemo(() => {
-        if (isAdminAnalyticsDisabled) {
-            return props.sideBarGroups
-        }
-        return [analyticsGroup, ...props.sideBarGroups.filter(group => !isEqual(group, overviewGroup))]
-    }, [isAdminAnalyticsDisabled, props.sideBarGroups])
-
-    const routes = useMemo(() => (!isAdminAnalyticsDisabled ? [...analyticsRoutes, ...props.routes] : props.routes), [
-        isAdminAnalyticsDisabled,
-        props.routes,
-    ])
+                return {
+                    ...group,
+                    items: group.items.filter(
+                        item => !sourcegraphOperatorSiteAdminMaintenanceBlockItems.has(item.label)
+                    ),
+                }
+            }),
+        [
+            props.sideBarGroups,
+            isSourcegraphOperatorSiteAdminHideMaintenance,
+            isExternalAccountsLoading,
+            externalAccounts,
+        ]
+    )
 
     // If not site admin, redirect to sign in.
     if (!props.authenticatedUser.siteAdmin) {
@@ -187,51 +135,56 @@ const AuthenticatedSiteAdminArea: React.FunctionComponent<React.PropsWithChildre
         authenticatedUser: props.authenticatedUser,
         platformContext: props.platformContext,
         settingsCascade: props.settingsCascade,
-        isLightTheme: props.isLightTheme,
         isSourcegraphDotCom: props.isSourcegraphDotCom,
         batchChangesEnabled: props.batchChangesEnabled,
         batchChangesExecutionEnabled: props.batchChangesExecutionEnabled,
         batchChangesWebhookLogsEnabled: props.batchChangesWebhookLogsEnabled,
-        activation: props.activation,
         site: { __typename: 'Site' as const, id: window.context.siteGQLID },
         overviewComponents: props.overviewComponents,
         telemetryService: props.telemetryService,
+        telemetryRecorder: props.telemetryRecorder,
+        codeInsightsEnabled: props.codeInsightsEnabled,
+        applianceUpdateTarget: props.applianceUpdateTarget,
+        endUserOnboardingEnabled,
     }
 
     return (
         <Page>
-            <PageHeader path={[{ text: 'Admin' }]} />
-            <div className="d-flex my-3" ref={reference}>
+            <PageHeader>
+                <PageHeader.Heading as="h2" styleAs="h1">
+                    <PageHeader.Breadcrumb>Admin</PageHeader.Breadcrumb>
+                </PageHeader.Heading>
+            </PageHeader>
+            <div className="d-flex my-3 flex-column flex-sm-row" ref={reference}>
                 <SiteAdminSidebar
-                    className={classNames('flex-0 mr-3', styles.sidebar)}
+                    className={classNames('flex-0 mr-3 mb-4', styles.sidebar)}
                     groups={adminSideBarGroups}
                     isSourcegraphDotCom={props.isSourcegraphDotCom}
                     batchChangesEnabled={props.batchChangesEnabled}
                     batchChangesExecutionEnabled={props.batchChangesExecutionEnabled}
                     batchChangesWebhookLogsEnabled={props.batchChangesWebhookLogsEnabled}
+                    codeInsightsEnabled={props.codeInsightsEnabled}
+                    applianceUpdateTarget={props.applianceUpdateTarget}
+                    endUserOnboardingEnabled={endUserOnboardingEnabled}
                 />
                 <div className="flex-bounded">
-                    <ErrorBoundary location={props.location}>
-                        <React.Suspense fallback={<LoadingSpinner className="m-2" />}>
-                            <Switch>
-                                {routes.map(
-                                    ({ render, path, exact, condition = () => true }) =>
-                                        condition(context) && (
-                                            <Route
-                                                // see https://github.com/ReactTraining/react-router/issues/4578#issuecomment-334489490
-                                                key="hardcoded-key"
-                                                path={props.match.url + path}
-                                                exact={exact}
-                                                render={routeComponentProps =>
-                                                    render({ ...context, ...routeComponentProps })
-                                                }
-                                            />
-                                        )
-                                )}
-                                <Route component={NotFoundPage} />
-                            </Switch>
-                        </React.Suspense>
-                    </ErrorBoundary>
+                    <React.Suspense fallback={<LoadingSpinner className="m-2" />}>
+                        <Routes>
+                            {props.routes.map(
+                                ({ render, path, condition = () => true }) =>
+                                    condition(context) && (
+                                        <Route
+                                            // see https://github.com/ReactTraining/react-router/issues/4578#issuecomment-334489490
+                                            key="hardcoded-key"
+                                            errorElement={<RouteError />}
+                                            path={path}
+                                            element={render(context)}
+                                        />
+                                    )
+                            )}
+                            <Route path="*" element={<NotFoundPage />} />
+                        </Routes>
+                    </React.Suspense>
                 </div>
             </div>
         </Page>

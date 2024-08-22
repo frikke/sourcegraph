@@ -1,11 +1,14 @@
 import { dataOrThrowErrors } from '@sourcegraph/http-client'
 
-import { useConnection, UseConnectionResult } from '../../../../../components/FilteredConnection/hooks/useConnection'
 import {
-    Scalars,
-    PreviewBatchSpecImportingChangesetFields,
+    useShowMorePagination,
+    type UseShowMorePaginationResult,
+} from '../../../../../components/FilteredConnection/hooks/useShowMorePagination'
+import type {
     BatchSpecImportingChangesetsResult,
     BatchSpecImportingChangesetsVariables,
+    PreviewBatchSpecImportingChangesetFields,
+    Scalars,
 } from '../../../../../graphql-operations'
 import { IMPORTING_CHANGESETS } from '../../../create/backend'
 
@@ -20,8 +23,10 @@ export type ImportingChangesetFields =
  *
  * @param batchSpecID The id of the batch spec to query
  */
-export const useImportingChangesets = (batchSpecID: Scalars['ID']): UseConnectionResult<ImportingChangesetFields> =>
-    useConnection<
+export const useImportingChangesets = (
+    batchSpecID: Scalars['ID']
+): UseShowMorePaginationResult<BatchSpecImportingChangesetsResult, ImportingChangesetFields> =>
+    useShowMorePagination<
         BatchSpecImportingChangesetsResult,
         BatchSpecImportingChangesetsVariables,
         PreviewBatchSpecImportingChangesetFields | { __typename: 'HiddenChangesetSpec'; id: Scalars['ID'] }
@@ -29,11 +34,9 @@ export const useImportingChangesets = (batchSpecID: Scalars['ID']): UseConnectio
         query: IMPORTING_CHANGESETS,
         variables: {
             batchSpec: batchSpecID,
-            after: null,
-            first: CHANGESETS_PER_PAGE_COUNT,
         },
         options: {
-            useURL: false,
+            pageSize: CHANGESETS_PER_PAGE_COUNT,
             fetchPolicy: 'cache-and-network',
         },
         getConnection: result => {

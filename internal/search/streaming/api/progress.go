@@ -38,6 +38,7 @@ type ProgressStats struct {
 	MatchCount          int
 	ElapsedMilliseconds int
 	RepositoriesCount   *int
+	BackendsMissing     int
 	ExcludedArchived    int
 	ExcludedForks       int
 
@@ -129,7 +130,7 @@ func displayLimitHandler(resultsResolver ProgressStats) (Skipped, bool) {
 	return Skipped{
 		Reason:   DisplayLimit,
 		Title:    "display limit hit",
-		Message:  fmt.Sprintf("We only display %d %s even if your search returned more results. To see all results and configure the display limit, use our CLI.", resultsResolver.DisplayLimit, result),
+		Message:  fmt.Sprintf("We only display %d %s even if your search returned more results. To see all results, use our CLI.", resultsResolver.DisplayLimit, result),
 		Severity: SeverityInfo,
 	}, true
 }
@@ -155,6 +156,21 @@ func shardMatchLimitHandler(resultsResolver ProgressStats) (Skipped, bool) {
 		Message:   "Not all results have been returned due to hitting a match limit. Sourcegraph has limits for the number of results returned from a line, document and repository.",
 		Severity:  SeverityInfo,
 		Suggested: suggest,
+	}, true
+}
+
+func backendsMissingHandler(resultsResolver ProgressStats) (Skipped, bool) {
+	count := resultsResolver.BackendsMissing
+	if count == 0 {
+		return Skipped{}, false
+	}
+
+	amount := number(count)
+	return Skipped{
+		Reason:   BackendMissing,
+		Title:    fmt.Sprintf("%s %s down", amount, plural("backend", "backends", count)),
+		Message:  "Some results may be missing due to backends being down. This is likely transient and due to a rollout, so retry your search.",
+		Severity: SeverityWarn,
 	}, true
 }
 
@@ -204,6 +220,7 @@ var skippedHandlers = []func(stats ProgressStats) (Skipped, bool){
 	shardMatchLimitHandler,
 	// repositoryLimitHandler,
 	shardTimeoutHandler,
+	backendsMissingHandler,
 	excludedForkHandler,
 	excludedArchiveHandler,
 	displayLimitHandler,

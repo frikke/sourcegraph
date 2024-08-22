@@ -1,5 +1,6 @@
-import { showAccountSecurityPage, showPasswordsPage } from './cloud-ga'
-import { UserSettingsSidebarItems } from './UserSettingsSidebar'
+import { canWriteBatchChanges } from '../../batches/utils'
+
+import type { UserSettingsSidebarItems } from './UserSettingsSidebar'
 
 export const userSettingsSideBarItems: UserSettingsSidebarItems = [
     {
@@ -13,11 +14,16 @@ export const userSettingsSideBarItems: UserSettingsSidebarItems = [
         exact: true,
     },
     {
-        label: 'Password',
-        to: '/password',
-        exact: true,
-        // Only the builtin auth provider has a password.
-        condition: showPasswordsPage,
+        to: '/batch-changes',
+        label: 'Batch Changes',
+        condition: ({ batchChangesEnabled, user: { viewerCanAdminister }, authenticatedUser }) =>
+            batchChangesEnabled && viewerCanAdminister && canWriteBatchChanges(authenticatedUser),
+    },
+    {
+        to: '/executors/secrets',
+        label: 'Executor secrets',
+        condition: ({ batchChangesEnabled, user: { viewerCanAdminister }, authenticatedUser }) =>
+            batchChangesEnabled && viewerCanAdminister && canWriteBatchChanges(authenticatedUser),
     },
     {
         label: 'Emails',
@@ -29,23 +35,30 @@ export const userSettingsSideBarItems: UserSettingsSidebarItems = [
         to: '/tokens',
         condition: () => window.context.accessTokensAllow !== 'none',
     },
-    //  future GA Cloud nav items
     {
         label: 'Account security',
         to: '/security',
         exact: true,
-        condition: showAccountSecurityPage,
     },
     {
-        label: 'Your organizations',
-        to: '/organizations',
-        condition: context => context.openBetaEnabled,
-        status: 'new',
+        label: 'Quotas',
+        to: '/quota',
         exact: true,
+        condition: ({ authenticatedUser }) => authenticatedUser.siteAdmin,
     },
     {
         label: 'Product research',
         to: '/product-research',
         condition: () => window.context.productResearchPageEnabled,
+    },
+    {
+        label: 'Permissions',
+        to: '/permissions',
+        exact: true,
+    },
+    {
+        to: '/event-log',
+        label: 'Event log',
+        condition: ({ user: { viewerCanAdminister } }) => viewerCanAdminister,
     },
 ]

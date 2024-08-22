@@ -1,14 +1,16 @@
 import assert from 'assert'
 
+import { afterEach, beforeEach, describe, it } from 'mocha'
+
 import { accessibilityAudit } from '@sourcegraph/shared/src/testing/accessibility'
-import { createDriverForTest, Driver } from '@sourcegraph/shared/src/testing/driver'
+import { createDriverForTest, type Driver } from '@sourcegraph/shared/src/testing/driver'
 import { settingsID, testUserID } from '@sourcegraph/shared/src/testing/integration/graphQlResults'
 import { afterEachSaveScreenshotIfFailed } from '@sourcegraph/shared/src/testing/screenshotReporter'
 import { retry } from '@sourcegraph/shared/src/testing/utils'
 
-import { createWebIntegrationTestContext, WebIntegrationTestContext } from './context'
+import { createWebIntegrationTestContext, type WebIntegrationTestContext } from './context'
 import { commonWebGraphQlResults } from './graphQlResults'
-import { createEditorAPI, percySnapshotWithVariants } from './utils'
+import { createEditorAPI, isElementDisabled } from './utils'
 
 describe('Settings', () => {
     let driver: Driver
@@ -34,8 +36,15 @@ describe('Settings', () => {
                 SettingsCascade: () => ({
                     settingsSubject: {
                         settingsCascade: {
+                            final: '',
                             subjects: [
                                 {
+                                    __typename: 'User',
+                                    id: '123',
+                                    settingsURL: '#',
+                                    viewerCanAdminister: true,
+                                    username: 'testuser',
+                                    displayName: 'Test User',
                                     latestSettings: {
                                         id: settingsID,
                                         contents: JSON.stringify({}),
@@ -65,7 +74,11 @@ describe('Settings', () => {
                         avatarURL: null,
                         viewerCanAdminister: true,
                         builtinAuth: true,
-                        tags: [],
+                        createdAt: '2020-03-02T11:52:15Z',
+                        roles: {
+                            __typename: 'RoleConnection',
+                            nodes: [],
+                        },
                     },
                 }),
                 UserSettingsAreaUserProfile: () => ({
@@ -82,10 +95,14 @@ describe('Settings', () => {
                         siteAdmin: true,
                         builtinAuth: true,
                         createdAt: '2020-03-02T11:52:15Z',
-                        emails: [{ email: 'test@sourcegraph.test', verified: true }],
+                        emails: [{ email: 'test@sourcegraph.test', verified: true, isPrimary: true }],
                         organizations: { nodes: [] },
                         permissionsInfo: null,
-                        tags: [],
+                        scimControlled: false,
+                        roles: {
+                            __typename: 'RoleConnection',
+                            nodes: [],
+                        },
                     },
                 }),
             })
@@ -95,9 +112,7 @@ describe('Settings', () => {
             await driver.page.waitForSelector('.test-save-toolbar-save')
 
             assert.strictEqual(
-                await driver.page.evaluate(
-                    () => document.querySelector<HTMLButtonElement>('.test-save-toolbar-save')?.disabled
-                ),
+                await isElementDisabled(driver, '.test-save-toolbar-save'),
                 true,
                 'Expected save button to be disabled'
             )
@@ -105,8 +120,6 @@ describe('Settings', () => {
             // The editor API needs to be created before taking the screenshot
             // (waits for the editor to be ready)
             const editor = await createEditorAPI(driver, '.test-settings-file .test-editor')
-
-            await percySnapshotWithVariants(driver.page, 'Settings page')
             await accessibilityAudit(driver.page)
 
             // Replace with new settings

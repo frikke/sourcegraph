@@ -1,18 +1,23 @@
 import assert from 'assert'
 
 import expect from 'expect'
+import { beforeEach, describe, it } from 'mocha'
 
-import { createDriverForTest, Driver } from '@sourcegraph/shared/src/testing/driver'
+import { createDriverForTest, type Driver } from '@sourcegraph/shared/src/testing/driver'
 import { afterEachSaveScreenshotIfFailed } from '@sourcegraph/shared/src/testing/screenshotReporter'
 
-import { GetDashboardAccessibleInsightsResult } from '../../../graphql-operations'
-import { createWebIntegrationTestContext, WebIntegrationTestContext } from '../../context'
+import type { FindInsightsBySearchTermResult } from '../../../graphql-operations'
+import { createWebIntegrationTestContext, type WebIntegrationTestContext } from '../../context'
 import { GET_DASHBOARD_INSIGHTS_EMPTY, INSIGHTS_DASHBOARDS } from '../fixtures/dashboards'
 import { overrideInsightsGraphQLApi } from '../utils/override-insights-graphql-api'
 
-const ALL_AVAILABLE_INSIGHTS_LIST: GetDashboardAccessibleInsightsResult = {
-    dashboardInsightsIds: { nodes: [{ views: { nodes: [] } }] },
-    accessibleInsights: {
+const ALL_AVAILABLE_INSIGHTS_LIST: FindInsightsBySearchTermResult = {
+    insightViews: {
+        pageInfo: {
+            endCursor: null,
+            hasNextPage: false,
+        },
+        totalCount: 3,
         nodes: [
             {
                 __typename: 'InsightView',
@@ -21,6 +26,14 @@ const ALL_AVAILABLE_INSIGHTS_LIST: GetDashboardAccessibleInsightsResult = {
                     __typename: 'LineChartInsightViewPresentation',
                     title: 'First Insight',
                 },
+                dataSeriesDefinitions: [
+                    {
+                        __typename: 'SearchInsightDataSeriesDefinition',
+                        query: 'Test query 1',
+                        groupBy: null,
+                        generatedFromCaptureGroups: false,
+                    },
+                ],
             },
             {
                 __typename: 'InsightView',
@@ -29,6 +42,14 @@ const ALL_AVAILABLE_INSIGHTS_LIST: GetDashboardAccessibleInsightsResult = {
                     __typename: 'LineChartInsightViewPresentation',
                     title: 'Second Insight',
                 },
+                dataSeriesDefinitions: [
+                    {
+                        __typename: 'SearchInsightDataSeriesDefinition',
+                        query: 'Test query 2',
+                        groupBy: null,
+                        generatedFromCaptureGroups: false,
+                    },
+                ],
             },
             {
                 __typename: 'InsightView',
@@ -37,6 +58,14 @@ const ALL_AVAILABLE_INSIGHTS_LIST: GetDashboardAccessibleInsightsResult = {
                     __typename: 'LineChartInsightViewPresentation',
                     title: 'Third Insight',
                 },
+                dataSeriesDefinitions: [
+                    {
+                        __typename: 'SearchInsightDataSeriesDefinition',
+                        query: 'Test query 3',
+                        groupBy: null,
+                        generatedFromCaptureGroups: false,
+                    },
+                ],
             },
         ],
     },
@@ -65,9 +94,18 @@ describe('Code insights empty dashboard', () => {
         overrideInsightsGraphQLApi({
             testContext,
             overrides: {
+                GetAllInsightConfigurations: () => ({
+                    __typename: 'Query',
+                    insightViews: {
+                        __typename: 'InsightViewConnection',
+                        nodes: [],
+                        pageInfo: { __typename: 'PageInfo', endCursor: null, hasNextPage: false },
+                        totalCount: 0,
+                    },
+                }),
                 InsightsDashboards: () => INSIGHTS_DASHBOARDS,
                 GetDashboardInsights: () => GET_DASHBOARD_INSIGHTS_EMPTY,
-                GetDashboardAccessibleInsights: () => ALL_AVAILABLE_INSIGHTS_LIST,
+                FindInsightsBySearchTerm: () => ALL_AVAILABLE_INSIGHTS_LIST,
                 AddInsightViewToDashboard: () => ({
                     addInsightViewToDashboard: {
                         dashboard: { id: 'EMPTY_DASHBOARD' },
@@ -76,17 +114,20 @@ describe('Code insights empty dashboard', () => {
             },
         })
 
-        await driver.page.goto(driver.sourcegraphBaseUrl + '/insights/dashboards/all')
-        await driver.page.waitForSelector('[data-reach-listbox-input]')
-        await driver.page.click('[data-reach-listbox-input]')
-        await driver.page.click('[data-value="EMPTY_DASHBOARD"]')
+        await driver.page.goto(driver.sourcegraphBaseUrl + '/insights/all')
+        await driver.page.waitForSelector('button[role="tab"]')
+        await (await driver.page.$x("//button[contains(., 'Dashboards')]"))[0].click()
 
+        // Check that first personal dashboard redirection works as expected (pick first personal dashboard
+        // if URL doesn't have dashboard id
+        await driver.page.waitForSelector('[aria-label="Choose a dashboard, Empty Dashboard"]')
         expect(driver.page.url()).toBe(`${driver.sourcegraphBaseUrl}/insights/dashboards/EMPTY_DASHBOARD`)
 
         await (await driver.page.$x("//button[contains(., 'Add or remove insights')]"))[0].click()
-        await driver.page.waitForSelector('form')
+        // Wait for the suggestion list item are rendered
+        await driver.page.waitForSelector('form ul li')
 
-        await driver.page.click('input[value="insight_003"]')
+        await (await driver.page.$x("//li[contains(., 'Second Insight')]"))[0].click()
 
         const variables = await testContext.waitForGraphQLRequest(async () => {
             const [button] = await driver.page.$x("//button[contains(., 'Save')]")
@@ -98,7 +139,7 @@ describe('Code insights empty dashboard', () => {
 
         assert.deepStrictEqual(variables, {
             dashboardId: 'EMPTY_DASHBOARD',
-            insightViewId: 'insight_003',
+            insightViewId: 'insight_002',
         })
     })
 })

@@ -2,28 +2,28 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { mdiBookOutline } from '@mdi/js'
 import classNames from 'classnames'
-import * as H from 'history'
-import { Redirect, useHistory, useLocation } from 'react-router'
-import { Observable } from 'rxjs'
+import { Navigate, useLocation, useNavigate, type Location, type NavigateFunction } from 'react-router-dom'
+import type { Observable } from 'rxjs'
 import { catchError, startWith, switchMap } from 'rxjs/operators'
 
-import { asError, ErrorLike, isErrorLike } from '@sourcegraph/common'
+import { asError, isErrorLike, type ErrorLike } from '@sourcegraph/common'
 import { useTemporarySetting } from '@sourcegraph/shared/src/settings/temporary/useTemporarySetting'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { PageHeader, Button, useEventObservable, Alert, ButtonLink } from '@sourcegraph/wildcard'
+import { type TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { Alert, Button, ButtonLink, PageHeader, useEventObservable } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../auth'
-import { FilteredConnectionFilter } from '../../components/FilteredConnection'
+import type { AuthenticatedUser } from '../../auth'
+import type { Filter } from '../../components/FilteredConnection'
 import { Page } from '../../components/Page'
-import { CreateNotebookVariables, NotebooksOrderBy } from '../../graphql-operations'
+import { NotebooksOrderBy, type CreateNotebookVariables } from '../../graphql-operations'
 import { PageRoutes } from '../../routes.constants'
-import { fetchNotebooks as _fetchNotebooks, createNotebook as _createNotebook } from '../backend'
+import { createNotebook as _createNotebook, fetchNotebooks as _fetchNotebooks } from '../backend'
 
 import { NotebooksGettingStartedTab } from './NotebooksGettingStartedTab'
-import { NotebooksList, NotebooksListProps } from './NotebooksList'
+import { NotebooksList, type NotebooksListProps } from './NotebooksList'
 import { NotebooksListPageHeader } from './NotebooksListPageHeader'
 
-export interface NotebooksListPageProps extends TelemetryProps {
+export interface NotebooksListPageProps extends TelemetryProps, TelemetryV2Props {
     authenticatedUser: AuthenticatedUser | null
     fetchNotebooks?: typeof _fetchNotebooks
     createNotebook?: typeof _createNotebook
@@ -34,59 +34,64 @@ type NotebooksTab = 'notebooks' | 'getting-started'
 type Tabs = { tab: NotebooksTab; title: string; isActive: boolean; logEventName: string }[]
 
 function getSelectedTabFromLocation(locationSearch: string, authenticatedUser: AuthenticatedUser | null): NotebooksTab {
-    if (!authenticatedUser) {
-        return 'getting-started'
-    }
-
     const urlParameters = new URLSearchParams(locationSearch)
     switch (urlParameters.get('tab')) {
-        case 'notebooks':
+        case 'notebooks': {
             return 'notebooks'
-        case 'getting-started':
+        }
+        case 'getting-started': {
             return 'getting-started'
+        }
     }
-    return 'notebooks'
+    return authenticatedUser ? 'notebooks' : 'getting-started'
 }
 
-function setSelectedLocationTab(location: H.Location, history: H.History, selectedTab: NotebooksTab): void {
+function setSelectedLocationTab(location: Location, navigate: NavigateFunction, selectedTab: NotebooksTab): void {
     const urlParameters = new URLSearchParams(location.search)
     urlParameters.set('tab', selectedTab)
     if (location.search !== urlParameters.toString()) {
-        history.replace({ ...location, search: urlParameters.toString() })
+        navigate({ ...location, search: urlParameters.toString() }, { replace: true })
     }
 }
 
 const LOADING = 'loading' as const
 
+export type NotebooksFilterEvents = 'myNotebooks' | 'starredNotebooks' | 'allNotebooks' | 'orgNotebooks'
+
 interface NotebooksFilter extends Pick<NotebooksListProps, 'creatorUserID' | 'starredByUserID' | 'namespace'> {
     id: string
     label: string
-    logEventName: string
+    logEventName: NotebooksFilterEvents
 }
 
 export const NotebooksListPage: React.FunctionComponent<React.PropsWithChildren<NotebooksListPageProps>> = ({
     authenticatedUser,
     telemetryService,
+    telemetryRecorder,
     fetchNotebooks = _fetchNotebooks,
     createNotebook = _createNotebook,
 }) => {
-    useEffect(() => {
-        telemetryService.logPageView('SearchNotebooksListPage')
-    }, [telemetryService])
-
     const [importState, setImportState] = useState<typeof LOADING | ErrorLike | undefined>()
-    const history = useHistory()
+    const navigate = useNavigate()
     const location = useLocation()
 
     const [selectedTab, setSelectedTab] = useState<NotebooksTab>(
         getSelectedTabFromLocation(location.search, authenticatedUser)
     )
+
+    useEffect(() => {
+        telemetryService.logPageView('SearchNotebooksListPage')
+        telemetryRecorder.recordEvent('notebooks.list', 'view', {
+            metadata: { tab: selectedTab === 'notebooks' ? 0 : 1 },
+        })
+    }, [telemetryService, telemetryRecorder, selectedTab])
+
     const [selectedFilter, setSelectedFilter] = useState<NotebooksFilter>()
 
     const [hasSeenGettingStartedTab] = useTemporarySetting('search.notebooks.gettingStartedTabSeen', false)
 
     useEffect(() => {
-        if (typeof hasSeenGettingStartedTab !== 'undefined' && !hasSeenGettingStartedTab) {
+        if (hasSeenGettingStartedTab !== undefined && !hasSeenGettingStartedTab) {
             setSelectedTab('getting-started')
         }
     }, [hasSeenGettingStartedTab, setSelectedTab])
@@ -94,19 +99,20 @@ export const NotebooksListPage: React.FunctionComponent<React.PropsWithChildren<
     const onSelectTab = useCallback(
         (tab: NotebooksTab, logName: string) => {
             setSelectedTab(tab)
-            setSelectedLocationTab(location, history, tab)
+            setSelectedLocationTab(location, navigate, tab)
             telemetryService.log(logName)
+            telemetryRecorder.recordEvent(`notebooks.list.tab.${tab}`, 'click')
         },
-        [history, location, setSelectedTab, telemetryService]
+        [navigate, location, setSelectedTab, telemetryService, telemetryRecorder]
     )
 
-    const orderOptions: FilteredConnectionFilter[] = [
+    const orderOptions: Filter[] = [
         {
             label: 'Order by',
             type: 'select',
             id: 'order',
             tooltip: 'Order notebooks',
-            values: [
+            options: [
                 {
                     value: 'updated-at-desc',
                     label: 'Last update (descending)',
@@ -163,8 +169,8 @@ export const NotebooksListPage: React.FunctionComponent<React.PropsWithChildren<
         () =>
             authenticatedUser?.organizations.nodes.map(org => ({
                 id: `org-${org.id}-notebooks`,
-                label: `${org.displayName} notebooks`,
-                logEventName: 'OrgNotebooks',
+                label: `${org.name} notebooks`,
+                logEventName: 'orgNotebooks',
                 namespace: org.id,
             })),
         [authenticatedUser]
@@ -195,18 +201,18 @@ export const NotebooksListPage: React.FunctionComponent<React.PropsWithChildren<
                     id: 'my-notebooks',
                     label: 'Created by me',
                     creatorUserID: authenticatedUser.id,
-                    logEventName: 'MyNotebooks',
+                    logEventName: 'myNotebooks',
                 },
                 authenticatedUser && {
                     id: 'starred-notebooks',
                     label: 'Starred',
                     starredByUserID: authenticatedUser.id,
-                    logEventName: 'StarredNotebooks',
+                    logEventName: 'starredNotebooks',
                 },
                 {
                     id: 'all-notebooks',
                     label: 'All notebooks',
-                    logEventName: 'ExploreNotebooks',
+                    logEventName: 'exploreNotebooks',
                 },
                 ...(orgFilters || []),
             ].filter((filter): filter is NotebooksFilter => !!filter),
@@ -239,7 +245,8 @@ export const NotebooksListPage: React.FunctionComponent<React.PropsWithChildren<
 
     if (importedNotebookOrError && importedNotebookOrError !== LOADING) {
         telemetryService.log('SearchNotebookImportedFromMarkdown')
-        return <Redirect to={PageRoutes.Notebook.replace(':id', importedNotebookOrError.id)} />
+        telemetryRecorder.recordEvent('notebook', 'importedFromMarkdown')
+        return <Navigate to={PageRoutes.Notebook.replace(':id', importedNotebookOrError.id)} replace={true} />
     }
 
     return (
@@ -253,6 +260,7 @@ export const NotebooksListPage: React.FunctionComponent<React.PropsWithChildren<
                                 importNotebook={importNotebook}
                                 setImportState={setImportState}
                                 telemetryService={telemetryService}
+                                telemetryRecorder={telemetryRecorder}
                             />
                         )
                     }
@@ -322,7 +330,10 @@ export const NotebooksListPage: React.FunctionComponent<React.PropsWithChildren<
                 )}
 
                 {selectedTab === 'getting-started' && (
-                    <NotebooksGettingStartedTab telemetryService={telemetryService} />
+                    <NotebooksGettingStartedTab
+                        telemetryService={telemetryService}
+                        authenticatedUser={authenticatedUser}
+                    />
                 )}
             </Page>
         </div>

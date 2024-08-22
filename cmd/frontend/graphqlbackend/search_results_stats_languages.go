@@ -5,16 +5,14 @@ import (
 	"io/fs"
 	"sync"
 
-	"github.com/neelance/parallel"
-
+	"github.com/sourcegraph/conc/pool"
 	"github.com/sourcegraph/log"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/backend"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/inventory"
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/database"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver"
-	"github.com/sourcegraph/sourcegraph/internal/goroutine"
-	"github.com/sourcegraph/sourcegraph/internal/inventory"
 	"github.com/sourcegraph/sourcegraph/internal/search/job/jobutil"
 	"github.com/sourcegraph/sourcegraph/internal/search/query"
 	"github.com/sourcegraph/sourcegraph/internal/search/result"
@@ -29,8 +27,8 @@ func (srs *searchResultsStats) Languages(ctx context.Context) ([]*languageStatis
 		return nil, err
 	}
 
-	logger := srs.logger.Scoped("languages", "provide stats on langauges from the search results")
-	langs, err := searchResultsStatsLanguages(ctx, logger, srs.sr.db, matches)
+	logger := srs.logger.Scoped("languages")
+	langs, err := searchResultsStatsLanguages(ctx, logger, srs.sr.db, gitserver.NewClient("graphql.searchresultlanguages"), matches)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +63,7 @@ func (srs *searchResultsStats) getResults(ctx context.Context) (result.Matches, 
 	return srs.results, srs.err
 }
 
-func searchResultsStatsLanguages(ctx context.Context, logger log.Logger, db database.DB, matches []result.Match) ([]inventory.Lang, error) {
+func searchResultsStatsLanguages(ctx context.Context, logger log.Logger, db database.DB, gsClient gitserver.Client, matches []result.Match) ([]inventory.Lang, error) {
 	// Batch our operations by repo-commit.
 	type repoCommit struct {
 		repo     api.RepoID
@@ -82,11 +80,11 @@ func searchResultsStatsLanguages(ctx context.Context, logger log.Logger, db data
 		repos    = map[api.RepoID]types.MinimalRepo{}
 		filesMap = map[repoCommit]*fileStatsWork{}
 
-		run = parallel.NewRun(16)
-
 		allInventories   []inventory.Inventory
 		allInventoriesMu sync.Mutex
 	)
+
+	p := pool.New().WithErrors().WithMaxGoroutines(16)
 
 	// Track the mapping of repo ID -> repo object as we iterate.
 	sawRepo := func(repo types.MinimalRepo) {
@@ -129,24 +127,20 @@ func searchResultsStatsLanguages(ctx context.Context, logger log.Logger, db data
 			}
 		} else if repoMatch, ok := res.(*result.RepoMatch); ok && !hasNonRepoMatches {
 			sawRepo(repoMatch.RepoName())
-			run.Acquire()
-			goroutine.Go(func() {
-				defer run.Release()
-
-				repoName := repoMatch.RepoName()
-				_, oid, err := gitserver.NewClient(db).GetDefaultBranch(ctx, repoName.Name, false)
+			p.Go(func() error {
+				repoName := repoMatch.Name
+				_, oid, err := gsClient.GetDefaultBranch(ctx, repoName, false)
 				if err != nil {
-					run.Error(err)
-					return
+					return err
 				}
-				inv, err := backend.NewRepos(logger, db).GetInventory(ctx, repoName.ToRepo(), oid, true)
+				inv, err := backend.NewRepos(logger, db, gsClient).GetInventory(ctx, repoName, oid, true)
 				if err != nil {
-					run.Error(err)
-					return
+					return err
 				}
 				allInventoriesMu.Lock()
 				allInventories = append(allInventories, *inv)
 				allInventoriesMu.Unlock()
+				return nil
 			})
 		} else if _, ok := res.(*result.CommitMatch); ok {
 			return nil, errors.New("language statistics do not support diff searches")
@@ -156,21 +150,16 @@ func searchResultsStatsLanguages(ctx context.Context, logger log.Logger, db data
 	for key_, work_ := range filesMap {
 		key := key_
 		work := work_
-		run.Acquire()
-		goroutine.Go(func() {
-			defer run.Release()
-
-			invCtx, err := backend.InventoryContext(logger, repos[key.repo].Name, db, key.commitID, true)
+		p.Go(func() error {
+			invCtx, err := backend.InventoryContext(logger, repos[key.repo].Name, gsClient, key.commitID, true)
 			if err != nil {
-				run.Error(err)
-				return
+				return err
 			}
 
 			// Inventory all full-entry (files and trees) matches together.
 			inv, err := invCtx.Entries(ctx, work.fullEntries...)
 			if err != nil {
-				run.Error(err)
-				return
+				return err
 			}
 			allInventoriesMu.Lock()
 			allInventories = append(allInventories, inv)
@@ -183,8 +172,7 @@ func searchResultsStatsLanguages(ctx context.Context, logger log.Logger, db data
 					fileInfo{path: partialFile, isDir: false},
 				)
 				if err != nil {
-					run.Error(err)
-					return
+					return err
 				}
 				for i := range inv.Languages {
 					inv.Languages[i].TotalLines = lines
@@ -193,10 +181,11 @@ func searchResultsStatsLanguages(ctx context.Context, logger log.Logger, db data
 				allInventories = append(allInventories, inv)
 				allInventoriesMu.Unlock()
 			}
+			return nil
 		})
 	}
 
-	if err := run.Wait(); err != nil {
+	if err := p.Wait(); err != nil {
 		return nil, err
 	}
 	return inventory.Sum(allInventories).Languages, nil

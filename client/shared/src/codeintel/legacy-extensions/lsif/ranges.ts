@@ -2,11 +2,11 @@
 import gql from 'tagged-template-noop'
 
 import * as sourcegraph from '../api'
-import { queryGraphQL as sgQueryGraphQL, QueryGraphQLFn } from '../util/graphql'
+import { queryGraphQL as sgQueryGraphQL, type QueryGraphQLFn } from '../util/graphql'
 
-import { GenericLSIFResponse, queryLSIF } from './api'
-import { HoverPayload } from './definition-hover'
-import { LocationConnectionNode, nodeToLocation } from './locations'
+import { type GenericLSIFResponse, queryLSIF } from './api'
+import type { HoverPayload } from './definition-hover'
+import { type LocationConnectionNode, nodeToLocation } from './locations'
 
 /** The size of the bounds on each ranges request. */
 const RANGE_WINDOW_SIZE = 50
@@ -62,7 +62,6 @@ interface RangeWindow {
  */
 export function makeRangeWindowFactory(
     hasImplementationsField: boolean,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     queryGraphQL: QueryGraphQLFn<any> = sgQueryGraphQL
 ): Promise<RangeWindowFactoryFn> {
     const disabled = sourcegraph.getSetting<boolean>('codeIntel.disableRangeQueries')
@@ -135,7 +134,6 @@ export async function findOverlappingWindows(
     position: sourcegraph.Position,
     rangeWindows: RangeWindow[],
     hasImplementationsField: boolean,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     queryGraphQL: QueryGraphQLFn<any> = sgQueryGraphQL
 ): Promise<CodeIntelligenceRange[] | null> {
     let index = -1
@@ -262,8 +260,11 @@ const rangesQuery = (hasImplementationsField: boolean): string => {
     return gql`
     query LegacyRanges($repository: String!, $commit: String!, $path: String!, $startLine: Int!, $endLine: Int!) {
         repository(name: $repository) {
+            id
             commit(rev: $commit) {
+                id
                 blob(path: $path) {
+                    canonicalURL
                     lsif {
                         ranges(startLine: $startLine, endLine: $endLine) {
                             nodes {

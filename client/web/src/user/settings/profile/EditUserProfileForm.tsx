@@ -1,16 +1,17 @@
 import React, { useCallback, useState } from 'react'
 
-import { useHistory } from 'react-router'
+import { useNavigate } from 'react-router-dom'
+import { lastValueFrom } from 'rxjs'
 
-import { Form } from '@sourcegraph/branded/src/components/Form'
 import { gql, useMutation } from '@sourcegraph/http-client'
-import { Container, Button, Alert } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Container, Button, Alert, Form } from '@sourcegraph/wildcard'
 
 import { refreshAuthenticatedUser } from '../../../auth'
-import { EditUserProfilePage, UpdateUserResult, UpdateUserVariables } from '../../../graphql-operations'
-import { eventLogger } from '../../../tracking/eventLogger'
+import type { EditUserProfilePage, UpdateUserResult, UpdateUserVariables } from '../../../graphql-operations'
 
-import { UserProfileFormFields, UserProfileFormFieldsValue } from './UserProfileFormFields'
+import { UserProfileFormFields, type UserProfileFormFieldsValue } from './UserProfileFormFields'
 
 export const UPDATE_USER = gql`
     mutation UpdateUser($user: ID!, $username: String!, $displayName: String, $avatarURL: String) {
@@ -23,8 +24,8 @@ export const UPDATE_USER = gql`
     }
 `
 
-interface Props {
-    user: Pick<EditUserProfilePage, 'id' | 'viewerCanChangeUsername'>
+interface Props extends TelemetryV2Props {
+    user: Pick<EditUserProfilePage, 'id' | 'viewerCanChangeUsername' | 'scimControlled'>
     initialValue: UserProfileFormFieldsValue
     after?: React.ReactNode
 }
@@ -36,21 +37,24 @@ export const EditUserProfileForm: React.FunctionComponent<React.PropsWithChildre
     user,
     initialValue,
     after,
+    telemetryRecorder,
 }) => {
-    const history = useHistory()
+    const navigate = useNavigate()
     const [updateUser, { data, loading, error }] = useMutation<UpdateUserResult, UpdateUserVariables>(UPDATE_USER, {
         onCompleted: ({ updateUser }) => {
-            eventLogger.log('UserProfileUpdated')
-            history.replace(`/users/${updateUser.username}/settings/profile`)
+            EVENT_LOGGER.log('UserProfileUpdated')
+            telemetryRecorder.recordEvent('settings.profile', 'update')
+            navigate(`/users/${updateUser.username}/settings/profile`, { replace: true })
 
             // In case the edited user is the current user, immediately reflect the changes in the
             // UI.
             // TODO: Migrate this to use the Apollo cache
-            refreshAuthenticatedUser()
-                .toPromise()
-                .finally(() => {})
+            lastValueFrom(refreshAuthenticatedUser(), { defaultValue: undefined }).finally(() => {})
         },
-        onError: () => eventLogger.log('UpdateUserFailed'),
+        onError: () => {
+            EVENT_LOGGER.log('UpdateUserFailed')
+            telemetryRecorder.recordEvent('settings.profile', 'updateFail')
+        },
     })
 
     const [userFields, setUserFields] = useState<UserProfileFormFieldsValue>(initialValue)
@@ -62,7 +66,7 @@ export const EditUserProfileForm: React.FunctionComponent<React.PropsWithChildre
     const onSubmit = useCallback<React.FormEventHandler>(
         event => {
             event.preventDefault()
-            eventLogger.log('UpdateUserClicked')
+            EVENT_LOGGER.log('UpdateUserClicked')
             return updateUser({
                 variables: {
                     user: user.id,
@@ -75,13 +79,16 @@ export const EditUserProfileForm: React.FunctionComponent<React.PropsWithChildre
         [updateUser, user.id, userFields]
     )
 
+    const isUserScimControlled = user.scimControlled
+
     return (
         <Container>
             <Form className="w-100" onSubmit={onSubmit}>
                 <UserProfileFormFields
                     value={userFields}
                     onChange={onChange}
-                    usernameFieldDisabled={!user.viewerCanChangeUsername}
+                    usernameFieldDisabled={!user.viewerCanChangeUsername || isUserScimControlled}
+                    displayNameFieldDisabled={isUserScimControlled}
                     disabled={loading}
                 />
                 <Button type="submit" disabled={loading} id="test-EditUserProfileForm__save" variant="primary">

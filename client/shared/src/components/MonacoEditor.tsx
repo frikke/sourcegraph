@@ -5,10 +5,8 @@ import * as monaco from 'monaco-editor'
 import { Subscription, Subject } from 'rxjs'
 import { map, distinctUntilChanged } from 'rxjs/operators'
 
-import { Shortcut } from '@sourcegraph/shared/src/react-shortcuts'
-
-import { KeyboardShortcut } from '../keyboardShortcuts'
-import { ThemeProps } from '../theme'
+import type { KeyboardShortcut } from '../keyboardShortcuts'
+import { Shortcut } from '../react-shortcuts'
 import { isInputElement } from '../util/dom'
 
 const SOURCEGRAPH_LIGHT = 'sourcegraph-light'
@@ -159,7 +157,7 @@ monaco.editor.defineTheme(SOURCEGRAPH_LIGHT, {
     rules: lightRules,
 })
 
-interface Props extends ThemeProps {
+interface Props {
     /** The contents of the document. */
     value?: string
 
@@ -191,16 +189,10 @@ interface Props extends ThemeProps {
     /** Keyboard shortcut to focus the Monaco editor. */
     keyboardShortcutForFocus?: KeyboardShortcut
 
-    /**
-     * NOTE: This is currently only used for Insights code through
-     * the MonacoField component: client/web/src/enterprise/insights/components/form/monaco-field/MonacoField.tsx
-     *
-     * Issue to improve this: https://github.com/sourcegraph/sourcegraph/issues/29438
-     */
-    placeholder?: string
-
     /** Whether to autofocus the Monaco editor when it mounts. Default: false. */
     autoFocus?: boolean
+
+    isLightTheme: boolean
 }
 
 interface State {
@@ -296,7 +288,6 @@ export class MonacoEditor extends React.PureComponent<Props, State> {
                         height: this.state.computedHeight,
                         position: 'relative',
                     }}
-                    data-placeholder={this.props.placeholder}
                     ref={this.setRef}
                     id={this.props.id}
                     data-editor="monaco"

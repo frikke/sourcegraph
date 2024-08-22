@@ -1,47 +1,70 @@
-import { ButtonHTMLAttributes, ChangeEventHandler, FC, FocusEventHandler, PropsWithChildren } from 'react'
+import type { ButtonHTMLAttributes, ChangeEventHandler, FC, FocusEventHandler, PropsWithChildren } from 'react'
 
 import classNames from 'classnames'
 
 import { Button, ButtonGroup, Input } from '@sourcegraph/wildcard'
 
-import { SeriesSortOptionsInput, SeriesSortDirection, SeriesSortMode } from '../../../../../../../../graphql-operations'
-import { MAX_NUMBER_OF_SERIES } from '../../../../../../core/backend/gql-backend/methods/get-backend-insight-data/deserializators'
-import { DrillDownFiltersFormValues } from '../drill-down-filters-panel'
+import {
+    type SeriesSortOptionsInput,
+    SeriesSortDirection,
+    SeriesSortMode,
+} from '../../../../../../../../graphql-operations'
+import { MAX_NUMBER_OF_SAMPLES, MAX_NUMBER_OF_SERIES } from '../../../../../../constants'
+import type { InsightSeriesDisplayOptions } from '../../../../../../core/types/insight/common'
+import type { DrillDownFiltersFormValues } from '../drill-down-filters-panel'
 
 import styles from './SortFilterSeriesPanel.module.scss'
 
 interface SortFilterSeriesPanelProps {
-    value: {
-        limit: string
-        sortOptions: SeriesSortOptionsInput
-    }
+    value: InsightSeriesDisplayOptions
+    isNumSamplesFilterAvailable: boolean
     onChange: (parameter: DrillDownFiltersFormValues['seriesDisplayOptions']) => void
 }
 
-// It is possible to have N number of series, but we need to have maximum to render in UI
-// or else it gets too cluttered to view
-const maxLimit = MAX_NUMBER_OF_SERIES
+export const SortFilterSeriesPanel: FC<SortFilterSeriesPanelProps> = props => {
+    const { value, isNumSamplesFilterAvailable, onChange } = props
 
-export const SortFilterSeriesPanel: FC<SortFilterSeriesPanelProps> = ({ value, onChange }) => {
     const handleToggle = (sortOptions: SeriesSortOptionsInput): void => {
         onChange({ ...value, sortOptions })
     }
 
-    const handleChange: ChangeEventHandler<HTMLInputElement> = event => {
+    const handleSeriesCountChange: ChangeEventHandler<HTMLInputElement> = event => {
         const inputValue = event.target.value
-        let limit = inputValue
 
         // If a value is provided, clamp that value between 1 and maxLimit
         if (inputValue.length > 0) {
-            limit = Math.max(Math.min(parseInt(inputValue, 10), maxLimit), 1).toString()
+            const limit = Math.max(Math.min(parseInt(inputValue, 10), MAX_NUMBER_OF_SERIES), 1)
+            onChange({ ...value, limit })
+        } else {
+            onChange({ ...value, limit: null })
         }
-        onChange({ ...value, limit })
     }
 
-    const handleBlur: FocusEventHandler<HTMLInputElement> = event => {
+    const handleNumCountChange: ChangeEventHandler<HTMLInputElement> = event => {
+        const inputValue = event.target.value
+
+        // If a value is provided, clamp that value between 1 and maxLimit
+        if (inputValue.length > 0) {
+            const numSamples = Math.max(Math.min(parseInt(inputValue, 10), MAX_NUMBER_OF_SAMPLES), 1)
+            onChange({ ...value, numSamples })
+        } else {
+            onChange({ ...value, numSamples: null })
+        }
+    }
+
+    const handleSeriesCountBlur: FocusEventHandler<HTMLInputElement> = event => {
         const limit = event.target.value
+
         if (limit === '') {
-            onChange({ ...value, limit: `${maxLimit}` })
+            onChange({ ...value, limit: null })
+        }
+    }
+
+    const handleNumCountBlur: FocusEventHandler<HTMLInputElement> = event => {
+        const limit = event.target.value
+
+        if (limit === '') {
+            onChange({ ...value, numSamples: null })
         }
     }
 
@@ -112,22 +135,43 @@ export const SortFilterSeriesPanel: FC<SortFilterSeriesPanelProps> = ({ value, o
                     </ButtonGroup>
                 </div>
             </section>
-            <footer className={styles.footer}>
+            <section className={styles.footer}>
                 <span>
-                    Number of data series <small className="text-muted">(max {maxLimit})</small>
+                    Max number of data series to display{' '}
+                    <small className="text-muted">(max {MAX_NUMBER_OF_SERIES})</small>
                 </span>
                 <Input
                     type="number"
                     step="1"
                     min={1}
-                    max={maxLimit}
-                    value={value.limit}
-                    onChange={handleChange}
-                    onBlur={handleBlur}
+                    max={MAX_NUMBER_OF_SERIES}
+                    placeholder={`${MAX_NUMBER_OF_SERIES}`}
+                    value={value.limit ?? undefined}
+                    onChange={handleSeriesCountChange}
+                    onBlur={handleSeriesCountBlur}
                     variant="small"
                     aria-label="Number of data series"
                 />
-            </footer>
+            </section>
+            {isNumSamplesFilterAvailable && (
+                <section className={styles.footer}>
+                    <span>
+                        Max number of series points to display <small className="text-muted">(max 90)</small>
+                    </span>
+                    <Input
+                        type="number"
+                        step="1"
+                        min={1}
+                        max={90}
+                        value={value.numSamples ?? undefined}
+                        placeholder="90"
+                        onChange={handleNumCountChange}
+                        onBlur={handleNumCountBlur}
+                        variant="small"
+                        aria-label="Number of data series"
+                    />
+                </section>
+            )}
         </section>
     )
 }

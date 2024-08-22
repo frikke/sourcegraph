@@ -9,8 +9,12 @@ import (
 	"github.com/grafana/regexp"
 
 	"github.com/sourcegraph/sourcegraph/internal/search/limits"
+	"github.com/sourcegraph/sourcegraph/internal/types"
+	"github.com/sourcegraph/sourcegraph/lib/pointers"
 )
 
+// ExpectedOperand is a 'marker' error type that the frontend logic
+// knows how to convert into a user-facing alert.
 type ExpectedOperand struct {
 	Msg string
 }
@@ -19,6 +23,8 @@ func (e *ExpectedOperand) Error() string {
 	return e.Msg
 }
 
+// UnsupportedError is a 'marker' error type that the frontend logic
+// knows how to convert into a user-facing alert.
 type UnsupportedError struct {
 	Msg string
 }
@@ -33,8 +39,8 @@ const (
 	SearchTypeRegex SearchType = iota
 	SearchTypeLiteral
 	SearchTypeStructural
-	SearchTypeLucky
 	SearchTypeStandard
+	SearchTypeCodyContext
 	SearchTypeKeyword
 )
 
@@ -48,8 +54,8 @@ func (s SearchType) String() string {
 		return "literal"
 	case SearchTypeStructural:
 		return "structural"
-	case SearchTypeLucky:
-		return "lucky"
+	case SearchTypeCodyContext:
+		return "codycontext"
 	case SearchTypeKeyword:
 		return "keyword"
 	default:
@@ -138,7 +144,7 @@ func (q Q) IsCaseSensitive() bool {
 	return q.BoolValue("case")
 }
 
-func (q Q) Repositories() (repos []string, negatedRepos []string) {
+func (q Q) Repositories() (repos []ParsedRepoFilter, negatedRepos []string) {
 	VisitField(q, FieldRepo, func(value string, negated bool, a Annotation) {
 		if a.Labels.IsSet(IsPredicate) {
 			return
@@ -147,7 +153,12 @@ func (q Q) Repositories() (repos []string, negatedRepos []string) {
 		if negated {
 			negatedRepos = append(negatedRepos, value)
 		} else {
-			repos = append(repos, value)
+			repoFilter, err := ParseRepositoryRevisions(value)
+			// Should never happen because the repo name is already validated
+			if err != nil {
+				panic(fmt.Sprintf("repo field %q is an invalid regex: %v", value, err))
+			}
+			repos = append(repos, repoFilter)
 		}
 	})
 	return repos, negatedRepos
@@ -198,7 +209,7 @@ func (p Plan) ToQ() Q {
 		operands := basic.ToParseTree()
 		nodes = append(nodes, NewOperator(operands, And)...)
 	}
-	return Q(NewOperator(nodes, Or))
+	return NewOperator(nodes, Or)
 }
 
 // Basic represents a leaf expression to evaluate in our search engine. A basic
@@ -344,6 +355,7 @@ func (p Parameters) IncludeExcludeValues(field string) (include, exclude []strin
 // - repo:contains.file(path:foo content:bar) || repo:has.file(path:foo content:bar)
 // - repo:contains.path(foo) || repo:has.path(foo)
 // - repo:contains.content(c) || repo:has.content(c)
+// - repo:contains(file:foo content:bar)
 // - repohasfile:f
 type RepoHasFileContentArgs struct {
 	// At least one of these strings should be non-empty
@@ -383,6 +395,14 @@ func (p Parameters) RepoHasFileContent() (res []RepoHasFileContentArgs) {
 		})
 	})
 
+	VisitTypedPredicate(nodes, func(pred *RepoContainsPredicate) {
+		res = append(res, RepoHasFileContentArgs{
+			Path:    pred.File,
+			Content: pred.Content,
+			Negated: pred.Negated,
+		})
+	})
+
 	return res
 }
 
@@ -393,42 +413,79 @@ func (p Parameters) FileContainsContent() (include []string) {
 	return include
 }
 
-func (p Parameters) RepoContainsCommitAfter() (value string) {
-	nodes := toNodes(p)
-
-	// Look for values of repohascommitafter:
-	value = p.FindValue(FieldRepoHasCommitAfter)
-
-	// Look for values of repo:contains.commit.after()
-	VisitTypedPredicate(nodes, func(pred *RepoContainsCommitAfterPredicate) {
-		value = pred.TimeRef
-	})
-
-	return value
-}
-
-type RepoKVPFilter struct {
-	Key     string
-	Value   *string
+type RepoHasCommitAfterArgs struct {
+	TimeRef string
 	Negated bool
 }
 
+func (p Parameters) RepoContainsCommitAfter() (res *RepoHasCommitAfterArgs) {
+	// Look for values of repohascommitafter:
+	p.FindParameter(FieldRepoHasCommitAfter, func(value string, negated bool, annotation Annotation) {
+		res = &RepoHasCommitAfterArgs{
+			TimeRef: value,
+			Negated: negated,
+		}
+	})
+
+	// Look for values of repo:contains.commit.after()
+	nodes := toNodes(p)
+	VisitTypedPredicate(nodes, func(pred *RepoContainsCommitAfterPredicate) {
+		res = &RepoHasCommitAfterArgs{
+			TimeRef: pred.TimeRef,
+			Negated: pred.Negated,
+		}
+	})
+
+	return res
+}
+
+type RepoKVPFilter struct {
+	Key     types.RegexpPattern
+	Value   *types.RegexpPattern
+	Negated bool
+	KeyOnly bool
+}
+
 func (p Parameters) RepoHasKVPs() (res []RepoKVPFilter) {
-	VisitTypedPredicate(toNodes(p), func(pred *RepoHasKVPPredicate) {
+	VisitTypedPredicate(toNodes(p), func(pred *RepoHasMetaPredicate) {
 		res = append(res, RepoKVPFilter{
 			Key:     pred.Key,
-			Value:   &pred.Value,
+			Value:   pred.Value,
+			Negated: pred.Negated,
+			KeyOnly: pred.KeyOnly,
+		})
+	})
+
+	VisitTypedPredicate(toNodes(p), func(pred *RepoHasKVPPredicate) {
+		res = append(res, RepoKVPFilter{
+			Key:     exactRegexpPattern(pred.Key),
+			Value:   pointers.Ptr(exactRegexpPattern(pred.Value)),
 			Negated: pred.Negated,
 		})
 	})
 
 	VisitTypedPredicate(toNodes(p), func(pred *RepoHasTagPredicate) {
 		res = append(res, RepoKVPFilter{
-			Key:     pred.Key,
+			Key:     exactRegexpPattern(pred.Key),
 			Negated: pred.Negated,
 		})
 	})
 
+	VisitTypedPredicate(toNodes(p), func(pred *RepoHasKeyPredicate) {
+		res = append(res, RepoKVPFilter{
+			Key:     exactRegexpPattern(pred.Key),
+			Negated: pred.Negated,
+			KeyOnly: true,
+		})
+	})
+
+	return res
+}
+
+func (p Parameters) RepoHasTopics() (res []RepoHasTopicPredicate) {
+	VisitTypedPredicate(toNodes(p), func(pred *RepoHasTopicPredicate) {
+		res = append(res, *pred)
+	})
 	return res
 }
 
@@ -440,7 +497,17 @@ func (p Parameters) FileHasOwner() (include, exclude []string) {
 			include = append(include, pred.Owner)
 		}
 	})
+	return include, exclude
+}
 
+func (p Parameters) FileHasContributor() (include []string, exclude []string) {
+	VisitTypedPredicate(toNodes(p), func(pred *FileHasContributorPredicate) {
+		if pred.Negated {
+			exclude = append(exclude, pred.Contributor)
+		} else {
+			include = append(include, pred.Contributor)
+		}
+	})
 	return include, exclude
 }
 
@@ -546,7 +613,7 @@ func (p Parameters) Archived() *YesNoOnly {
 	return p.yesNoOnlyValue(FieldArchived)
 }
 
-func (p Parameters) Repositories() (repos []string, negatedRepos []string) {
+func (p Parameters) Repositories() (repos []ParsedRepoFilter, negatedRepos []string) {
 	VisitField(toNodes(p), FieldRepo, func(value string, negated bool, a Annotation) {
 		if a.Labels.IsSet(IsPredicate) {
 			return
@@ -555,7 +622,12 @@ func (p Parameters) Repositories() (repos []string, negatedRepos []string) {
 		if negated {
 			negatedRepos = append(negatedRepos, value)
 		} else {
-			repos = append(repos, value)
+			repoFilter, err := ParseRepositoryRevisions(value)
+			// Should never happen because the repo name is already validated
+			if err != nil {
+				panic(fmt.Sprintf("repo field %q is an invalid regex: %v", value, err))
+			}
+			repos = append(repos, repoFilter)
 		}
 	})
 	return repos, negatedRepos

@@ -1,85 +1,53 @@
-import React, { useCallback, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 
 import { mdiMagnify, mdiPlus } from '@mdi/js'
-import classNames from 'classnames'
-import * as H from 'history'
 
-import { SearchContextProps } from '@sourcegraph/search'
-import { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
-import { PageHeader, Link, Button, Icon } from '@sourcegraph/wildcard'
+import type { PlatformContextProps } from '@sourcegraph/shared/src/platform/context'
+import type { SearchContextProps } from '@sourcegraph/shared/src/search'
+import { Alert, Button, Icon, Link, PageHeader } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../auth'
+import type { AuthenticatedUser } from '../../auth'
 import { Page } from '../../components/Page'
 
-import { SearchContextsListTab } from './SearchContextsListTab'
+import { SearchContextsList } from './SearchContextsList'
+
+import styles from './SearchContextsListPage.module.scss'
 
 export interface SearchContextsListPageProps
-    extends Pick<
-            SearchContextProps,
-            'fetchSearchContexts' | 'fetchAutoDefinedSearchContexts' | 'getUserSearchContextNamespaces'
-        >,
-        PlatformContextProps<'requestGraphQL'> {
-    location: H.Location
-    history: H.History
+    extends Pick<SearchContextProps, 'fetchSearchContexts'>,
+        PlatformContextProps<'requestGraphQL' | 'telemetryRecorder'> {
     isSourcegraphDotCom: boolean
     authenticatedUser: AuthenticatedUser | null
 }
 
-type SelectedTab = 'list'
+export const SearchContextsListPage: React.FunctionComponent<SearchContextsListPageProps> = ({
+    authenticatedUser,
+    fetchSearchContexts,
+    platformContext,
+}) => {
+    const [alert, setAlert] = useState<string | undefined>()
 
-function getSelectedTabFromLocation(locationSearch: string): SelectedTab {
-    const urlParameters = new URLSearchParams(locationSearch)
-    switch (urlParameters.get('tab')) {
-        case 'list':
-            return 'list'
-    }
-    return 'list'
-}
-
-function setSelectedLocationTab(location: H.Location, history: H.History, selectedTab: SelectedTab): void {
-    const urlParameters = new URLSearchParams(location.search)
-    urlParameters.set('tab', selectedTab)
-    if (location.search !== urlParameters.toString()) {
-        history.replace({ ...location, search: urlParameters.toString() })
-    }
-}
-
-export const SearchContextsListPage: React.FunctionComponent<
-    React.PropsWithChildren<SearchContextsListPageProps>
-> = props => {
-    const [selectedTab, setSelectedTab] = useState<SelectedTab>(getSelectedTabFromLocation(props.location.search))
-
-    const setTab = useCallback(
-        (tab: SelectedTab) => {
-            setSelectedTab(tab)
-            setSelectedLocationTab(props.location, props.history, tab)
-        },
-        [props.location, props.history]
-    )
-
-    const onSelectSearchContextsList = useCallback<React.MouseEventHandler>(
-        event => {
-            event.preventDefault()
-            setTab('list')
-        },
-        [setTab]
-    )
+    useEffect(() => {
+        platformContext.telemetryRecorder.recordEvent('searchContexts.list', 'view')
+    }, [platformContext.telemetryRecorder])
 
     return (
         <div data-testid="search-contexts-list-page" className="w-100">
             <Page>
                 <PageHeader
                     actions={
-                        <Button to="/contexts/new" variant="primary" as={Link}>
-                            <Icon aria-hidden={true} svgPath={mdiPlus} />
-                            Create search context
-                        </Button>
+                        <div className={styles.actions}>
+                            <Button to="/contexts/new" variant="primary" as={Link}>
+                                <Icon aria-hidden={true} svgPath={mdiPlus} />
+                                Create search context
+                            </Button>
+                        </div>
                     }
                     description={
                         <span className="text-muted">
                             Search code you care about with search contexts.{' '}
                             <Link
-                                to="/help/code_search/explanations/features#search-contexts"
+                                to="/help/code-search/working/search_contexts"
                                 target="_blank"
                                 rel="noopener noreferrer"
                             >
@@ -94,26 +62,15 @@ export const SearchContextsListPage: React.FunctionComponent<
                         <PageHeader.Breadcrumb>Contexts</PageHeader.Breadcrumb>
                     </PageHeader.Heading>
                 </PageHeader>
-                <div className="mb-4">
-                    <div id="search-context-tabs-list" className="nav nav-tabs">
-                        <div className="nav-item">
-                            {/* eslint-disable-next-line jsx-a11y/anchor-is-valid */}
-                            <Link
-                                to=""
-                                role="tab"
-                                aria-selected={selectedTab === 'list'}
-                                aria-controls="search-context-tabs-list"
-                                onClick={onSelectSearchContextsList}
-                                className={classNames('nav-link', selectedTab === 'list' && 'active')}
-                            >
-                                <span className="text-content" data-tab-content="Your search contexts">
-                                    Your search contexts
-                                </span>
-                            </Link>
-                        </div>
-                    </div>
+                {alert && <Alert variant="danger">{alert}</Alert>}
+                <div role="tabpanel" id="search-context-list">
+                    <SearchContextsList
+                        authenticatedUser={authenticatedUser}
+                        fetchSearchContexts={fetchSearchContexts}
+                        platformContext={platformContext}
+                        setAlert={setAlert}
+                    />
                 </div>
-                {selectedTab === 'list' && <SearchContextsListTab {...props} />}
             </Page>
         </div>
     )

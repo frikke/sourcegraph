@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"html/template"
-	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -14,25 +13,24 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/grafana/regexp"
-	"github.com/inconshreveable/log15"
 
-	sglog "github.com/sourcegraph/log"
+	"github.com/sourcegraph/log"
 
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/auth"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/envvar"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/globals"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/hubspot"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/hubspot/hubspotutil"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/app/assetsutil"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/app/jscontext"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/app/ui/sveltekit"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/backend"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/handlerutil"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/routevar"
-	"github.com/sourcegraph/sourcegraph/internal/actor"
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	"github.com/sourcegraph/sourcegraph/internal/authz"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/cookie"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/dotcom"
 	"github.com/sourcegraph/sourcegraph/internal/env"
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
 	"github.com/sourcegraph/sourcegraph/internal/featureflag"
@@ -45,6 +43,8 @@ import (
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 	"github.com/sourcegraph/sourcegraph/ui/assets"
 )
+
+var enableHTMLInject = env.Get("ENABLE_INJECT_HTML", "false", "Enable HTML customization")
 
 type InjectedHTML struct {
 	HeadTop    template.HTML
@@ -69,6 +69,19 @@ type Metadata struct {
 	PreviewImage string
 }
 
+type PreloadedAsset struct {
+	// The as property. E.g. `image`
+	As string
+	// The href property. It should be set to a resolved path using `assetsutil.URL`
+	Href string
+}
+
+type SvelteInjections struct {
+	Enabled bool
+	Head    template.HTML
+	Body    template.HTML
+}
+
 type Common struct {
 	Injected InjectedHTML
 	Metadata *Metadata
@@ -76,9 +89,13 @@ type Common struct {
 	Title    string
 	Error    *pageError
 
-	Manifest *assets.WebpackManifest
+	Svelte SvelteInjections
 
-	WebpackDevServer bool // whether the Webpack dev server is running (WEBPACK_DEV_SERVER env var)
+	PreloadedAssets *[]PreloadedAsset
+
+	Manifest *assets.WebBuildManifest
+
+	WebBuilderDevServer bool // whether the web builder dev server is running (WEB_BUILDER_DEV_SERVER env var)
 
 	// The fields below have zero values when not on a repo page.
 	Repo         *types.Repo
@@ -86,7 +103,7 @@ type Common struct {
 	api.CommitID        // resolved SHA1 revision
 }
 
-var webpackDevServer, _ = strconv.ParseBool(os.Getenv("WEBPACK_DEV_SERVER"))
+var webBuilderDevServer, _ = strconv.ParseBool(os.Getenv("WEB_BUILDER_DEV_SERVER"))
 
 // repoShortName trims the first path element of the given repo name if it has
 // at least two path components.
@@ -101,7 +118,7 @@ func repoShortName(name api.RepoName) string {
 // serveErrorHandler is a function signature used in newCommon and
 // mockNewCommon. This is used as syntactic sugar to prevent programmer's
 // (fragile creatures from planet Earth) from crashing out.
-type serveErrorHandler func(w http.ResponseWriter, r *http.Request, db database.DB, err error, statusCode int)
+type serveErrorHandler func(w http.ResponseWriter, r *http.Request, db database.DB, configurationServer *conf.Server, err error, statusCode int)
 
 // mockNewCommon is used in tests to mock newCommon (duh!).
 //
@@ -126,20 +143,44 @@ var mockNewCommon func(w http.ResponseWriter, r *http.Request, title string, ser
 //	}
 //
 // In the case of a repository that is cloning, a Common data structure is
-// returned but it has an incomplete RevSpec.
-func newCommon(w http.ResponseWriter, r *http.Request, db database.DB, title string, indexed bool, serveError serveErrorHandler) (*Common, error) {
-	logger := sglog.Scoped("commonHandler", "")
+// returned but it has a nil Repo.
+func newCommon(w http.ResponseWriter, r *http.Request, db database.DB, configurationServer *conf.Server, title string, indexed bool, serveError serveErrorHandler) (*Common, error) {
+	logger := log.Scoped("commonHandler")
 	if mockNewCommon != nil {
 		return mockNewCommon(w, r, title, serveError)
 	}
 
-	manifest, err := assets.LoadWebpackManifest()
+	manifest, err := assets.Provider.LoadWebBuildManifest()
 	if err != nil {
-		return nil, errors.Wrap(err, "loading webpack manifest")
+		return nil, errors.Wrap(err, "loading web build manifest")
 	}
 
 	if !indexed {
 		w.Header().Set("X-Robots-Tag", "noindex")
+	}
+
+	var preloadedAssets *[]PreloadedAsset
+	preloadedAssets = nil
+	br := conf.Branding()
+	if br == nil || (br.Dark == nil && br.Light == nil) {
+		preloadedAssets = &[]PreloadedAsset{
+			// sourcegraph-mark.svg is always loaded as part of the layout component unless a custom
+			// branding is defined
+			{As: "image", Href: assetsutil.URL("/img/sourcegraph-mark.svg").String() + "?v2"},
+		}
+	}
+
+	var svelteInjections SvelteInjections
+	if sveltekit.Enabled(r.Context()) {
+		svelteHead, svelteBody, err := sveltekit.LoadCachedSvelteKitInjections()
+		if err != nil {
+			return nil, errors.Wrap(err, "loading svelte kit context")
+		}
+		svelteInjections = SvelteInjections{
+			Enabled: true,
+			Head:    template.HTML(svelteHead),
+			Body:    template.HTML(svelteBody),
+		}
 	}
 
 	common := &Common{
@@ -149,23 +190,28 @@ func newCommon(w http.ResponseWriter, r *http.Request, db database.DB, title str
 			BodyTop:    template.HTML(conf.Get().HtmlBodyTop),
 			BodyBottom: template.HTML(conf.Get().HtmlBodyBottom),
 		},
-		Context:  jscontext.NewJSContextFromRequest(r, db),
-		Title:    title,
-		Manifest: manifest,
+		Context:         jscontext.NewJSContextFromRequest(r, db, configurationServer),
+		Title:           title,
+		Manifest:        manifest,
+		PreloadedAssets: preloadedAssets,
 		Metadata: &Metadata{
-			Title:       globals.Branding().BrandName,
+			Title:       br.BrandName,
 			Description: "Sourcegraph is a web-based code search and navigation tool for dev teams. Search, navigate, and review code. Find answers.",
 			ShowPreview: r.URL.Path == "/sign-in" && r.URL.RawQuery == "returnTo=%2F",
 		},
+		Svelte:              svelteInjections,
+		WebBuilderDevServer: webBuilderDevServer,
+	}
 
-		WebpackDevServer: webpackDevServer,
+	if enableHTMLInject != "true" {
+		common.Injected = InjectedHTML{}
 	}
 
 	if _, ok := mux.Vars(r)["Repo"]; ok {
 		// Common repo pages (blob, tree, etc).
 		var err error
 		common.Repo, common.CommitID, err = handlerutil.GetRepoAndRev(r.Context(), logger, db, mux.Vars(r))
-		isRepoEmptyError := routevar.ToRepoRev(mux.Vars(r)).Rev == "" && errors.HasType(err, &gitdomain.RevisionNotFoundError{}) // should reply with HTTP 200
+		isRepoEmptyError := routevar.ToRepoRev(mux.Vars(r)).Rev == "" && errors.HasType[*gitdomain.RevisionNotFoundError](err) // should reply with HTTP 200
 		if err != nil && !isRepoEmptyError {
 			var urlMovedError *handlerutil.URLMovedError
 			if errors.As(err, &urlMovedError) {
@@ -189,20 +235,20 @@ func newCommon(w http.ResponseWriter, r *http.Request, db database.DB, title str
 				http.Redirect(w, r, u.String(), http.StatusSeeOther)
 				return nil, nil
 			}
-			if errors.HasType(err, &gitdomain.RevisionNotFoundError{}) {
+			if errors.HasType[*gitdomain.RevisionNotFoundError](err) {
 				// Revision does not exist.
-				serveError(w, r, db, err, http.StatusNotFound)
+				serveError(w, r, db, configurationServer, err, http.StatusNotFound)
 				return nil, nil
 			}
-			if errors.HasType(err, &gitserver.RepoNotCloneableErr{}) {
+			if errors.HasType[*gitserver.RepoNotCloneableErr](err) {
 				if errcode.IsNotFound(err) {
 					// Repository is not found.
-					serveError(w, r, db, err, http.StatusNotFound)
+					serveError(w, r, db, configurationServer, err, http.StatusNotFound)
 					return nil, nil
 				}
 
 				// Repository is not cloneable.
-				dangerouslyServeError(w, r, db, errors.New("repository could not be cloned"), http.StatusInternalServerError)
+				dangerouslyServeError(w, r, db, configurationServer, errors.New("repository could not be cloned"), http.StatusInternalServerError)
 				return nil, nil
 			}
 			if gitdomain.IsRepoNotExist(err) {
@@ -211,17 +257,17 @@ func newCommon(w http.ResponseWriter, r *http.Request, db database.DB, title str
 					return common, nil
 				}
 				// Repo does not exist.
-				serveError(w, r, db, err, http.StatusNotFound)
+				serveError(w, r, db, configurationServer, err, http.StatusNotFound)
 				return nil, nil
 			}
 			if errcode.IsNotFound(err) || errcode.IsBlocked(err) {
 				// Repo does not exist.
-				serveError(w, r, db, err, http.StatusNotFound)
+				serveError(w, r, db, configurationServer, err, http.StatusNotFound)
 				return nil, nil
 			}
 			if errcode.IsUnauthorized(err) {
 				// Not authorized to access repository.
-				serveError(w, r, db, err, http.StatusUnauthorized)
+				serveError(w, r, db, configurationServer, err, http.StatusUnauthorized)
 				return nil, nil
 			}
 			return nil, err
@@ -235,13 +281,13 @@ func newCommon(w http.ResponseWriter, r *http.Request, db database.DB, title str
 			ctx := context.Background()
 			_, err = repoupdater.DefaultClient.EnqueueRepoUpdate(ctx, common.Repo.Name)
 			if err != nil {
-				log15.Error("EnqueueRepoUpdate", "error", err)
+				logger.Error("EnqueueRepoUpdate", log.Error(err))
 			}
 		}()
 	}
 
 	// common.Repo and common.CommitID are populated in the above if statement
-	if blobPath, ok := mux.Vars(r)["Path"]; ok && envvar.OpenGraphPreviewServiceURL() != "" && envvar.SourcegraphDotComMode() && common.Repo != nil {
+	if blobPath, ok := mux.Vars(r)["Path"]; ok && envvar.OpenGraphPreviewServiceURL() != "" && dotcom.SourcegraphDotComMode() && common.Repo != nil {
 		lineRange := FindLineRangeInQueryParameters(r.URL.Query())
 
 		var symbolResult *result.Symbol
@@ -250,9 +296,8 @@ func newCommon(w http.ResponseWriter, r *http.Request, db database.DB, title str
 			ctx, cancel := context.WithTimeout(r.Context(), time.Second*1)
 			defer cancel()
 
-			if symbolMatch, _ := symbol.GetMatchAtLineCharacter(
+			if symbolMatch, _ := symbol.DefaultZoektSymbolsClient().GetMatchAtLineCharacter(
 				ctx,
-				authz.DefaultSubRepoPermsChecker,
 				types.MinimalRepo{ID: common.Repo.ID, Name: common.Repo.Name},
 				common.CommitID,
 				strings.TrimLeft(blobPath, "/"),
@@ -279,15 +324,15 @@ const (
 	noIndex = false
 )
 
-func serveBrandedPageString(db database.DB, titles string, description *string, indexed bool) handlerFunc {
-	return serveBasicPage(db, func(c *Common, r *http.Request) string {
+func serveBrandedPageString(db database.DB, configurationServer *conf.Server, titles string, description *string, indexed bool) handlerFunc {
+	return serveBasicPage(db, configurationServer, func(c *Common, r *http.Request) string {
 		return brandNameSubtitle(titles)
 	}, description, indexed)
 }
 
-func serveBasicPage(db database.DB, title func(c *Common, r *http.Request) string, description *string, indexed bool) handlerFunc {
+func serveBasicPage(db database.DB, configurationServer *conf.Server, title func(c *Common, r *http.Request) string, description *string, indexed bool) handlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
-		common, err := newCommon(w, r, db, "", indexed, serveError)
+		common, err := newCommon(w, r, db, configurationServer, "", indexed, serveError)
 		if err != nil {
 			return err
 		}
@@ -298,13 +343,14 @@ func serveBasicPage(db database.DB, title func(c *Common, r *http.Request) strin
 			return nil // request was handled
 		}
 		common.Title = title(common, r)
+
 		return renderTemplate(w, "app.html", common)
 	}
 }
 
-func serveHome(db database.DB) handlerFunc {
+func serveHome(db database.DB, configurationServer *conf.Server) handlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
-		common, err := newCommon(w, r, db, globals.Branding().BrandName, index, serveError)
+		common, err := newCommon(w, r, db, configurationServer, conf.Branding().BrandName, index, serveError)
 		if err != nil {
 			return err
 		}
@@ -312,24 +358,28 @@ func serveHome(db database.DB) handlerFunc {
 			return nil // request was handled
 		}
 
-		if envvar.SourcegraphDotComMode() && !actor.FromContext(r.Context()).IsAuthenticated() && !strings.Contains(r.UserAgent(), "Cookiebot") {
-			// The user is not signed in and tried to access Sourcegraph.com.
-			// Redirect to about.sourcegraph.com so they see general info page.
-			// Don't redirect Cookiebot so it can scan the website without authentication.
-			http.Redirect(w, r, (&url.URL{Scheme: aboutRedirectScheme, Host: aboutRedirectHost}).String(), http.StatusTemporaryRedirect)
+		// we only allow HEAD requests on sourcegraph.com.
+		if r.Method == "HEAD" {
+			w.WriteHeader(http.StatusOK)
 			return nil
 		}
 
 		// On non-Sourcegraph.com instances, there is no separate homepage, so redirect to /search.
-		r.URL.Path = "/search"
+		// except if the instance is on a Cody-Only license.
+		redirectURL := "/search"
+		if !common.Context.CodeSearchEnabledOnInstance && common.Context.CodyEnabledOnInstance && !dotcom.SourcegraphDotComMode() {
+			redirectURL = "/cody"
+		}
+
+		r.URL.Path = redirectURL
 		http.Redirect(w, r, r.URL.String(), http.StatusTemporaryRedirect)
 		return nil
 	}
 }
 
-func serveSignIn(db database.DB) handlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) error {
-		common, err := newCommon(w, r, db, "", index, serveError)
+func serveSignIn(db database.DB, configurationServer *conf.Server) handlerFunc {
+	handler := func(w http.ResponseWriter, r *http.Request) error {
+		common, err := newCommon(w, r, db, configurationServer, "", index, serveError)
 		if err != nil {
 			return err
 		}
@@ -340,9 +390,11 @@ func serveSignIn(db database.DB) handlerFunc {
 
 		return renderTemplate(w, "app.html", common)
 	}
+
+	return handler
 }
 
-func serveEmbed(db database.DB) handlerFunc {
+func serveEmbed(db database.DB, configurationServer *conf.Server) handlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
 		flagSet := featureflag.FromContext(r.Context())
 		if enabled := flagSet.GetBoolOr("enable-embed-route", false); !enabled {
@@ -352,14 +404,14 @@ func serveEmbed(db database.DB) handlerFunc {
 
 		// 🚨 SECURITY: Removing the `X-Frame-Options` header allows embedding the `/embed` route in an iframe.
 		// The embedding is safe because the `/embed` route serves the `embed` JS bundle instead of the
-		// regular Sourcegraph (web) app bundle (see `client/web/webpack.config.js` for the entrypoint definitions).
+		// regular Sourcegraph (web) app bundle.
 		// It contains only the components needed to render the embedded content, and it should not include sensitive pages, like the sign-in page.
 		// The embed bundle also has its own React router that only recognizes specific routes (e.g., for embedding a notebook).
 		//
 		// Any changes to this function could have security implications. Please consult the security team before making changes.
 		w.Header().Del("X-Frame-Options")
 
-		common, err := newCommon(w, r, db, "", index, serveError)
+		common, err := newCommon(w, r, db, configurationServer, "", index, serveError)
 		if err != nil {
 			return err
 		}
@@ -373,7 +425,7 @@ func serveEmbed(db database.DB) handlerFunc {
 
 // redirectTreeOrBlob redirects a blob page to a tree page if the file is actually a directory,
 // or a tree page to a blob page if the directory is actually a file.
-func redirectTreeOrBlob(routeName, path string, common *Common, w http.ResponseWriter, r *http.Request, db database.DB) (requestHandled bool, err error) {
+func redirectTreeOrBlob(routeName, path string, common *Common, w http.ResponseWriter, r *http.Request, db database.DB, client gitserver.Client, configurationServer *conf.Server) (requestHandled bool, err error) {
 	// NOTE: It makes no sense for this function to proceed if the commit ID
 	// for the repository is empty. It is most likely the repository is still
 	// clone in progress.
@@ -390,10 +442,10 @@ func redirectTreeOrBlob(routeName, path string, common *Common, w http.ResponseW
 		}
 		return false, nil
 	}
-	stat, err := gitserver.NewClient(db).Stat(r.Context(), authz.DefaultSubRepoPermsChecker, common.Repo.Name, common.CommitID, path)
+	stat, err := client.Stat(r.Context(), common.Repo.Name, common.CommitID, path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			serveError(w, r, db, err, http.StatusNotFound)
+			serveError(w, r, db, configurationServer, err, http.StatusNotFound)
 			return true, nil
 		}
 		return false, err
@@ -414,9 +466,9 @@ func redirectTreeOrBlob(routeName, path string, common *Common, w http.ResponseW
 }
 
 // serveTree serves the tree (directory) pages.
-func serveTree(db database.DB, title func(c *Common, r *http.Request) string) handlerFunc {
+func serveTree(db database.DB, configurationServer *conf.Server, title func(c *Common, r *http.Request) string) handlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
-		common, err := newCommon(w, r, db, "", index, serveError)
+		common, err := newCommon(w, r, db, configurationServer, "", index, serveError)
 		if err != nil {
 			return err
 		}
@@ -432,7 +484,7 @@ func serveTree(db database.DB, title func(c *Common, r *http.Request) string) ha
 			w.Header().Set("X-Robots-Tag", "noindex")
 		}
 
-		handled, err := redirectTreeOrBlob(routeTree, mux.Vars(r)["Path"], common, w, r, db)
+		handled, err := redirectTreeOrBlob(routeTree, mux.Vars(r)["Path"], common, w, r, db, gitserver.NewClient("http.servetree"), configurationServer)
 		if handled {
 			return nil
 		}
@@ -441,13 +493,14 @@ func serveTree(db database.DB, title func(c *Common, r *http.Request) string) ha
 		}
 
 		common.Title = title(common, r)
+
 		return renderTemplate(w, "app.html", common)
 	}
 }
 
-func serveRepoOrBlob(db database.DB, routeName string, title func(c *Common, r *http.Request) string) handlerFunc {
+func serveRepoOrBlob(db database.DB, configurationServer *conf.Server, routeName string, title func(c *Common, r *http.Request) string) handlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
-		common, err := newCommon(w, r, db, "", index, serveError)
+		common, err := newCommon(w, r, db, configurationServer, "", index, serveError)
 		if err != nil {
 			return err
 		}
@@ -463,7 +516,7 @@ func serveRepoOrBlob(db database.DB, routeName string, title func(c *Common, r *
 			w.Header().Set("X-Robots-Tag", "noindex")
 		}
 
-		handled, err := redirectTreeOrBlob(routeName, mux.Vars(r)["Path"], common, w, r, db)
+		handled, err := redirectTreeOrBlob(routeName, mux.Vars(r)["Path"], common, w, r, db, gitserver.NewClient("http.serverepoorblob"), configurationServer)
 		if handled {
 			return nil
 		}
@@ -493,6 +546,7 @@ func serveRepoOrBlob(db database.DB, routeName string, title func(c *Common, r *
 			http.Redirect(w, r, r.URL.String(), http.StatusPermanentRedirect)
 			return nil
 		}
+
 		return renderTemplate(w, "app.html", common)
 	}
 }
@@ -506,7 +560,6 @@ func searchBadgeHandler() *httputil.ReverseProxy {
 			r.URL.Host = "search-badger"
 			r.URL.Path = "/"
 		},
-		ErrorLog: log.New(env.DebugOut, "search-badger proxy: ", log.LstdFlags),
 	}
 }
 
@@ -526,26 +579,52 @@ func servePingFromSelfHosted(w http.ResponseWriter, r *http.Request) error {
 	email := r.URL.Query().Get("email")
 	tosAccepted := r.URL.Query().Get("tos_accepted")
 
-	firstSourceURLCookie, err := r.Cookie("sourcegraphSourceUrl")
-	var firstSourceURL string
-	if err == nil && firstSourceURLCookie != nil {
-		firstSourceURL = firstSourceURLCookie.Value
-	}
-
-	lastSourceURLCookie, err := r.Cookie("sourcegraphRecentSourceUrl")
-	var lastSourceURL string
-	if err == nil && lastSourceURLCookie != nil {
-		lastSourceURL = lastSourceURLCookie.Value
+	getCookie := func(name string) string {
+		c, err := r.Cookie(name)
+		if err != nil || c == nil {
+			return ""
+		}
+		return c.Value
 	}
 
 	anonymousUserId, _ := cookie.AnonymousUID(r)
 
 	hubspotutil.SyncUser(email, hubspotutil.SelfHostedSiteInitEventID, &hubspot.ContactProperties{
-		IsServerAdmin:   true,
-		AnonymousUserID: anonymousUserId,
-		FirstSourceURL:  firstSourceURL,
-		LastSourceURL:   lastSourceURL,
-		HasAgreedToToS:  tosAccepted == "true",
+		IsServerAdmin:              true,
+		AnonymousUserID:            anonymousUserId,
+		FirstSourceURL:             getCookie("first_page_seen_url"),
+		LastSourceURL:              getCookie("last_page_seen_url"),
+		LastPageSeenShort:          getCookie("last_page_seen_url_short"),
+		LastPageSeenMid:            getCookie("last_page_seen_url_mid"),
+		LastPageSeenLong:           getCookie("last_page_seen_url_long"),
+		MostRecentReferrerUrl:      getCookie("most_recent_referrer_url"),
+		MostRecentReferrerUrlShort: getCookie("most_recent_referrer_url_short"),
+		MostRecentReferrerUrlLong:  getCookie("most_recent_referrer_url_long"),
+		SignupSessionSourceURL:     getCookie("sourcegraphSignupSourceUrl"),
+		SignupSessionReferrer:      getCookie("sourcegraphSignupReferrer"),
+		SessionUTMCampaign:         getCookie("utm_campaign"),
+		SessionUTMSource:           getCookie("utm_source"),
+		SessionUTMMedium:           getCookie("utm_medium"),
+		SessionUTMContent:          getCookie("utm_content"),
+		SessionUTMTerm:             getCookie("utm_term"),
+		UtmCampaignShort:           getCookie("utm_campaign_short"),
+		UtmCampaignMid:             getCookie("utm_campaign_mid"),
+		UtmCampaignLong:            getCookie("utm_campaign_long"),
+		UtmSourceShort:             getCookie("utm_source_short"),
+		UtmSourceMid:               getCookie("utm_source_mid"),
+		UtmSourceLong:              getCookie("utm_source_long"),
+		UtmMediumShort:             getCookie("utm_medium_short"),
+		UtmMediumMid:               getCookie("utm_medium_mid"),
+		UtmMediumLong:              getCookie("utm_medium_long"),
+		UtmContentShort:            getCookie("utm_content_short"),
+		UtmContentMid:              getCookie("utm_content_mid"),
+		UtmContentLong:             getCookie("utm_content_long"),
+		UtmTermShort:               getCookie("utm_term_short"),
+		UtmTermMid:                 getCookie("utm_term_mid"),
+		UtmTermLong:                getCookie("utm_term_long"),
+		GoogleClickID:              getCookie("gclid"),
+		MicrosoftClickID:           getCookie("msclkid"),
+		HasAgreedToToS:             tosAccepted == "true",
 	})
 	return nil
 }

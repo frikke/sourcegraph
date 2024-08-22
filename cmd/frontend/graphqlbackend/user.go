@@ -3,23 +3,26 @@ package graphqlbackend
 import (
 	"context"
 	"net/url"
+	"sync"
 
 	"github.com/graph-gophers/graphql-go"
 	"github.com/graph-gophers/graphql-go/relay"
-	"github.com/inconshreveable/log15"
-
+	"github.com/keegancsmith/sqlf"
 	"github.com/sourcegraph/log"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/auth/providers"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/backend"
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/envvar"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/auth/providers"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/backend"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/cody"
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/ssc"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/internal/suspiciousnames"
-	"github.com/sourcegraph/sourcegraph/internal/api"
+	"github.com/sourcegraph/sourcegraph/internal/actor"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/dotcom"
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
-	"github.com/sourcegraph/sourcegraph/internal/gitserver"
-	"github.com/sourcegraph/sourcegraph/internal/search/result"
+	"github.com/sourcegraph/sourcegraph/internal/featureflag"
+	"github.com/sourcegraph/sourcegraph/internal/gqlutil"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
@@ -27,8 +30,9 @@ import (
 func (r *schemaResolver) User(
 	ctx context.Context,
 	args struct {
-		Username *string
-		Email    *string
+		Username   *string
+		Email      *string
+		DatabaseID *int32
 	},
 ) (*UserResolver, error) {
 	var err error
@@ -37,16 +41,18 @@ func (r *schemaResolver) User(
 	case args.Username != nil:
 		user, err = r.db.Users().GetByUsername(ctx, *args.Username)
 
+	case args.DatabaseID != nil:
+		user, err = r.db.Users().GetByID(ctx, *args.DatabaseID)
+
 	case args.Email != nil:
 		// 🚨 SECURITY: Only site admins are allowed to look up by email address on
 		// Sourcegraph.com, for user privacy reasons.
-		if envvar.SourcegraphDotComMode() {
-			if err := backend.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
+		if dotcom.SourcegraphDotComMode() {
+			if err := auth.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
 				return nil, err
 			}
 		}
 		user, err = r.db.Users().GetByVerifiedEmail(ctx, *args.Email)
-
 	default:
 		return nil, errors.New("must specify either username or email to look up a user")
 	}
@@ -56,7 +62,7 @@ func (r *schemaResolver) User(
 		}
 		return nil, err
 	}
-	return NewUserResolver(r.db, user), nil
+	return NewUserResolver(ctx, r.db, user), nil
 }
 
 // UserResolver implements the GraphQL User type.
@@ -64,13 +70,32 @@ type UserResolver struct {
 	logger log.Logger
 	db     database.DB
 	user   *types.User
+	// actor containing current user (derived from request context), which lets us
+	// skip fetching actor from context in every resolver function and save DB calls,
+	// because user is fetched in actor only once.
+	actor                      *actor.Actor
+	codySubscription           *cody.UserSubscription
+	fetchCodySubscriptionError error
+	fetchCodySubscriptionOnce  sync.Once
 }
 
 // NewUserResolver returns a new UserResolver with given user object.
-func NewUserResolver(db database.DB, user *types.User) *UserResolver {
-	return &UserResolver{db: db, user: user, logger: log.Scoped("userResolver", "resolves a specific user").With(
-		log.Object("repo",
-			log.String("user", user.Username))),
+func NewUserResolver(ctx context.Context, db database.DB, user *types.User) *UserResolver {
+	return &UserResolver{
+		db:     db,
+		user:   user,
+		logger: log.Scoped("userResolver").With(log.String("user", user.Username)),
+		actor:  actor.FromContext(ctx),
+	}
+}
+
+// newUserResolverFromActor returns a new UserResolver with given user object.
+func newUserResolverFromActor(a *actor.Actor, db database.DB, user *types.User) *UserResolver {
+	return &UserResolver{
+		db:     db,
+		user:   user,
+		logger: log.Scoped("userResolver").With(log.String("user", user.Username)),
+		actor:  a,
 	}
 }
 
@@ -91,7 +116,7 @@ func UserByIDInt32(ctx context.Context, db database.DB, id int32) (*UserResolver
 	if err != nil {
 		return nil, err
 	}
-	return NewUserResolver(db, user), nil
+	return NewUserResolver(ctx, db, user), nil
 }
 
 func (r *UserResolver) ID() graphql.ID { return MarshalUserID(r.user.ID) }
@@ -109,17 +134,9 @@ func (r *UserResolver) DatabaseID() int32 { return r.user.ID }
 // Email returns the user's oldest email, if one exists.
 // Deprecated: use Emails instead.
 func (r *UserResolver) Email(ctx context.Context) (string, error) {
-	// 🚨 SECURITY: Only the authenticated user can view their email on
-	// Sourcegraph.com.
-	if envvar.SourcegraphDotComMode() {
-		if err := backend.CheckSameUser(ctx, r.user.ID); err != nil {
-			return "", err
-		}
-	} else {
-		// 🚨 SECURITY: Only the user and admins are allowed to access the email address.
-		if err := backend.CheckSiteAdminOrSameUser(ctx, r.db, r.user.ID); err != nil {
-			return "", err
-		}
+	// 🚨 SECURITY: Only the user and admins are allowed to access the email address.
+	if err := auth.CheckSiteAdminOrSameUserFromActor(r.actor, r.db, r.user.ID); err != nil {
+		return "", err
 	}
 
 	email, _, err := r.db.UserEmails().GetPrimaryEmail(ctx, r.user.ID)
@@ -156,64 +173,245 @@ func (r *UserResolver) URL() string {
 
 func (r *UserResolver) SettingsURL() *string { return strptr(r.URL() + "/settings") }
 
-func (r *UserResolver) CreatedAt() DateTime {
-	return DateTime{Time: r.user.CreatedAt}
+type CodySubscriptionResolver struct {
+	subscription *cody.UserSubscription
 }
 
-func (r *UserResolver) UpdatedAt() *DateTime {
-	return &DateTime{Time: r.user.UpdatedAt}
+func (r *CodySubscriptionResolver) Status() ssc.SubscriptionStatus {
+	return r.subscription.Status
 }
 
-func (r *UserResolver) settingsSubject() api.SettingsSubject {
-	return api.SettingsSubject{User: &r.user.ID}
+func (r *CodySubscriptionResolver) Plan() cody.UserSubscriptionPlan {
+	return r.subscription.Plan
+}
+
+func (r *CodySubscriptionResolver) ApplyProRateLimits() bool {
+	return r.subscription.ApplyProRateLimits
+}
+
+func (r *CodySubscriptionResolver) CurrentPeriodStartAt() gqlutil.DateTime {
+	return gqlutil.DateTime{Time: r.subscription.CurrentPeriodStartAt}
+}
+
+func (r *CodySubscriptionResolver) CurrentPeriodEndAt() gqlutil.DateTime {
+	return gqlutil.DateTime{Time: r.subscription.CurrentPeriodEndAt}
+}
+
+func (r *CodySubscriptionResolver) CancelAtPeriodEnd() bool {
+	return r.subscription.CancelAtPeriodEnd
+}
+
+func (r *UserResolver) fetchCodySubscription(ctx context.Context) (*cody.UserSubscription, error) {
+	r.fetchCodySubscriptionOnce.Do(func() {
+		subscription, err := cody.SubscriptionForUser(ctx, r.db, *r.user)
+		if err != nil {
+			r.fetchCodySubscriptionError = err
+			return
+		}
+
+		r.codySubscription = subscription
+	})
+
+	if r.fetchCodySubscriptionError != nil {
+		return nil, r.fetchCodySubscriptionError
+	}
+
+	return r.codySubscription, r.fetchCodySubscriptionError
+}
+
+func (r *UserResolver) CodySubscription(ctx context.Context) (*CodySubscriptionResolver, error) {
+	if !dotcom.SourcegraphDotComMode() {
+		return nil, errors.New("this feature is only available on sourcegraph.com")
+	}
+
+	subscription, err := r.fetchCodySubscription(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CodySubscriptionResolver{subscription: subscription}, nil
+}
+
+func (r *UserResolver) CreatedAt() gqlutil.DateTime {
+	return gqlutil.DateTime{Time: r.user.CreatedAt}
+}
+
+func (r *UserResolver) CodyProEnabled(ctx context.Context) (bool, error) {
+	if !dotcom.SourcegraphDotComMode() {
+		return false, errors.New("this feature is only available on sourcegraph.com")
+	}
+
+	subscription, err := r.fetchCodySubscription(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	return subscription.Plan == cody.UserSubscriptionPlanPro, nil
+}
+
+func (r *UserResolver) CodyCurrentPeriodChatLimit(ctx context.Context) (int32, error) {
+	if !dotcom.SourcegraphDotComMode() {
+		return 0, errors.New("this feature is only available on sourcegraph.com")
+	}
+
+	subscription, err := r.fetchCodySubscription(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	if subscription.ApplyProRateLimits {
+		return 0, nil
+	}
+
+	cfg := conf.GetCompletionsConfig(conf.Get().SiteConfig())
+
+	limit := int32(cfg.PerCommunityUserChatMonthlyInteractionLimit)
+
+	return limit, nil
+}
+
+func (r *UserResolver) CodyCurrentPeriodCodeLimit(ctx context.Context) (int32, error) {
+	if !dotcom.SourcegraphDotComMode() {
+		return 0, errors.New("this feature is only available on sourcegraph.com")
+	}
+
+	// TODO(sqs): This is not enforced anymore as the intent is to give free unlimited autocomplete.
+
+	subscription, err := r.fetchCodySubscription(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	if subscription.ApplyProRateLimits {
+		return 0, nil
+	}
+
+	cfg := conf.GetCompletionsConfig(conf.Get().SiteConfig())
+
+	limit := int32(cfg.PerCommunityUserCodeCompletionsMonthlyInteractionLimit)
+
+	return limit, nil
+}
+
+func (r *UserResolver) CodyCurrentPeriodChatUsage(ctx context.Context) (int32, error) {
+	if !dotcom.SourcegraphDotComMode() {
+		return 0, errors.New("this feature is only available on sourcegraph.com")
+	}
+
+	subscription, err := r.fetchCodySubscription(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	query := sqlf.Sprintf(`
+		WHERE
+			user_id = %s
+			AND timestamp >= %s
+			AND timestamp <= NOW()
+			AND name NOT LIKE '%%clicked%%'
+			AND name NOT LIKE '%%resetChat%%'
+			AND name NOT LIKE '%%menu:opened%%'
+			AND name NOT LIKE 'cody.%%'
+			AND (
+					(
+						SOURCE = 'IDEEXTENSION'
+						AND (
+							name LIKE '%%recipe%%'
+							OR name LIKE '%%command%%'
+							OR name LIKE '%%chat:executed%%'
+							OR name LIKE '%%chat-question:executed%%'
+							OR name LIKE '%%inline-chat%%'
+							OR name LIKE '%%inline-assist%%'
+							OR name LIKE '%%chat:submitted%%'
+						)
+					)
+
+					OR
+
+					(
+						SOURCE = 'WEB'
+						AND (
+							name = 'web:codyChat:submit'
+							OR name LIKE 'web:codyChat:recipe:%%'
+						)
+					)
+			)
+	`, r.user.ID, subscription.CurrentPeriodStartAt)
+
+	count, err := r.db.EventLogs().CountBySQL(ctx, query)
+
+	return int32(count), err
+}
+
+func (r *UserResolver) CodyCurrentPeriodCodeUsage(ctx context.Context) (int32, error) {
+	if !dotcom.SourcegraphDotComMode() {
+		return 0, errors.New("this feature is only available on sourcegraph.com")
+	}
+
+	subscription, err := r.fetchCodySubscription(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	query := sqlf.Sprintf(`
+		WHERE
+			user_id = %s
+			AND timestamp >= %s
+			AND timestamp <= NOW()
+			AND source = 'IDEEXTENSION'
+			AND name LIKE '%%completion:suggested%%'
+	`, r.user.ID, subscription.CurrentPeriodStartAt)
+
+	count, err := r.db.EventLogs().CountBySQL(ctx, query)
+
+	return int32(count), err
+}
+
+func (r *UserResolver) UpdatedAt() *gqlutil.DateTime {
+	return &gqlutil.DateTime{Time: r.user.UpdatedAt}
 }
 
 func (r *UserResolver) LatestSettings(ctx context.Context) (*settingsResolver, error) {
-	// 🚨 SECURITY: Only the authenticated user can view their settings on
-	// Sourcegraph.com.
-	if envvar.SourcegraphDotComMode() {
-		if err := backend.CheckSameUser(ctx, r.user.ID); err != nil {
-			return nil, err
-		}
-	} else {
-		// 🚨 SECURITY: Only the user and admins are allowed to access the user's
-		// settings, because they may contain secrets or other sensitive data.
-		if err := backend.CheckSiteAdminOrSameUser(ctx, r.db, r.user.ID); err != nil {
-			return nil, err
-		}
+	// 🚨 SECURITY: Check that the viewer can access these settings.
+	subject, err := settingsSubjectForNodeAndCheckAccess(ctx, r)
+	if err != nil {
+		return nil, err
 	}
 
-	settings, err := r.db.Settings().GetLatest(ctx, r.settingsSubject())
+	settings, err := r.db.Settings().GetLatest(ctx, subject.toSubject())
 	if err != nil {
 		return nil, err
 	}
 	if settings == nil {
 		return nil, nil
 	}
-	return &settingsResolver{r.db, &settingsSubject{user: r}, settings, nil}, nil
+	return &settingsResolver{db: r.db, subject: subject, settings: settings}, nil
 }
 
-func (r *UserResolver) SettingsCascade() *settingsCascade {
-	return &settingsCascade{db: r.db, subject: &settingsSubject{user: r}}
+func (r *UserResolver) SettingsCascade(ctx context.Context) (*settingsCascade, error) {
+	// 🚨 SECURITY: Check that the viewer can access these settings.
+	subject, err := settingsSubjectForNodeAndCheckAccess(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	return &settingsCascade{db: r.db, subject: subject}, nil
 }
 
-func (r *UserResolver) ConfigurationCascade() *settingsCascade { return r.SettingsCascade() }
+func (r *UserResolver) ConfigurationCascade(ctx context.Context) (*settingsCascade, error) {
+	return r.SettingsCascade(ctx)
+}
 
-func (r *UserResolver) SiteAdmin(ctx context.Context) (bool, error) {
+func (r *UserResolver) SiteAdmin() (bool, error) {
 	// 🚨 SECURITY: Only the user and admins are allowed to determine if the user is a site admin.
-	if err := backend.CheckSiteAdminOrSameUser(ctx, r.db, r.user.ID); err != nil {
+	if err := auth.CheckSiteAdminOrSameUserFromActor(r.actor, r.db, r.user.ID); err != nil {
 		return false, err
 	}
 
 	return r.user.SiteAdmin, nil
 }
 
-func (r *UserResolver) TosAccepted(ctx context.Context) bool {
+func (r *UserResolver) TosAccepted(_ context.Context) bool {
 	return r.user.TosAccepted
-}
-
-func (r *UserResolver) Searchable(ctx context.Context) bool {
-	return r.user.Searchable
 }
 
 type updateUserArgs struct {
@@ -228,18 +426,9 @@ func (r *schemaResolver) UpdateUser(ctx context.Context, args *updateUserArgs) (
 	if err != nil {
 		return nil, err
 	}
-
-	// 🚨 SECURITY: Only the authenticated user can update their properties on
-	// Sourcegraph.com.
-	if envvar.SourcegraphDotComMode() {
-		if err := backend.CheckSameUser(ctx, userID); err != nil {
-			return nil, err
-		}
-	} else {
-		// 🚨 SECURITY: Only the user and site admins are allowed to update the user.
-		if err := backend.CheckSiteAdminOrSameUser(ctx, r.db, userID); err != nil {
-			return nil, err
-		}
+	// 🚨 SECURITY: Only the user and site admins are allowed to update the user.
+	if err := auth.CheckSiteAdminOrSameUser(ctx, r.db, userID); err != nil {
+		return nil, err
 	}
 
 	if args.Username != nil {
@@ -248,7 +437,7 @@ func (r *schemaResolver) UpdateUser(ctx context.Context, args *updateUserArgs) (
 		}
 	}
 
-	if args.AvatarURL != nil {
+	if args.AvatarURL != nil && len(*args.AvatarURL) > 0 {
 		if len(*args.AvatarURL) > 3000 {
 			return nil, errors.New("avatar URL exceeded 3000 characters")
 		}
@@ -262,18 +451,82 @@ func (r *schemaResolver) UpdateUser(ctx context.Context, args *updateUserArgs) (
 	}
 
 	update := database.UserUpdate{
-		DisplayName: args.DisplayName,
-		AvatarURL:   args.AvatarURL,
+		AvatarURL: args.AvatarURL,
 	}
-	if args.Username != nil && viewerIsChangingUsername(ctx, r.db, userID, *args.Username) {
-		if !viewerCanChangeUsername(ctx, r.db, userID) {
+
+	user, err := r.db.Users().GetByID(ctx, userID)
+	if err != nil {
+		return nil, errors.Wrap(err, "getting user from the database")
+	}
+
+	usernameChanged := args.Username != nil && user.Username != *args.Username
+
+	// Check if the user account is SCIM controlled
+	if user.SCIMControlled {
+		errUserScimManaged := errors.Errorf("cannot update externally managed user")
+
+		if usernameChanged {
+			return nil, errUserScimManaged
+		}
+
+		if args.DisplayName != nil && user.DisplayName != *args.DisplayName {
+			return nil, errUserScimManaged
+		}
+	}
+
+	update.DisplayName = args.DisplayName
+
+	// If user is changing their username, we need to verify if this action can be
+	// done.
+	if usernameChanged {
+		if !viewerCanChangeUsername(actor.FromContext(ctx), r.db, userID) {
 			return nil, errors.Errorf("unable to change username because auth.enableUsernameChanges is false in site configuration")
 		}
 		update.Username = *args.Username
 	}
+
 	if err := r.db.Users().Update(ctx, userID, update); err != nil {
 		return nil, err
 	}
+	if featureflag.FromContext(ctx).GetBoolOr("auditlog-expansion", false) {
+		// Log an event when a user account is modified/updated
+		if err := r.db.SecurityEventLogs().LogSecurityEvent(ctx, database.SecurityEventNameAccountModified, "", uint32(userID), "", "BACKEND", args); err != nil {
+			r.logger.Error("Error logging security event", log.Error(err))
+		}
+	}
+	return UserByIDInt32(ctx, r.db, userID)
+}
+
+type changeCodyPlanArgs struct {
+	User graphql.ID
+	Pro  bool
+}
+
+func (r *schemaResolver) ChangeCodyPlan(ctx context.Context, args *changeCodyPlanArgs) (*UserResolver, error) {
+	if !dotcom.SourcegraphDotComMode() {
+		return nil, errors.New("this feature is only available on sourcegraph.com")
+	}
+
+	userID, err := UnmarshalUserID(args.User)
+	if err != nil {
+		return nil, err
+	}
+
+	// 🚨 SECURITY: Only the authenticated user can update their properties.
+	if err := auth.CheckSiteAdminOrSameUser(ctx, r.db, userID); err != nil {
+		return nil, err
+	}
+
+	if err := r.db.Users().ChangeCodyPlan(ctx, userID, args.Pro); err != nil {
+		return nil, err
+	}
+
+	if err, _ := cody.RefreshGatewayRateLimits(ctx, userID, r.db); err != nil {
+		// We intentionally don't fail the upgrade flow here, Gateway will pickup
+		// the new limits automatically. (Just later than we'd like.)
+		r.logger.Warn("refresh gateway limits", log.Error(err))
+	}
+
 	return UserByIDInt32(ctx, r.db, userID)
 }
 
@@ -287,13 +540,13 @@ func CurrentUser(ctx context.Context, db database.DB) (*UserResolver, error) {
 		}
 		return nil, err
 	}
-	return NewUserResolver(db, user), nil
+	return newUserResolverFromActor(actor.FromActualUser(user), db, user), nil
 }
 
 func (r *UserResolver) Organizations(ctx context.Context) (*orgConnectionStaticResolver, error) {
 	// 🚨 SECURITY: Only the user and admins are allowed to access the user's
 	// organisations.
-	if err := backend.CheckSiteAdminOrSameUser(ctx, r.db, r.user.ID); err != nil {
+	if err := auth.CheckSiteAdminOrSameUserFromActor(r.actor, r.db, r.user.ID); err != nil {
 		return nil, err
 	}
 	orgs, err := r.db.Orgs().GetByUserID(ctx, r.user.ID)
@@ -307,17 +560,9 @@ func (r *UserResolver) Organizations(ctx context.Context) (*orgConnectionStaticR
 	return &c, nil
 }
 
-func (r *UserResolver) Tags(ctx context.Context) ([]string, error) {
-	// 🚨 SECURITY: Only the user and admins are allowed to access the user's tags.
-	if err := backend.CheckSiteAdminOrSameUser(ctx, r.db, r.user.ID); err != nil {
-		return nil, err
-	}
-	return r.user.Tags, nil
-}
-
 func (r *UserResolver) SurveyResponses(ctx context.Context) ([]*surveyResponseResolver, error) {
 	// 🚨 SECURITY: Only the user and admins are allowed to access the user's survey responses.
-	if err := backend.CheckSiteAdminOrSameUser(ctx, r.db, r.user.ID); err != nil {
+	if err := auth.CheckSiteAdminOrSameUserFromActor(r.actor, r.db, r.user.ID); err != nil {
 		return nil, err
 	}
 
@@ -325,22 +570,26 @@ func (r *UserResolver) SurveyResponses(ctx context.Context) ([]*surveyResponseRe
 	if err != nil {
 		return nil, err
 	}
-	surveyResponseResolvers := []*surveyResponseResolver{}
+	surveyResponseResolvers := make([]*surveyResponseResolver, 0, len(responses))
 	for _, response := range responses {
 		surveyResponseResolvers = append(surveyResponseResolvers, &surveyResponseResolver{r.db, response})
 	}
 	return surveyResponseResolvers, nil
 }
 
-func (r *UserResolver) ViewerCanAdminister(ctx context.Context) (bool, error) {
-	// 🚨 SECURITY: Only the authenticated user can administrate themselves on
-	// Sourcegraph.com.
-	var err error
-	if envvar.SourcegraphDotComMode() {
-		err = backend.CheckSameUser(ctx, r.user.ID)
-	} else {
-		err = backend.CheckSiteAdminOrSameUser(ctx, r.db, r.user.ID)
+func (r *UserResolver) ViewerCanAdminister() (bool, error) {
+	err := auth.CheckSiteAdminOrSameUserFromActor(r.actor, r.db, r.user.ID)
+	if errcode.IsUnauthorized(err) {
+		return false, nil
+	} else if err != nil {
+		return false, err
 	}
+	return true, nil
+}
+
+func (r *UserResolver) viewerCanAdministerSettings() (bool, error) {
+	err := auth.CheckSiteAdminOrSameUserFromActor(r.actor, r.db, r.user.ID)
+
 	if errcode.IsUnauthorized(err) {
 		return false, nil
 	} else if err != nil {
@@ -351,6 +600,8 @@ func (r *UserResolver) ViewerCanAdminister(ctx context.Context) (bool, error) {
 
 func (r *UserResolver) NamespaceName() string { return r.user.Username }
 
+func (r *UserResolver) SCIMControlled() bool { return r.user.SCIMControlled }
+
 func (r *UserResolver) PermissionsInfo(ctx context.Context) (PermissionsInfoResolver, error) {
 	return EnterpriseResolvers.authzResolver.UserPermissionsInfo(ctx, r.ID())
 }
@@ -358,7 +609,8 @@ func (r *UserResolver) PermissionsInfo(ctx context.Context) (PermissionsInfoReso
 func (r *schemaResolver) UpdatePassword(ctx context.Context, args *struct {
 	OldPassword string
 	NewPassword string
-}) (*EmptyResponse, error) {
+},
+) (*EmptyResponse, error) {
 	// 🚨 SECURITY: Only the authenticated user can change their password.
 	user, err := r.db.Users().GetByCurrentAuthUser(ctx)
 	if err != nil {
@@ -372,9 +624,12 @@ func (r *schemaResolver) UpdatePassword(ctx context.Context, args *struct {
 		return nil, err
 	}
 
+	logger := r.logger.Scoped("UpdatePassword").
+		With(log.Int32("userID", user.ID))
+
 	if conf.CanSendEmail() {
-		if err := backend.UserEmails.SendUserEmailOnFieldUpdate(ctx, r.logger, r.db, user.ID, "updated the password"); err != nil {
-			log15.Warn("Failed to send email to inform user of password update", "error", err)
+		if err := backend.NewUserEmailsService(r.db, logger).SendUserEmailOnFieldUpdate(ctx, user.ID, "updated the password"); err != nil {
+			logger.Warn("Failed to send email to inform user of password update", log.Error(err))
 		}
 	}
 	return &EmptyResponse{}, nil
@@ -382,8 +637,13 @@ func (r *schemaResolver) UpdatePassword(ctx context.Context, args *struct {
 
 func (r *schemaResolver) CreatePassword(ctx context.Context, args *struct {
 	NewPassword string
-}) (*EmptyResponse, error) {
+},
+) (*EmptyResponse, error) {
 	// 🚨 SECURITY: Only the authenticated user can create their password.
+	if !actor.FromContext(ctx).FromSessionCookie {
+		return nil, errors.New("only allowed from user session")
+	}
+
 	user, err := r.db.Users().GetByCurrentAuthUser(ctx)
 	if err != nil {
 		return nil, err
@@ -396,39 +656,50 @@ func (r *schemaResolver) CreatePassword(ctx context.Context, args *struct {
 		return nil, err
 	}
 
+	logger := r.logger.Scoped("CreatePassword").
+		With(log.Int32("userID", user.ID))
+
 	if conf.CanSendEmail() {
-		if err := backend.UserEmails.SendUserEmailOnFieldUpdate(ctx, r.logger, r.db, user.ID, "created a password"); err != nil {
-			log15.Warn("Failed to send email to inform user of password creation", "error", err)
+		if err := backend.NewUserEmailsService(r.db, logger).SendUserEmailOnFieldUpdate(ctx, user.ID, "created a password"); err != nil {
+			logger.Warn("Failed to send email to inform user of password creation", log.Error(err))
 		}
 	}
 	return &EmptyResponse{}, nil
 }
 
-func (r *schemaResolver) SetTosAccepted(ctx context.Context, args *struct{ UserID *graphql.ID }) (*EmptyResponse, error) {
-	var affectedUserID int32
-	if args.UserID != nil {
-		var err error
-		affectedUserID, err = UnmarshalUserID(*args.UserID)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		user, err := r.db.Users().GetByCurrentAuthUser(ctx)
-		if err != nil {
-			return nil, err
-		}
+// userMutationArgs hold an optional user ID for mutations that take in a user ID
+// or assume the current user when no ID is given.
+type userMutationArgs struct {
+	UserID *graphql.ID
+}
 
-		affectedUserID = user.ID
+func (r *schemaResolver) affectedUserID(ctx context.Context, args *userMutationArgs) (affectedUserID int32, err error) {
+	if args.UserID != nil {
+		return UnmarshalUserID(*args.UserID)
 	}
 
-	// 🚨 SECURITY: Only the user and admins are allowed to set the Terms of Service accepted flag.
-	if err := backend.CheckSiteAdminOrSameUser(ctx, r.db, affectedUserID); err != nil {
+	user, err := r.db.Users().GetByCurrentAuthUser(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return user.ID, nil
+}
+
+func (r *schemaResolver) SetTosAccepted(ctx context.Context, args *userMutationArgs) (*EmptyResponse, error) {
+	affectedUserID, err := r.affectedUserID(ctx, args)
+	if err != nil {
 		return nil, err
 	}
 
 	tosAccepted := true
-	update := database.UserUpdate{
-		TosAccepted: &tosAccepted,
+	update := database.UserUpdate{TosAccepted: &tosAccepted}
+	return r.updateAffectedUser(ctx, affectedUserID, update)
+}
+
+func (r *schemaResolver) updateAffectedUser(ctx context.Context, affectedUserID int32, update database.UserUpdate) (*EmptyResponse, error) {
+	// 🚨 SECURITY: Only the user and admins are allowed to set the Terms of Service accepted flag.
+	if err := auth.CheckSiteAdminOrSameUser(ctx, r.db, affectedUserID); err != nil {
+		return nil, err
 	}
 
 	if err := r.db.Users().Update(ctx, affectedUserID, update); err != nil {
@@ -438,30 +709,47 @@ func (r *schemaResolver) SetTosAccepted(ctx context.Context, args *struct{ UserI
 	return &EmptyResponse{}, nil
 }
 
-func (r *schemaResolver) SetSearchable(ctx context.Context, args *struct{ Searchable bool }) (*EmptyResponse, error) {
-	user, err := r.db.Users().GetByCurrentAuthUser(ctx)
+// ViewerCanChangeUsername returns if the current user can change the username of the user.
+func (r *UserResolver) ViewerCanChangeUsername() bool {
+	return viewerCanChangeUsername(r.actor, r.db, r.user.ID)
+}
+
+func (r *UserResolver) CompletionsQuotaOverride(ctx context.Context) (*int32, error) {
+	// 🚨 SECURITY: Only the user and admins are allowed to see quotas.
+	if err := auth.CheckSiteAdminOrSameUser(ctx, r.db, r.user.ID); err != nil {
+		return nil, err
+	}
+
+	v, err := r.db.Users().GetChatCompletionsQuota(ctx, r.user.ID)
 	if err != nil {
 		return nil, err
 	}
-	if user == nil {
-		return nil, errors.New("no authenticated user")
+
+	if v == nil {
+		return nil, nil
 	}
 
-	searchable := args.Searchable
-	update := database.UserUpdate{
-		Searchable: &searchable,
-	}
+	iv := int32(*v)
+	return &iv, nil
+}
 
-	if err := r.db.Users().Update(ctx, user.ID, update); err != nil {
+func (r *UserResolver) CodeCompletionsQuotaOverride(ctx context.Context) (*int32, error) {
+	// 🚨 SECURITY: Only the user and admins are allowed to see quotas.
+	if err := auth.CheckSiteAdminOrSameUser(ctx, r.db, r.user.ID); err != nil {
 		return nil, err
 	}
 
-	return &EmptyResponse{}, nil
-}
+	v, err := r.db.Users().GetCodeCompletionsQuota(ctx, r.user.ID)
+	if err != nil {
+		return nil, err
+	}
 
-// ViewerCanChangeUsername returns if the current user can change the username of the user.
-func (r *UserResolver) ViewerCanChangeUsername(ctx context.Context) bool {
-	return viewerCanChangeUsername(ctx, r.db, r.user.ID)
+	if v == nil {
+		return nil, nil
+	}
+
+	iv := int32(*v)
+	return &iv, nil
 }
 
 func (r *UserResolver) BatchChanges(ctx context.Context, args *ListBatchChangesArgs) (BatchChangesConnectionResolver, error) {
@@ -475,63 +763,180 @@ func (r *UserResolver) BatchChangesCodeHosts(ctx context.Context, args *ListBatc
 	return EnterpriseResolvers.batchChangesResolver.BatchChangesCodeHosts(ctx, args)
 }
 
-func viewerCanChangeUsername(ctx context.Context, db database.DB, userID int32) bool {
-	if err := backend.CheckSiteAdminOrSameUser(ctx, db, userID); err != nil {
+func (r *UserResolver) Roles(ctx context.Context, args *ListRoleArgs) (*gqlutil.ConnectionResolver[RoleResolver], error) {
+	// 🚨 SECURITY: In dotcom mode, only allow site admins to check roles.
+	if dotcom.SourcegraphDotComMode() && auth.CheckCurrentUserIsSiteAdmin(ctx, r.db) != nil {
+		return nil, errors.New("unauthorized")
+	}
+	userID := r.user.ID
+	connectionStore := &roleConnectionStore{
+		db:     r.db,
+		userID: userID,
+	}
+	return gqlutil.NewConnectionResolver[RoleResolver](
+		connectionStore,
+		&args.ConnectionResolverArgs,
+		&gqlutil.ConnectionResolverOptions{
+			AllowNoLimit: true,
+		},
+	)
+}
+
+func (r *UserResolver) Permissions() (*gqlutil.ConnectionResolver[PermissionResolver], error) {
+	userID := r.user.ID
+	if err := auth.CheckSiteAdminOrSameUserFromActor(r.actor, r.db, userID); err != nil {
+		return nil, err
+	}
+	connectionStore := &permissionConnectionStore{
+		db:     r.db,
+		userID: userID,
+	}
+	return gqlutil.NewConnectionResolver[PermissionResolver](
+		connectionStore,
+		&gqlutil.ConnectionResolverArgs{},
+		&gqlutil.ConnectionResolverOptions{
+			AllowNoLimit: true,
+		},
+	)
+}
+
+func viewerCanChangeUsername(a *actor.Actor, db database.DB, userID int32) bool {
+	if err := auth.CheckSiteAdminOrSameUserFromActor(a, db, userID); err != nil {
 		return false
 	}
 	if conf.Get().AuthEnableUsernameChanges {
 		return true
 	}
-	// 🚨 SECURITY: Only site admins are allowed to change a user's username when auth.enableUsernameChanges == false.
-	return backend.CheckCurrentUserIsSiteAdmin(ctx, db) == nil
-}
 
-// Users may be trying to change their own username, or someone else's.
-//
-// The subjectUserID value represents the decoded user ID from the incoming
-// update request, and the proposedUsername is the value that would be applied
-// to that subject's record if all security checks pass.
-//
-// If that subject's username is different from the proposed one, then a
-// change is being attempted and may be rejected by viewerCanChangeUsername.
-func viewerIsChangingUsername(ctx context.Context, db database.DB, subjectUserID int32, proposedUsername string) bool {
-	subject, err := db.Users().GetByID(ctx, subjectUserID)
-	if err != nil {
-		log15.Warn("viewerIsChangingUsername", "error", err)
-		return true
-	}
-	return subject.Username != proposedUsername
+	// 🚨 SECURITY: Only site admins are allowed to change a user's username when auth.enableUsernameChanges == false.
+	return auth.CheckCurrentActorIsSiteAdmin(a, db) == nil
 }
 
 func (r *UserResolver) Monitors(ctx context.Context, args *ListMonitorsArgs) (MonitorConnectionResolver, error) {
-	if err := backend.CheckSameUser(ctx, r.user.ID); err != nil {
+	if err := auth.CheckSameUserFromActor(r.actor, r.user.ID); err != nil {
 		return nil, err
 	}
-	return EnterpriseResolvers.codeMonitorsResolver.Monitors(ctx, r.user.ID, args)
+	return EnterpriseResolvers.codeMonitorsResolver.Monitors(ctx, &r.user.ID, args)
 }
 
-func (r *UserResolver) PublicRepositories(ctx context.Context) ([]*RepositoryResolver, error) {
-	if err := backend.CheckSiteAdminOrSameUser(ctx, r.db, r.user.ID); err != nil {
+func (r *UserResolver) ToUser() (*UserResolver, bool) {
+	return r, true
+}
+
+func (r *UserResolver) OwnerField() string {
+	return EnterpriseResolvers.ownResolver.UserOwnerField(r)
+}
+
+type SetUserCompletionsQuotaArgs struct {
+	User  graphql.ID
+	Quota *int32
+}
+
+func (r *schemaResolver) SetUserCompletionsQuota(ctx context.Context, args SetUserCompletionsQuotaArgs) (*UserResolver, error) {
+	// 🚨 SECURITY: Only site admins are allowed to change a users quota.
+	if err := auth.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
 		return nil, err
 	}
-	repos, err := r.db.UserPublicRepos().ListByUser(ctx, r.user.ID)
+	requestingActor := actor.FromContext(ctx)
+
+	if args.Quota != nil && *args.Quota <= 0 {
+		return nil, errors.New("quota must be 1 or greater")
+	}
+
+	id, err := UnmarshalUserID(args.User)
 	if err != nil {
 		return nil, err
 	}
-	var out []*RepositoryResolver
-	for _, repo := range repos {
-		out = append(out, &RepositoryResolver{
-			logger: r.logger,
-			RepoMatch: result.RepoMatch{
-				ID:   repo.RepoID,
-				Name: api.RepoName(repo.RepoURI),
-			},
-			db:              r.db,
-			gitserverClient: gitserver.NewClient(r.db),
-			innerRepo: &types.Repo{
-				ID: repo.RepoID,
-			},
-		})
+
+	// Verify the ID is valid.
+	user, err := r.db.Users().GetByID(ctx, id)
+	if err != nil {
+		return nil, err
 	}
-	return out, nil
+
+	// Lookup the current quota, so we can log the delta.
+	oldQuota, err := r.db.Users().GetChatCompletionsQuota(ctx, user.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	var newQuota *int
+	if args.Quota != nil {
+		i := int(*args.Quota)
+		newQuota = &i
+	}
+	if err := r.db.Users().SetChatCompletionsQuota(ctx, user.ID, newQuota); err != nil {
+		return nil, err
+	}
+
+	// Log that the user's completions quota was updated.
+	r.logger.Info("setting user completions quota",
+		log.Int("requestingUserID", int(requestingActor.UID)),
+		log.Int("targetUserID", int(user.ID)),
+		log.Intp("oldQuota", oldQuota),
+		log.Intp("newQuota", newQuota))
+	if featureflag.FromContext(ctx).GetBoolOr("auditlog-expansion", false) {
+		if err := r.db.SecurityEventLogs().LogSecurityEvent(ctx, database.SecurityEventNameUserCompletionQuotaUpdated, "", uint32(id), "", "BACKEND", args); err != nil {
+			r.logger.Error("Error logging security event", log.Error(err))
+		}
+	}
+	return UserByIDInt32(ctx, r.db, user.ID)
+}
+
+type SetUserCodeCompletionsQuotaArgs struct {
+	User  graphql.ID
+	Quota *int32
+}
+
+func (r *schemaResolver) SetUserCodeCompletionsQuota(ctx context.Context, args SetUserCodeCompletionsQuotaArgs) (*UserResolver, error) {
+	// 🚨 SECURITY: Only site admins are allowed to change a users quota.
+	if err := auth.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
+		return nil, err
+	}
+
+	if args.Quota != nil && *args.Quota <= 0 {
+		return nil, errors.New("quota must be 1 or greater")
+	}
+
+	id, err := UnmarshalUserID(args.User)
+	if err != nil {
+		return nil, err
+	}
+
+	// Verify the ID is valid.
+	user, err := r.db.Users().GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	var quota *int
+	if args.Quota != nil {
+		i := int(*args.Quota)
+		quota = &i
+	}
+	if err := r.db.Users().SetCodeCompletionsQuota(ctx, user.ID, quota); err != nil {
+		return nil, err
+	}
+	if featureflag.FromContext(ctx).GetBoolOr("auditlog-expansion", false) {
+
+		// Log an event when user's code completions quota is updated
+		if err := r.db.SecurityEventLogs().LogSecurityEvent(ctx, database.SecurityEventNameUserCodeCompletionQuotaUpdated, "", uint32(id), "", "BACKEND", args); err != nil {
+			r.logger.Error("Error logging security event", log.Error(err))
+		}
+	}
+	return UserByIDInt32(ctx, r.db, user.ID)
+}
+
+func (r *UserResolver) EvaluateFeatureFlag(ctx context.Context, args *struct {
+	FlagName string
+}) (*bool, error) {
+	ffs, err := r.db.FeatureFlags().GetUserFlags(ctx, r.user.ID)
+	if err != nil {
+		return nil, err
+	}
+	if v, ok := ffs[args.FlagName]; ok {
+		return &v, nil
+	}
+	// If there is no value for this feature flag, then we return nil. This follows the existing behaviour from the root level evaluateFeatureFlag function.
+	return nil, nil
 }

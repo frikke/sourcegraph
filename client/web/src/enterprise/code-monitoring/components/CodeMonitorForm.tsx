@@ -1,19 +1,17 @@
 import React, { useCallback, useMemo, useState } from 'react'
 
 import classNames from 'classnames'
-import * as H from 'history'
 import { isEqual } from 'lodash'
-import { Observable } from 'rxjs'
+import { useNavigate } from 'react-router-dom'
+import type { Observable } from 'rxjs'
 import { mergeMap, startWith, catchError, tap, filter } from 'rxjs/operators'
 
-import { Form } from '@sourcegraph/branded/src/components/Form'
 import { Toggle } from '@sourcegraph/branded/src/components/Toggle'
 import { asError, isErrorLike } from '@sourcegraph/common'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
-import { Container, Button, useEventObservable, Alert, Link, Select, Input } from '@sourcegraph/wildcard'
+import { Container, Button, useEventObservable, Alert, Link, Select, Input, Form } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../../auth'
-import { CodeMonitorFields } from '../../../graphql-operations'
+import type { AuthenticatedUser } from '../../../auth'
+import type { CodeMonitorFields } from '../../../graphql-operations'
 import { deleteCodeMonitor as _deleteCodeMonitor } from '../backend'
 
 import { DeleteMonitorModal } from './DeleteMonitorModal'
@@ -22,9 +20,7 @@ import { FormTriggerArea } from './FormTriggerArea'
 
 import styles from './CodeMonitorForm.module.scss'
 
-export interface CodeMonitorFormProps extends ThemeProps {
-    history: H.History
-    location: H.Location
+export interface CodeMonitorFormProps {
     authenticatedUser: AuthenticatedUser
     /**
      * A function that takes in a code monitor and emits an Observable with all or some
@@ -55,17 +51,17 @@ interface FormCompletionSteps {
 export const CodeMonitorForm: React.FunctionComponent<React.PropsWithChildren<CodeMonitorFormProps>> = ({
     authenticatedUser,
     onSubmit,
-    history,
     submitButtonLabel,
     codeMonitor,
     showDeleteButton,
     deleteCodeMonitor = _deleteCodeMonitor,
     triggerQuery,
     description,
-    isLightTheme,
     isSourcegraphDotCom,
 }) => {
     const LOADING = 'loading' as const
+
+    const navigate = useNavigate()
 
     const [currentCodeMonitorState, setCodeMonitor] = useState<CodeMonitorFields>(
         codeMonitor ?? {
@@ -75,6 +71,11 @@ export const CodeMonitorForm: React.FunctionComponent<React.PropsWithChildren<Co
             trigger: { id: '', query: triggerQuery ?? '' },
             actions: {
                 nodes: [],
+            },
+            owner: {
+                id: '',
+                namespaceName: '',
+                url: '',
             },
         }
     )
@@ -120,13 +121,13 @@ export const CodeMonitorForm: React.FunctionComponent<React.PropsWithChildren<Co
                             catchError(error => [asError(error)]),
                             tap(successOrError => {
                                 if (!isErrorLike(successOrError) && successOrError !== LOADING) {
-                                    history.push('/code-monitoring')
+                                    navigate('/code-monitoring')
                                 }
                             })
                         )
                     )
                 ),
-            [onSubmit, currentCodeMonitorState, history, formCompletion]
+            [onSubmit, currentCodeMonitorState, navigate, formCompletion]
         )
     )
 
@@ -142,12 +143,12 @@ export const CodeMonitorForm: React.FunctionComponent<React.PropsWithChildren<Co
     const onCancel = useCallback(() => {
         if (hasChangedFields) {
             if (window.confirm('Leave page? All unsaved changes will be lost.')) {
-                history.push('/code-monitoring')
+                navigate('/code-monitoring')
             }
         } else {
-            history.push('/code-monitoring')
+            navigate('/code-monitoring')
         }
-    }, [history, hasChangedFields])
+    }, [navigate, hasChangedFields])
 
     const [showDeleteModal, setShowDeleteModal] = useState(false)
 
@@ -193,8 +194,14 @@ export const CodeMonitorForm: React.FunctionComponent<React.PropsWithChildren<Co
                         disabled={true}
                         message="Event history and configuration will not be shared. Code monitoring currently only supports individual owners."
                     >
-                        <option value={authenticatedUser.displayName || authenticatedUser.username}>
-                            {authenticatedUser.username}
+                        <option
+                            value={
+                                currentCodeMonitorState.owner.namespaceName ||
+                                authenticatedUser.displayName ||
+                                authenticatedUser.username
+                            }
+                        >
+                            {currentCodeMonitorState.owner.namespaceName || authenticatedUser.username}
                         </option>
                     </Select>
 
@@ -209,7 +216,6 @@ export const CodeMonitorForm: React.FunctionComponent<React.PropsWithChildren<Co
                             cardBtnClassName={styles.cardButton}
                             cardLinkClassName={styles.cardLink}
                             cardClassName={styles.card}
-                            isLightTheme={isLightTheme}
                             isSourcegraphDotCom={isSourcegraphDotCom}
                         />
                     </div>
@@ -292,7 +298,10 @@ export const CodeMonitorForm: React.FunctionComponent<React.PropsWithChildren<Co
                         )}
                     </div>
                     {isErrorLike(codeMonitorOrError) && (
-                        <Alert variant="danger">Failed to create monitor: {codeMonitorOrError.message}</Alert>
+                        <Alert variant="danger">
+                            Failed to {currentCodeMonitorState.id === '' ? 'create' : 'update'} monitor:{' '}
+                            {codeMonitorOrError.message}
+                        </Alert>
                     )}
                 </div>
             </Form>
@@ -300,7 +309,6 @@ export const CodeMonitorForm: React.FunctionComponent<React.PropsWithChildren<Co
                 <DeleteMonitorModal
                     isOpen={showDeleteModal}
                     deleteCodeMonitor={deleteCodeMonitor}
-                    history={history}
                     codeMonitor={codeMonitor}
                     toggleDeleteModal={toggleDeleteModal}
                 />

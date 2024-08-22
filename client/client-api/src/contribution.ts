@@ -1,13 +1,14 @@
-import { Primitive } from 'utility-types'
+import type { Primitive } from 'utility-types'
 
-import { KeyPath } from '@sourcegraph/shared/src/api/client/services/settings'
-import { Expression, TemplateExpression } from '@sourcegraph/template-parser'
+import type { Expression, TemplateExpression } from '@sourcegraph/template-parser'
 
-// NOTE: You must manually keep this file in sync with extension.schema.json#/properties/contributes (and possibly
-// extension_schema.go, if your changes are relevant to the subset of this schema used by our Go code).
-//
-// The available tools for automatically generating the JSON Schema from this file add more complexity than it's
-// worth.
+/**
+ * A key path that refers to a location in a JSON document.
+ *
+ * Each successive array element specifies an index in an object or array to descend into. For example, in the
+ * object `{"a": ["x", "y"]}`, the key path `["a", 1]` refers to the value `"y"`.
+ */
+export type KeyPath = (string | number)[]
 
 /**
  * The given contribution type as it's specified in a package.json (expressions as strings)
@@ -33,9 +34,6 @@ export interface Contributions {
     /** Menu items contributed by the extension. */
     menus?: MenuContributions
 
-    /** Views contributed by the extension. */
-    views?: ViewContribution[]
-
     /** Search filters contributed by the extension */
     searchFilters?: SearchFilters[]
 }
@@ -59,7 +57,7 @@ export interface ActionContribution {
      * a noop.
      *
      * See "[Builtin commands](../../../../doc/extensions/authoring/builtin_commands.md)" (online at
-     * https://docs.sourcegraph.com/extensions/authoring/builtin_commands) for documentation on
+     * https://sourcegraph.com/docs/extensions/authoring/builtin_commands) for documentation on
      * builtin client commands.
      *
      * Extensions: The command must be registered (unless it is a builtin command). Extensions can
@@ -81,7 +79,8 @@ export interface ActionContribution {
      */
     commandArguments?: (TemplateExpression | number | boolean | null | object | any[])[]
 
-    /** The title that succinctly describes what this action does. */
+    /** The title that succinctly describes what this action does. The question
+     * mark '?' renders the MDI HelpCircleOutline icon. */
     title?: TemplateExpression
 
     /** The title that succinctly describes what this action is even though it's disabled. */
@@ -127,6 +126,24 @@ export interface ActionContribution {
      * (e.g., because the client is not graphical), then the client may hide the item from the toolbar.
      */
     actionItem?: ActionItem
+
+    /**
+     * Properties to enable event telemetry to be recorded when an action is executed.
+     */
+    telemetryProps: {
+        /**
+         * feature must be camelCase and '.'-delimited, e.g. 'myFeature.subFeature'.
+         *
+         * Most ActionContribution features should be prefixed with 'blob.' to indicate that they are actions
+         * that occur on text blobs.
+         */
+        feature: string
+
+        // No `action` prop is provided, because action items only log telemetry when executed (and thus use an
+        // 'executed' action.
+
+        privateMetadata?: { [key: string]: any }
+    }
 }
 
 /**
@@ -136,10 +153,16 @@ export interface ActionContributionClientCommandOpen extends ActionContribution 
     command: 'open'
 
     /**
-     * The arguments for the `open` client command. The first array element is a URL, which is opened by the client
-     * using the default URL handler.
+     * The arguments for the `open` client command, which can either have one or two elements.
+     *
+     * - The first array element is always a string with the destination URL,
+     * which populates the `href` attribute of the link.
+     * - When defined, the second array element is an `(event: MouseEvent<HTMLElement> | KeyboardEvent<HTMlElement>) => boolean`
+     * handler that fires `onSelect`. The handler is responsible for handling low-level details like whether
+     * the user is holding down modifier keys, or if `event.preventDefault()` should be triggered. The handler
+     * can return `false` to fallback to the default event handler.
      */
-    commandArguments: [TemplateExpression]
+    commandArguments: [TemplateExpression] | [TemplateExpression, TemplateExpression]
 }
 
 /**
@@ -223,9 +246,6 @@ export interface ActionItem {
 }
 
 export enum ContributableMenu {
-    /** The global command palette. */
-    CommandPalette = 'commandPalette',
-
     /** The global navigation bar in the application. */
     GlobalNav = 'global/nav',
 
@@ -305,51 +325,4 @@ export interface SearchFilters {
      * The value of the search filter chip (i.e. the literal search query string).
      */
     value: string
-}
-
-/** The containers to which an extension can contribute views. */
-export const ContributableViewContainer = {
-    /**
-     * A view that is displayed in the panel for a window.
-     *
-     * Clients: The client should render this as a resizable panel in a window, with multiple tabs to switch
-     * between different panel views.
-     */
-    Panel: 'window/panel',
-
-    /**
-     * A global page view, displayed as a standalone page at `/views/ID`.
-     */
-    GlobalPage: 'global/page',
-
-    /**
-     * A view contributed to directory pages.
-     */
-    Directory: 'directory',
-
-    /**
-     * A view contributed to the area on the homepage below the search box.
-     */
-    Homepage: 'homepage',
-
-    /**
-     * A view contributed to the dashboard on the insights page.
-     */
-    InsightsPage: 'insightsPage',
-} as const
-export type ContributableViewContainer = typeof ContributableViewContainer[keyof typeof ContributableViewContainer]
-
-/**
- * A view contributed by an extension.
- */
-export interface ViewContribution {
-    /**
-     * The identifier for this view, which must be unique among all contributed views.
-     */
-    id: string
-
-    /**
-     * The container where this view will be displayed.
-     */
-    where: ContributableViewContainer
 }

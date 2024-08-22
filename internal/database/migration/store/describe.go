@@ -222,7 +222,6 @@ func (s *Store) listExtensions(ctx context.Context) ([]Extension, error) {
 }
 
 const listExtensionsQuery = `
--- source: internal/database/migration/store/store.go:listExtensions
 SELECT
 	n.nspname AS schemaName,
 	e.extname AS extensionName
@@ -242,7 +241,6 @@ func (s *Store) listEnums(ctx context.Context) ([]enum, error) {
 }
 
 const listEnumQuery = `
--- source: internal/database/migration/store/store.go:listEnums
 SELECT
 	n.nspname AS schemaName,
 	t.typname AS typeName,
@@ -267,7 +265,6 @@ func (s *Store) listFunctions(ctx context.Context) ([]function, error) {
 // TODO - not belonging to something else?
 
 const listFunctionsQuery = `
--- source: internal/database/migration/store/store.go:listFunctions
 SELECT
 	n.nspname AS schemaName,
 	p.proname AS functionName,
@@ -295,7 +292,6 @@ func (s *Store) listSequences(ctx context.Context) ([]sequence, error) {
 }
 
 const listSequencesQuery = `
--- source: internal/database/migration/store/store.go:listSequences
 SELECT
 	s.sequence_schema AS schemaName,
 	s.sequence_name AS sequenceName,
@@ -320,7 +316,6 @@ func (s *Store) listTables(ctx context.Context) ([]table, error) {
 }
 
 const listTablesQuery = `
--- source: internal/database/migration/store/store.go:listTables
 SELECT
 	t.table_schema AS schemaName,
 	t.table_name AS tableName,
@@ -341,7 +336,6 @@ func (s *Store) listColumns(ctx context.Context) ([]column, error) {
 }
 
 const listColumnsQuery = `
--- source: internal/database/migration/store/store.go:listColumns
 WITH
 tables AS MATERIALIZED (
 	SELECT
@@ -353,17 +347,6 @@ tables AS MATERIALIZED (
 		t.table_schema NOT LIKE 'pg_%%' AND
 		t.table_schema NOT LIKE '_timescaledb_%%' AND
 		t.table_schema != 'information_schema'
-),
-element_types AS MATERIALIZED (
-	SELECT
-		e.object_catalog,
-		e.object_schema,
-		e.object_name,
-		e.collection_type_identifier,
-		e.data_type
-	FROM information_schema.element_types e
-	WHERE
-		e.object_type = 'TABLE'
 )
 SELECT
 	c.table_schema AS schemaName,
@@ -371,7 +354,16 @@ SELECT
 	c.column_name AS columnName,
 	c.ordinal_position AS index,
 	CASE
-		WHEN c.data_type = 'ARRAY'           THEN e.data_type || '[]'
+		WHEN c.data_type = 'ARRAY' THEN COALESCE((
+			SELECT e.data_type
+			FROM information_schema.element_types e
+			WHERE
+				e.object_type = 'TABLE' AND
+				e.object_catalog = c.table_catalog AND
+				e.object_schema = c.table_schema AND
+				e.object_name = c.table_name AND
+				e.collection_type_identifier = c.dtd_identifier
+		)) || '[]'
 		WHEN c.data_type = 'USER-DEFINED'    THEN c.udt_name
 		WHEN c.character_maximum_length != 0 THEN c.data_type || '(' || c.character_maximum_length::text || ')'
 		ELSE c.data_type
@@ -388,11 +380,6 @@ FROM information_schema.columns c
 JOIN tables t ON
 	t.table_schema = c.table_schema AND
 	t.table_name = c.table_name
-LEFT JOIN element_types e ON
-	e.object_catalog = c.table_catalog AND
-	e.object_schema = c.table_schema AND
-	e.object_name = c.table_name AND
-	e.collection_type_identifier = c.dtd_identifier
 ORDER BY
 	c.table_schema,
 	c.table_name,
@@ -404,7 +391,6 @@ func (s *Store) listIndexes(ctx context.Context) ([]index, error) {
 }
 
 const listIndexesQuery = `
--- source: internal/database/migration/store/store.go:listIndexes
 SELECT
 	n.nspname AS schemaName,
 	table_class.relname AS tableName,
@@ -440,7 +426,6 @@ func (s *Store) listConstraints(ctx context.Context) ([]constraint, error) {
 }
 
 const listConstraintsQuery = `
--- source: internal/database/migration/store/store.go:listConstraints
 SELECT
 	n.nspname AS schemaName,
 	table_class.relname AS tableName,
@@ -469,7 +454,6 @@ func (s *Store) listTriggers(ctx context.Context) ([]trigger, error) {
 }
 
 const listTriggersQuery = `
--- source: internal/database/migration/store/store.go:listTriggers
 SELECT
 	n.nspname AS schemaName,
 	c.relname AS tableName,
@@ -494,7 +478,6 @@ func (s *Store) listViews(ctx context.Context) ([]view, error) {
 }
 
 const listViewsQuery = `
--- source: internal/database/migration/store/store.go:listViews
 SELECT
 	v.schemaname AS schemaName,
 	v.viewname AS viewName,

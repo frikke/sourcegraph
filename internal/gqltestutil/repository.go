@@ -2,8 +2,10 @@ package gqltestutil
 
 import (
 	"context"
+	"fmt"
 	"time"
 
+	"github.com/sourcegraph/sourcegraph/internal/collections"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
@@ -12,7 +14,7 @@ import (
 //
 // This method requires the authenticated user to be a site admin.
 func (c *Client) WaitForReposToBeCloned(repos ...string) error {
-	timeout := 120 * time.Second
+	timeout := 130 * time.Second
 	return c.WaitForReposToBeClonedWithin(timeout, repos...)
 }
 
@@ -24,7 +26,7 @@ func (c *Client) WaitForReposToBeClonedWithin(timeout time.Duration, repos ...st
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	var missing []string
+	var missing collections.Set[string]
 	for {
 		select {
 		case <-ctx.Done():
@@ -34,7 +36,7 @@ func (c *Client) WaitForReposToBeClonedWithin(timeout time.Duration, repos ...st
 
 		const query = `
 query Repositories {
-	repositories(first: 1000, cloned: true, notCloned: false) {
+	repositories(first: 1000, cloneStatus: CLONED) {
 		nodes {
 			name
 		}
@@ -46,7 +48,7 @@ query Repositories {
 		if err != nil {
 			return errors.Wrap(err, "wait for repos to be cloned")
 		}
-		if len(missing) == 0 {
+		if missing.IsEmpty() {
 			break
 		}
 
@@ -55,7 +57,30 @@ query Repositories {
 	return nil
 }
 
-// WaitForReposToBeIndexed waits (up to 30 seconds) for all repositories
+// DeleteRepoFromDiskByName will remove the repo form disk on GitServer.
+func (c *Client) DeleteRepoFromDiskByName(name string) error {
+	repo, err := c.Repository(name)
+	if err != nil {
+		return errors.Wrap(err, "getting repo")
+	}
+	if repo == nil {
+		// Repo doesn't exist, no point trying to delete it
+		return nil
+	}
+
+	q := fmt.Sprintf(`
+mutation {
+  deleteRepositoryFromDisk(repo:"%s") {
+    alwaysNil
+  }
+}
+`, repo.ID)
+
+	err = c.GraphQL("", q, nil, nil)
+	return errors.Wrap(err, "deleting repo from disk")
+}
+
+// WaitForReposToBeIndexed waits (up to 180 seconds) for all repositories
 // in the list to be indexed.
 //
 // This method requires the authenticated user to be a site admin.
@@ -64,7 +89,8 @@ func (c *Client) WaitForReposToBeIndexed(repos ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	var missing []string
+	var missing collections.Set[string]
+	var err error
 	for {
 		select {
 		case <-ctx.Done():
@@ -72,6 +98,7 @@ func (c *Client) WaitForReposToBeIndexed(repos ...string) error {
 		default:
 		}
 
+		// Only fetched indexed repositories
 		const query = `
 query Repositories {
 	repositories(first: 1000, notIndexed: false, notCloned: false) {
@@ -81,12 +108,12 @@ query Repositories {
 	}
 }
 `
-		var err error
+		// Compare list of repos returned by query to expected list of indexed repos
 		missing, err = c.waitForReposByQuery(query, repos...)
 		if err != nil {
 			return errors.Wrap(err, "wait for repos to be indexed")
 		}
-		if len(missing) == 0 {
+		if missing.IsEmpty() {
 			break
 		}
 
@@ -95,7 +122,40 @@ query Repositories {
 	return nil
 }
 
-func (c *Client) waitForReposByQuery(query string, repos ...string) ([]string, error) {
+// WaitForRepoToBeIndexed performs a regexp search for `.` with index:only,
+// repo:repoName, and type:file set until a result is returned.
+func (c *Client) WaitForRepoToBeIndexed(repoName string) error {
+	timeout := 180 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var results *SearchFileResults
+	var err error
+	for {
+		select {
+		case <-ctx.Done():
+			return errors.Errorf("wait for repo to be indexed timed out in %s", timeout)
+		default:
+		}
+
+		results, err = c.SearchFiles(fmt.Sprintf("repo:%s . type:file index:only patterntype:regexp", repoName))
+		if err != nil {
+			return err
+		}
+		if len(results.Results) > 0 {
+			break
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil
+}
+
+// waitForReposByQuery executes the GraphQL query and compares the repo list returned
+// with the list of repos passed in.
+//
+// Any repos in the list that are not returned by the GraphQL are returned as "missing".
+func (c *Client) waitForReposByQuery(query string, repos ...string) (collections.Set[string], error) {
 	var resp struct {
 		Data struct {
 			Repositories struct {
@@ -110,21 +170,16 @@ func (c *Client) waitForReposByQuery(query string, repos ...string) ([]string, e
 		return nil, errors.Wrap(err, "request GraphQL")
 	}
 
-	repoSet := make(map[string]struct{}, len(repos))
-	for _, repo := range repos {
-		repoSet[repo] = struct{}{}
+	nodes := resp.Data.Repositories.Nodes
+	repoSet := collections.NewSet[string](repos...)
+	clonedRepoNames := collections.NewSet[string]()
+	for _, node := range nodes {
+		clonedRepoNames.Add(node.Name)
 	}
-	for _, node := range resp.Data.Repositories.Nodes {
-		delete(repoSet, node.Name)
-	}
-	if len(repoSet) > 0 {
-		missing := make([]string, 0, len(repoSet))
-		for name := range repoSet {
-			missing = append(missing, name)
-		}
+	missing := repoSet.Difference(clonedRepoNames)
+	if !missing.IsEmpty() {
 		return missing, nil
 	}
-
 	return nil, nil
 }
 
@@ -254,10 +309,10 @@ query RepositoryPermissionsInfo($name: String!) {
 	return resp.Data.Repository.PermissionsInfo, nil
 }
 
-func (c *Client) AddRepoKVP(repo string, key string, value *string) error {
+func (c *Client) AddRepoMetadata(repo string, key string, value *string) error {
 	const query = `
-mutation AddRepoKVP($repo: ID!, $key: String!, $value: String) {
-	addRepoKeyValuePair(repo: $repo, key: $key, value: $value) {
+mutation AddRepoMetadata($repo: ID!, $key: String!, $value: String) {
+	addRepoMetadata(repo: $repo, key: $key, value: $value) {
 		alwaysNil
 	}
 }
@@ -265,6 +320,22 @@ mutation AddRepoKVP($repo: ID!, $key: String!, $value: String) {
 	variables := map[string]any{
 		"repo":  repo,
 		"key":   key,
+		"value": value,
+	}
+	var resp map[string]interface{}
+	return c.GraphQL("", query, variables, &resp)
+}
+
+func (c *Client) SetFeatureFlag(name string, value bool) error {
+	const query = `
+mutation SetFeatureFlag($name: String!, $value: Boolean!) {
+	createFeatureFlag(name: $name, value: $value) {
+		__typename
+	}
+}
+`
+	variables := map[string]any{
+		"name":  name,
 		"value": value,
 	}
 	var resp map[string]interface{}

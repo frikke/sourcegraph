@@ -1,12 +1,12 @@
-import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import sinon from 'sinon'
+import { describe, expect, it } from 'vitest'
 
+import { renderWithBrandedContext } from '../../testing'
 import { AnchorLink } from '../Link'
 
-import { NavMenuSectionProps } from './NavMenu'
-
 import { NavMenu } from '.'
+import type { NavMenuSectionProps } from './NavMenu'
 
 describe('<NavMenu />', () => {
     it('Should render Menu Items Correctly', () => {
@@ -67,21 +67,23 @@ describe('<NavMenu />', () => {
                     {
                         content: 'About Sourcegraph',
                         itemAs: AnchorLink,
-                        to: 'https://about.sourcegraph.com',
+                        to: 'https://sourcegraph.com',
                         key: 6,
                     },
                     {
                         content: 'Browser Extension',
                         itemAs: AnchorLink,
-                        to: 'https://docs.sourcegraph.com/integration/browser_extension',
+                        to: 'https://sourcegraph.com/docs/integration/browser_extension',
                         key: 7,
                     },
                 ],
             },
         ]
 
-        render(<NavMenu navTrigger={{ triggerContent: { text: 'menu trigger' } }} sections={menuNavItems} />)
-        const button = screen.getByRole('button', { name: 'menu trigger' })
+        const result = renderWithBrandedContext(
+            <NavMenu navTrigger={{ triggerContent: { text: 'menu trigger' } }} sections={menuNavItems} />
+        )
+        const button = result.getByRole('button', { name: 'menu trigger' })
         expect(button).toBeVisible()
         userEvent.click(button)
 
@@ -90,11 +92,11 @@ describe('<NavMenu />', () => {
             const { headerContent, navItems = [] } = navItem
 
             if (headerContent && typeof headerContent === 'string') {
-                expect(screen.getByText(headerContent)).toBeVisible()
+                expect(result.getByText(headerContent)).toBeInTheDocument()
             }
 
             for (const { content } of navItems) {
-                expect(screen.getByText(content as string)).toBeVisible()
+                expect(result.getByText(content as string)).toBeInTheDocument()
             }
         }
     })

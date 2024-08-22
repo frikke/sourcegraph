@@ -1,40 +1,45 @@
-import React, { FC, ReactNode } from 'react'
+import type { FC, FormHTMLAttributes, ReactNode } from 'react'
 
 import classNames from 'classnames'
 
-import { Card, Checkbox, Input, Label, Link } from '@sourcegraph/wildcard'
+import {
+    Card,
+    Input,
+    Label,
+    Link,
+    FormGroup,
+    getDefaultInputProps,
+    type useFieldAPI,
+    type FormInstance,
+    type SubmissionErrors,
+} from '@sourcegraph/wildcard'
 
 import {
     CodeInsightTimeStepPicker,
     CodeInsightDashboardsVisibility,
-    FormGroup,
-    getDefaultInputProps,
-    useFieldAPI,
-    Form,
-    RepositoriesField,
     LimitedAccessLabel,
-    SubmissionErrors,
+    RepoSettingSection,
 } from '../../../../../components'
 import { useUiFeatures } from '../../../../../hooks'
-import { CaptureGroupFormFields } from '../types'
-import { searchQueryValidator } from '../utils/search-query-validator'
+import type { CaptureGroupFormFields } from '../types'
+import type { Checks } from '../utils/search-query-validator'
 
 import { CaptureGroupSeriesInfoBadge } from './info-badge/CaptureGroupSeriesInfoBadge'
 import { CaptureGroupQueryInput } from './query-input/CaptureGroupQueryInput'
 import { SearchQueryChecks } from './search-query-checks/SearchQueryChecks'
 
-interface CaptureGroupCreationFormProps {
-    form: Form<CaptureGroupFormFields>
+interface CaptureGroupCreationFormProps extends Omit<FormHTMLAttributes<HTMLFormElement>, 'title' | 'children'> {
+    form: FormInstance<CaptureGroupFormFields>
     title: useFieldAPI<CaptureGroupFormFields['title']>
     repositories: useFieldAPI<CaptureGroupFormFields['repositories']>
-    allReposMode: useFieldAPI<CaptureGroupFormFields['allRepos']>
+    repoQuery: useFieldAPI<CaptureGroupFormFields['repoQuery']>
+    repoMode: useFieldAPI<CaptureGroupFormFields['repoMode']>
     step: useFieldAPI<CaptureGroupFormFields['step']>
     stepValue: useFieldAPI<CaptureGroupFormFields['stepValue']>
-    query: useFieldAPI<CaptureGroupFormFields['groupSearchQuery']>
+    query: useFieldAPI<CaptureGroupFormFields['groupSearchQuery'], Checks>
 
     dashboardReferenceCount?: number
     isFormClearActive: boolean
-    className?: string
     children: (inputs: RenderPropertyInputs) => ReactNode
 
     onFormReset: () => void
@@ -50,16 +55,17 @@ export const CaptureGroupCreationForm: FC<CaptureGroupCreationFormProps> = props
     const {
         form,
         title,
+        repoMode,
+        repoQuery,
         repositories,
-        allReposMode,
         query,
         step,
         stepValue,
         dashboardReferenceCount,
-        className,
         isFormClearActive,
         children,
         onFormReset,
+        ...attributes
     } = props
 
     const {
@@ -70,46 +76,10 @@ export const CaptureGroupCreationForm: FC<CaptureGroupCreationFormProps> = props
 
     return (
         // eslint-disable-next-line react/forbid-elements
-        <form noValidate={true} className={className} onSubmit={handleSubmit} onReset={onFormReset}>
-            <FormGroup
-                name="insight repositories"
-                title="Targeted repositories"
-                subtitle="Create a list of repositories to run your search over"
-            >
-                <Input
-                    as={RepositoriesField}
-                    autoFocus={true}
-                    required={true}
-                    label="Repositories"
-                    message="Separate repositories with commas"
-                    placeholder="Example: github.com/sourcegraph/sourcegraph"
-                    {...getDefaultInputProps(repositories)}
-                    className="mb-0 d-flex flex-column"
-                />
+        <form {...attributes} noValidate={true} onSubmit={handleSubmit} onReset={onFormReset}>
+            <RepoSettingSection repositories={repositories} repoQuery={repoQuery} repoMode={repoMode} />
 
-                <Checkbox
-                    {...allReposMode.input}
-                    wrapperClassName="mb-1 mt-3 font-weight-normal"
-                    id="RunInsightsOnAllRepoInput"
-                    type="checkbox"
-                    value="all-repos-mode"
-                    checked={allReposMode.input.value}
-                    label="Run your insight over all your repositories"
-                />
-
-                <small className="w-100 mt-2 text-muted">
-                    This feature is actively in development. Read about the{' '}
-                    <Link
-                        to="/help/code_insights/explanations/current_limitations_of_code_insights"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                    >
-                        limitations here.
-                    </Link>
-                </small>
-            </FormGroup>
-
-            <hr className="my-4 w-100" />
+            <hr aria-hidden={true} className="my-4 w-100" />
 
             <FormGroup
                 name="data series"
@@ -128,21 +98,35 @@ export const CaptureGroupCreationForm: FC<CaptureGroupCreationFormProps> = props
                 }
             >
                 <Card className="p-3">
-                    <Label className="w-100">
+                    <Label className="w-100" id="capture-group-query-label">
                         <div className="mb-2">Search query</div>
-                        <QueryFieldSubtitle className="mb-3" />
+
+                        <small className={classNames('mb-3', 'text-muted', 'd-block', 'font-weight-normal')}>
+                            Search query must contain a properly formatted regular expression with at least one{' '}
+                            <Link
+                                to="/help/code_insights/explanations/automatically_generated_data_series#regular-expression-capture-group-resources"
+                                target="_blank"
+                                rel="noopener"
+                            >
+                                capture group.
+                            </Link>{' '}
+                            The capture group cannot match file or repository names, it can match only the file
+                            contents.
+                        </small>
 
                         <Input
-                            required={true}
                             as={CaptureGroupQueryInput}
+                            required={true}
+                            // Set repo query to preview only when search query mode is activated
+                            repoQuery={repoMode.input.value === 'search-query' ? repoQuery.input.value.query : null}
                             repositories={repositories.input.value}
                             placeholder="Example: file:\.pom$ <java\.version>(.*)</java\.version>"
-                            className="mb-3"
+                            aria-labelledby="capture-group-query-label"
                             {...getDefaultInputProps(query)}
                         />
                     </Label>
 
-                    <SearchQueryChecks checks={searchQueryValidator(query.input.value, query.meta.touched)} />
+                    <SearchQueryChecks checks={query.meta.validationContext} />
 
                     {!licensed && (
                         <LimitedAccessLabel message="Unlock Code Insights for unlimited data series" className="my-3" />
@@ -175,7 +159,7 @@ export const CaptureGroupCreationForm: FC<CaptureGroupCreationFormProps> = props
                 </Card>
             </FormGroup>
 
-            <hr className="my-4 w-100" />
+            <hr aria-hidden={true} className="my-4 w-100" />
 
             <FormGroup name="chart settings group" title="Chart settings">
                 <Input
@@ -190,11 +174,11 @@ export const CaptureGroupCreationForm: FC<CaptureGroupCreationFormProps> = props
                 <CodeInsightTimeStepPicker
                     {...stepValue.input}
                     valid={stepValue.meta.touched && stepValue.meta.validState === 'VALID'}
-                    error={stepValue.meta.touched && stepValue.meta.error}
+                    error={(stepValue.meta.touched && stepValue.meta.error) || undefined}
                     errorInputState={stepValue.meta.touched && stepValue.meta.validState === 'INVALID'}
                     stepType={step.input.value}
                     onStepTypeChange={step.input.onChange}
-                    numberOfPoints={allReposMode.input.value ? 12 : 7}
+                    numberOfPoints={12}
                 />
             </FormGroup>
 
@@ -202,23 +186,9 @@ export const CaptureGroupCreationForm: FC<CaptureGroupCreationFormProps> = props
                 <CodeInsightDashboardsVisibility className="mt-5 mb-n1" dashboardCount={dashboardReferenceCount} />
             )}
 
-            <hr className="my-4 w-100" />
+            <hr aria-hidden={true} className="my-4 w-100" />
 
             {children({ submitting, submitErrors, isFormClearActive })}
         </form>
     )
 }
-
-const QueryFieldSubtitle: React.FunctionComponent<React.PropsWithChildren<{ className?: string }>> = props => (
-    <small className={classNames(props.className, 'text-muted', 'd-block', 'font-weight-normal')}>
-        Search query must contain a properly formatted regular expression with at least one{' '}
-        <Link
-            to="/help/code_insights/explanations/automatically_generated_data_series#regular-expression-capture-group-resources"
-            target="_blank"
-            rel="noopener"
-        >
-            capture group.
-        </Link>{' '}
-        The capture group cannot match file or repository names, it can match only the file contents.
-    </small>
-)

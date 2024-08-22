@@ -1,6 +1,7 @@
 package bitbucketcloud
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,16 +10,19 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/opentracing-contrib/go-stdlib/nethttp"
+	"github.com/sourcegraph/log"
 
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc/auth"
 	"github.com/sourcegraph/sourcegraph/internal/httpcli"
 	"github.com/sourcegraph/sourcegraph/internal/metrics"
+	"github.com/sourcegraph/sourcegraph/internal/oauthutil"
 	"github.com/sourcegraph/sourcegraph/internal/ratelimit"
-	"github.com/sourcegraph/sourcegraph/internal/trace/ot"
+	"github.com/sourcegraph/sourcegraph/internal/timeutil"
+	"github.com/sourcegraph/sourcegraph/internal/trace"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 	"github.com/sourcegraph/sourcegraph/schema"
 )
@@ -41,10 +45,18 @@ type Client interface {
 	MergePullRequest(ctx context.Context, repo *Repo, id int64, opts MergePullRequestOpts) (*PullRequest, error)
 
 	Repo(ctx context.Context, namespace, slug string) (*Repo, error)
-	Repos(ctx context.Context, pageToken *PageToken, accountName string) ([]*Repo, *PageToken, error)
+	Repos(ctx context.Context, pageToken *PageToken, accountName string, opts *ReposOptions) ([]*Repo, *PageToken, error)
 	ForkRepository(ctx context.Context, upstream *Repo, input ForkInput) (*Repo, error)
 
+	ListExplicitUserPermsForRepo(ctx context.Context, pageToken *PageToken, owner, slug string, opts *RequestOptions) ([]*Account, *PageToken, error)
+
 	CurrentUser(ctx context.Context) (*User, error)
+	CurrentUserEmails(ctx context.Context, pageToken *PageToken) ([]*UserEmail, *PageToken, error)
+	AllCurrentUserEmails(ctx context.Context) ([]*UserEmail, error)
+}
+
+type RequestOptions struct {
+	FetchAll bool
 }
 
 // client access a Bitbucket Cloud via the REST API 2.0.
@@ -86,20 +98,27 @@ func newClient(urn string, config *schema.BitbucketCloudConnection, httpClient h
 		return category
 	})
 
-	apiURL, err := urlFromConfig(config)
+	apiURL, err := UrlFromConfig(config)
 	if err != nil {
 		return nil, err
+	}
+
+	var auther auth.Authenticator
+	if config.AccessToken != "" {
+		auther = &auth.OAuthBearerToken{Token: config.AccessToken}
+	} else {
+		auther = &auth.BasicAuth{
+			Username: config.Username,
+			Password: config.AppPassword,
+		}
 	}
 
 	return &client{
 		httpClient: httpClient,
 		URL:        extsvc.NormalizeBaseURL(apiURL),
-		Auth: &auth.BasicAuth{
-			Username: config.Username,
-			Password: config.AppPassword,
-		},
+		Auth:       auther,
 		// Default limits are defined in extsvc.GetLimitFromConfig
-		rateLimit: ratelimit.DefaultRegistry.Get(urn),
+		rateLimit: ratelimit.NewInstrumentedLimiter(urn, ratelimit.NewGlobalRateLimiter(log.Scoped("BitbucketCloudClient"), urn)),
 	}, nil
 }
 
@@ -137,11 +156,26 @@ func (c *client) Ping(ctx context.Context) error {
 		return errors.Wrap(err, "creating request")
 	}
 
-	err = c.do(ctx, req, nil)
+	_, err = c.do(ctx, req, nil)
 	if err != nil && !errcode.IsNotFound(err) {
 		return err
 	}
 	return nil
+}
+
+func fetchAll[T any](ctx context.Context, c *client, results []T, next *PageToken, err error) ([]T, error) {
+	var page []T
+	var nextURL *url.URL
+	for err == nil && next.HasMore() {
+		nextURL, err = url.Parse(next.Next)
+		if err != nil {
+			return nil, err
+		}
+		next, err = c.page(ctx, nextURL.Path, nil, next, &page)
+		results = append(results, page...)
+	}
+
+	return results, err
 }
 
 func (c *client) page(ctx context.Context, path string, qry url.Values, token *PageToken, results any) (*PageToken, error) {
@@ -169,14 +203,13 @@ func (c *client) reqPage(ctx context.Context, url string, results any) (*PageTok
 	}
 
 	var next PageToken
-	err = c.do(ctx, req, &struct {
+	_, err = c.do(ctx, req, &struct {
 		*PageToken
 		Values any `json:"values"`
 	}{
 		PageToken: &next,
 		Values:    results,
 	})
-
 	if err != nil {
 		return nil, err
 	}
@@ -184,55 +217,77 @@ func (c *client) reqPage(ctx context.Context, url string, results any) (*PageTok
 	return &next, nil
 }
 
-func (c *client) do(ctx context.Context, req *http.Request, result any) error {
+func (c *client) do(ctx context.Context, req *http.Request, result any) (code int, err error) {
+	tr, ctx := trace.New(ctx, "BitbucketCloud.do")
+	defer tr.EndWithErr(&err)
+	req = req.WithContext(ctx)
+
 	req.URL = c.URL.ResolveReference(req.URL)
 
 	// If the request doesn't expect a body, then including a content-type can
 	// actually cause errors on the Bitbucket side. So we need to pick apart the
 	// request just a touch to figure out if we should add the header.
+	var reqBody []byte
 	if req.Body != nil {
 		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+		reqBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			return code, err
+		}
+	}
+	req.Body = io.NopCloser(bytes.NewReader(reqBody))
+
+	if err = c.rateLimit.Wait(ctx); err != nil {
+		return code, err
 	}
 
-	req, ht := nethttp.TraceRequest(ot.GetTracer(ctx),
-		req.WithContext(ctx),
-		nethttp.OperationName("Bitbucket Cloud"),
-		nethttp.ClientTrace(false))
-	defer ht.Finish()
+	// Because we have no external rate limiting data for Bitbucket Cloud, we do an exponential
+	// back-off and retry for requests where we recieve a 429 Too Many Requests.
+	// If we still don't succeed after waiting a total of 5 min, we give up.
+	var resp *http.Response
+	sleepTime := 10 * time.Second
+	logger := log.Scoped("bitbucketcloud.Client")
+	for {
+		resp, err = oauthutil.DoRequest(ctx, logger, c.httpClient, req, c.Auth)
+		if resp != nil {
+			code = resp.StatusCode
+		}
+		if err != nil {
+			return code, err
+		}
 
-	if err := c.Auth.Authenticate(req); err != nil {
-		return err
-	}
+		if code != http.StatusTooManyRequests {
+			break
+		}
 
-	if err := c.rateLimit.Wait(ctx); err != nil {
-		return err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
+		timeutil.SleepWithContext(ctx, sleepTime)
+		sleepTime = sleepTime * 2
+		if sleepTime.Seconds() > 160 {
+			break
+		}
+		req.Body = io.NopCloser(bytes.NewReader(reqBody))
 	}
 
 	defer resp.Body.Close()
 
 	bs, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return code, err
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return errors.WithStack(&httpError{
+	if code < http.StatusOK || code >= http.StatusBadRequest {
+		return code, errors.WithStack(&httpError{
 			URL:        req.URL,
-			StatusCode: resp.StatusCode,
+			StatusCode: code,
 			Body:       string(bs),
 		})
 	}
 
 	if result != nil {
-		return json.Unmarshal(bs, result)
+		return code, json.Unmarshal(bs, result)
 	}
 
-	return nil
+	return code, nil
 }
 
 type PageToken struct {
@@ -253,6 +308,12 @@ func (t *PageToken) Values() url.Values {
 	v := url.Values{}
 	if t == nil {
 		return v
+	}
+	if t.Next != "" {
+		nextURL, err := url.Parse(t.Next)
+		if err == nil {
+			v = nextURL.Query()
+		}
 	}
 	if t.Pagelen != 0 {
 		v.Set("pagelen", strconv.Itoa(t.Pagelen))
@@ -278,7 +339,7 @@ func (e *httpError) NotFound() bool {
 	return e.StatusCode == http.StatusNotFound
 }
 
-func urlFromConfig(config *schema.BitbucketCloudConnection) (*url.URL, error) {
+func UrlFromConfig(config *schema.BitbucketCloudConnection) (*url.URL, error) {
 	if config.ApiURL == "" {
 		return url.Parse("https://api.bitbucket.org")
 	}

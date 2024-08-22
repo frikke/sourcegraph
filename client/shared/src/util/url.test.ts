@@ -1,16 +1,17 @@
+import { describe, expect, it, test } from 'vitest'
+
 import { isExternalLink } from '@sourcegraph/common'
 
 import { SearchPatternType } from '../graphql-operations'
 
 import {
     buildSearchURLQuery,
-    makeRepoURI,
-    parseHash,
-    parseRepoURI,
+    makeRepoGitURI,
+    parseRepoGitURI,
     toPrettyBlobURL,
     withWorkspaceRootInputRevision,
     toAbsoluteBlobURL,
-    RepoFile,
+    type RepoFile,
     toRepoURL,
 } from './url'
 
@@ -25,29 +26,29 @@ function assertDeepStrictEqual(actual: any, expected: any): void {
     expect(actual).toEqual(expected)
 }
 
-describe('parseRepoURI', () => {
+describe('parseRepoGitURI', () => {
     test('should parse repo', () => {
-        const parsed = parseRepoURI('git://github.com/gorilla/mux')
+        const parsed = parseRepoGitURI('git://github.com/gorilla/mux')
         assertDeepStrictEqual(parsed, {
             repoName: 'github.com/gorilla/mux',
         })
     })
     test('should parse repo with spaces', () => {
-        const parsed = parseRepoURI('git://sourcegraph.visualstudio.com/Test%20Repo')
+        const parsed = parseRepoGitURI('git://sourcegraph.visualstudio.com/Test%20Repo')
         assertDeepStrictEqual(parsed, {
             repoName: 'sourcegraph.visualstudio.com/Test Repo',
         })
     })
 
     test('should parse repo with plus sign', () => {
-        const parsed = parseRepoURI('git://git.launchpad.net/ubuntu/+source/qemu')
+        const parsed = parseRepoGitURI('git://git.launchpad.net/ubuntu/+source/qemu')
         assertDeepStrictEqual(parsed, {
             repoName: 'git.launchpad.net/ubuntu/+source/qemu',
         })
     })
 
     test('should parse repo with revision', () => {
-        const parsed = parseRepoURI('git://github.com/gorilla/mux?branch')
+        const parsed = parseRepoGitURI('git://github.com/gorilla/mux?branch')
         assertDeepStrictEqual(parsed, {
             repoName: 'github.com/gorilla/mux',
             revision: 'branch',
@@ -55,7 +56,7 @@ describe('parseRepoURI', () => {
     })
 
     test('should parse repo with revision with special characters', () => {
-        const parsed = parseRepoURI('git://github.com/gorilla/mux?my%2Fbranch')
+        const parsed = parseRepoGitURI('git://github.com/gorilla/mux?my%2Fbranch')
         assertDeepStrictEqual(parsed, {
             repoName: 'github.com/gorilla/mux',
             revision: 'my/branch',
@@ -63,7 +64,7 @@ describe('parseRepoURI', () => {
     })
 
     test('should parse repo with commitID', () => {
-        const parsed = parseRepoURI('git://github.com/gorilla/mux?24fca303ac6da784b9e8269f724ddeb0b2eea5e7')
+        const parsed = parseRepoGitURI('git://github.com/gorilla/mux?24fca303ac6da784b9e8269f724ddeb0b2eea5e7')
         assertDeepStrictEqual(parsed, {
             repoName: 'github.com/gorilla/mux',
             revision: '24fca303ac6da784b9e8269f724ddeb0b2eea5e7',
@@ -72,7 +73,7 @@ describe('parseRepoURI', () => {
     })
 
     test('should parse repo with revision and file', () => {
-        const parsed = parseRepoURI('git://github.com/gorilla/mux?branch#mux.go')
+        const parsed = parseRepoGitURI('git://github.com/gorilla/mux?branch#mux.go')
         assertDeepStrictEqual(parsed, {
             repoName: 'github.com/gorilla/mux',
             revision: 'branch',
@@ -81,7 +82,7 @@ describe('parseRepoURI', () => {
     })
 
     test('should parse repo with revision and file with spaces', () => {
-        const parsed = parseRepoURI('git://github.com/gorilla/mux?branch#my%20file.go')
+        const parsed = parseRepoGitURI('git://github.com/gorilla/mux?branch#my%20file.go')
         assertDeepStrictEqual(parsed, {
             repoName: 'github.com/gorilla/mux',
             revision: 'branch',
@@ -90,7 +91,7 @@ describe('parseRepoURI', () => {
     })
 
     test('should parse repo with revision and file and line', () => {
-        const parsed = parseRepoURI('git://github.com/gorilla/mux?branch#mux.go:3')
+        const parsed = parseRepoGitURI('git://github.com/gorilla/mux?branch#mux.go:3')
         assertDeepStrictEqual(parsed, {
             repoName: 'github.com/gorilla/mux',
             revision: 'branch',
@@ -103,7 +104,7 @@ describe('parseRepoURI', () => {
     })
 
     test('should parse repo with revision and file and position', () => {
-        const parsed = parseRepoURI('git://github.com/gorilla/mux?branch#mux.go:3,5')
+        const parsed = parseRepoGitURI('git://github.com/gorilla/mux?branch#mux.go:3,5')
         assertDeepStrictEqual(parsed, {
             repoName: 'github.com/gorilla/mux',
             revision: 'branch',
@@ -116,7 +117,7 @@ describe('parseRepoURI', () => {
     })
 
     test('should parse repo with revision and file and range', () => {
-        const parsed = parseRepoURI('git://github.com/gorilla/mux?branch#mux.go:3,5-6,9')
+        const parsed = parseRepoGitURI('git://github.com/gorilla/mux?branch#mux.go:3,5-6,9')
         assertDeepStrictEqual(parsed, {
             repoName: 'github.com/gorilla/mux',
             revision: 'branch',
@@ -135,7 +136,7 @@ describe('parseRepoURI', () => {
     })
 
     test('should parse a file with spaces', () => {
-        const parsed = parseRepoURI('git://github.com/gorilla/mux?branch#space%20here.go')
+        const parsed = parseRepoGitURI('git://github.com/gorilla/mux?branch#space%20here.go')
         assertDeepStrictEqual(parsed, {
             repoName: 'github.com/gorilla/mux',
             revision: 'branch',
@@ -144,16 +145,16 @@ describe('parseRepoURI', () => {
     })
 })
 
-describe('makeRepoURI', () => {
+describe('makeRepoGitURI', () => {
     test('should make repo', () => {
-        const uri = makeRepoURI({
+        const uri = makeRepoGitURI({
             repoName: 'github.com/gorilla/mux',
         })
         assertDeepStrictEqual(uri, 'git://github.com/gorilla/mux')
     })
 
     test('should make repo with revision', () => {
-        const uri = makeRepoURI({
+        const uri = makeRepoGitURI({
             repoName: 'github.com/gorilla/mux',
             revision: 'branch',
         })
@@ -161,7 +162,7 @@ describe('makeRepoURI', () => {
     })
 
     test('should make repo with commitID', () => {
-        const uri = makeRepoURI({
+        const uri = makeRepoGitURI({
             repoName: 'github.com/gorilla/mux',
             revision: 'branch',
             commitID: '24fca303ac6da784b9e8269f724ddeb0b2eea5e7',
@@ -170,7 +171,7 @@ describe('makeRepoURI', () => {
     })
 
     test('should make repo with revision and file', () => {
-        const uri = makeRepoURI({
+        const uri = makeRepoGitURI({
             repoName: 'github.com/gorilla/mux',
             revision: 'branch',
             filePath: 'mux.go',
@@ -179,7 +180,7 @@ describe('makeRepoURI', () => {
     })
 
     test('should make repo with revision and file and line', () => {
-        const uri = makeRepoURI({
+        const uri = makeRepoGitURI({
             repoName: 'github.com/gorilla/mux',
             revision: 'branch',
             filePath: 'mux.go',
@@ -192,7 +193,7 @@ describe('makeRepoURI', () => {
     })
 
     test('should make repo with revision and file and position', () => {
-        const uri = makeRepoURI({
+        const uri = makeRepoGitURI({
             repoName: 'github.com/gorilla/mux',
             revision: 'branch',
             filePath: 'mux.go',
@@ -206,66 +207,13 @@ describe('makeRepoURI', () => {
 })
 
 describe('util/url', () => {
-    const linePosition = { line: 1 }
     const lineCharPosition = { line: 1, character: 1 }
-    const referenceMode = { ...lineCharPosition, viewState: 'references' }
     const context: RepoFile = {
         repoName: 'github.com/gorilla/mux',
         revision: '',
         commitID: '24fca303ac6da784b9e8269f724ddeb0b2eea5e7',
         filePath: 'mux.go',
     }
-
-    describe('parseHash', () => {
-        test('parses empty hash', () => {
-            expect(parseHash('')).toEqual({})
-        })
-
-        test('parses unexpectedly formatted hash', () => {
-            expect(parseHash('L-53')).toEqual({})
-            expect(parseHash('L53:')).toEqual({})
-            expect(parseHash('L1:2-')).toEqual({})
-            expect(parseHash('L1:2-3')).toEqual({})
-            expect(parseHash('L1:2-3:')).toEqual({})
-            expect(parseHash('L1:-3:')).toEqual({})
-            expect(parseHash('L1:-3:4')).toEqual({})
-            expect(parseHash('L1-2:3')).toEqual({})
-            expect(parseHash('L1-2:')).toEqual({})
-            expect(parseHash('L1:-2')).toEqual({})
-            expect(parseHash('L1:2--3:4')).toEqual({})
-            expect(parseHash('L53:a')).toEqual({})
-        })
-
-        test('parses hash with leading octothorpe', () => {
-            expect(parseHash('#L1')).toEqual(linePosition)
-        })
-
-        test('parses hash with line', () => {
-            expect(parseHash('L1')).toEqual(linePosition)
-        })
-
-        test('parses hash with line and character', () => {
-            expect(parseHash('L1:1')).toEqual(lineCharPosition)
-        })
-
-        test('parses hash with range', () => {
-            expect(parseHash('L1-2')).toEqual({ line: 1, endLine: 2 })
-            expect(parseHash('L1:2-3:4')).toEqual({ line: 1, character: 2, endLine: 3, endCharacter: 4 })
-            expect(parseHash('L47-L55')).toEqual({ line: 47, endLine: 55 })
-            expect(parseHash('L34:2-L38:3')).toEqual({ line: 34, character: 2, endLine: 38, endCharacter: 3 })
-        })
-
-        test('parses hash with references', () => {
-            expect(parseHash('$references')).toEqual({ viewState: 'references' })
-            expect(parseHash('L1:1$references')).toEqual(referenceMode)
-            expect(parseHash('L1:1$references')).toEqual(referenceMode)
-        })
-        test('parses modern hash with references', () => {
-            expect(parseHash('tab=references')).toEqual({ viewState: 'references' })
-            expect(parseHash('L1:1&tab=references')).toEqual(referenceMode)
-            expect(parseHash('L1:1&tab=references')).toEqual(referenceMode)
-        })
-    })
 
     describe('toPrettyBlobURL', () => {
         test('formats url for empty revision', () => {
@@ -329,112 +277,115 @@ describe('util/url', () => {
 describe('withWorkspaceRootInputRevision', () => {
     test('uses input revision for URI inside root with input revision', () =>
         expect(
-            withWorkspaceRootInputRevision([{ uri: 'git://r?c', inputRevision: 'v' }], parseRepoURI('git://r?c#f'))
-        ).toEqual(parseRepoURI('git://r?v#f')))
+            withWorkspaceRootInputRevision([{ uri: 'git://r?c', inputRevision: 'v' }], parseRepoGitURI('git://r?c#f'))
+        ).toEqual(parseRepoGitURI('git://r?v#f')))
 
     test('does not change URI outside root (different repoName)', () =>
         expect(
-            withWorkspaceRootInputRevision([{ uri: 'git://r?c', inputRevision: 'v' }], parseRepoURI('git://r2?c#f'))
-        ).toEqual(parseRepoURI('git://r2?c#f')))
+            withWorkspaceRootInputRevision([{ uri: 'git://r?c', inputRevision: 'v' }], parseRepoGitURI('git://r2?c#f'))
+        ).toEqual(parseRepoGitURI('git://r2?c#f')))
 
     test('does not change URI outside root (different revision)', () =>
         expect(
-            withWorkspaceRootInputRevision([{ uri: 'git://r?c', inputRevision: 'v' }], parseRepoURI('git://r?c2#f'))
-        ).toEqual(parseRepoURI('git://r?c2#f')))
+            withWorkspaceRootInputRevision([{ uri: 'git://r?c', inputRevision: 'v' }], parseRepoGitURI('git://r?c2#f'))
+        ).toEqual(parseRepoGitURI('git://r?c2#f')))
 
     test('uses empty string input revision (treats differently from undefined)', () =>
         expect(
-            withWorkspaceRootInputRevision([{ uri: 'git://r?c', inputRevision: '' }], parseRepoURI('git://r?c#f'))
-        ).toEqual({ ...parseRepoURI('git://r?c#f'), revision: '' }))
+            withWorkspaceRootInputRevision([{ uri: 'git://r?c', inputRevision: '' }], parseRepoGitURI('git://r?c#f'))
+        ).toEqual({ ...parseRepoGitURI('git://r?c#f'), revision: '' }))
 
     test('does not change URI if root has undefined input revision', () =>
         expect(
             withWorkspaceRootInputRevision(
                 [{ uri: 'git://r?c', inputRevision: undefined }],
-                parseRepoURI('git://r?c#f')
+                parseRepoGitURI('git://r?c#f')
             )
-        ).toEqual(parseRepoURI('git://r?c#f')))
+        ).toEqual(parseRepoGitURI('git://r?c#f')))
 })
 
 describe('buildSearchURLQuery', () => {
     it('builds the URL query for a regular expression search', () =>
-        expect(buildSearchURLQuery('foo', SearchPatternType.regexp, false, undefined)).toBe('q=foo&patternType=regexp'))
+        expect(buildSearchURLQuery('foo', SearchPatternType.regexp, false, undefined)).toMatchInlineSnapshot(
+            '"q=foo&patternType=regexp&sm=0"'
+        ))
     it('builds the URL query for a literal search', () =>
-        expect(buildSearchURLQuery('foo', SearchPatternType.standard, false, undefined)).toBe(
-            'q=foo&patternType=standard'
+        expect(buildSearchURLQuery('foo', SearchPatternType.standard, false, undefined)).toMatchInlineSnapshot(
+            '"q=foo&patternType=standard&sm=0"'
         ))
     it('handles an empty query', () =>
-        expect(buildSearchURLQuery('', SearchPatternType.regexp, false, undefined)).toBe('q=&patternType=regexp'))
+        expect(buildSearchURLQuery('', SearchPatternType.regexp, false, undefined)).toMatchInlineSnapshot(
+            '"q=&patternType=regexp&sm=0"'
+        ))
     it('handles characters that need encoding', () =>
-        expect(buildSearchURLQuery('foo bar%baz', SearchPatternType.regexp, false, undefined)).toBe(
-            'q=foo+bar%25baz&patternType=regexp'
+        expect(buildSearchURLQuery('foo bar%baz', SearchPatternType.regexp, false, undefined)).toMatchInlineSnapshot(
+            '"q=foo+bar%25baz&patternType=regexp&sm=0"'
         ))
     it('preserves / and : for readability', () =>
-        expect(buildSearchURLQuery('repo:foo/bar', SearchPatternType.regexp, false, undefined)).toBe(
-            'q=repo:foo/bar&patternType=regexp'
+        expect(buildSearchURLQuery('repo:foo/bar', SearchPatternType.regexp, false, undefined)).toMatchInlineSnapshot(
+            '"q=repo:foo/bar&patternType=regexp&sm=0"'
         ))
     describe('removal of patternType parameter', () => {
         it('overrides the patternType parameter at the end', () => {
-            expect(buildSearchURLQuery('foo patternType:literal', SearchPatternType.regexp, false, undefined)).toBe(
-                'q=foo&patternType=literal'
-            )
+            expect(
+                buildSearchURLQuery('foo patternType:literal', SearchPatternType.regexp, false, undefined)
+            ).toMatchInlineSnapshot('"q=foo&patternType=literal&sm=0"')
         })
         it('overrides the patternType parameter at the beginning', () => {
             expect(
                 buildSearchURLQuery('patternType:literal foo type:diff', SearchPatternType.regexp, false, undefined)
-            ).toBe('q=foo+type:diff&patternType=literal')
+            ).toMatchInlineSnapshot('"q=foo+type:diff&patternType=literal&sm=0"')
         })
         it('overrides the patternType parameter at the end with another operator', () => {
             expect(
                 buildSearchURLQuery('type:diff foo patternType:literal', SearchPatternType.regexp, false, undefined)
-            ).toBe('q=type:diff+foo&patternType=literal')
+            ).toMatchInlineSnapshot('"q=type:diff+foo&patternType=literal&sm=0"')
         })
         it('overrides the patternType parameter in the middle', () => {
             expect(
                 buildSearchURLQuery('type:diff patternType:literal foo', SearchPatternType.regexp, false, undefined)
-            ).toBe('q=type:diff+foo&patternType=literal')
+            ).toMatchInlineSnapshot('"q=type:diff+foo&patternType=literal&sm=0"')
         })
         it('overrides the patternType parameter if using a quoted value', () => {
-            expect(buildSearchURLQuery('patternType:"literal" foo', SearchPatternType.regexp, false, undefined)).toBe(
-                'q=foo&patternType=literal'
-            )
+            expect(
+                buildSearchURLQuery('patternType:"literal" foo', SearchPatternType.regexp, false, undefined)
+            ).toMatchInlineSnapshot('"q=foo&patternType=literal&sm=0"')
         })
     })
     it('builds the URL query with a case parameter if caseSensitive is true', () =>
-        expect(buildSearchURLQuery('foo', SearchPatternType.standard, true, undefined)).toBe(
-            'q=foo&patternType=standard&case=yes'
+        expect(buildSearchURLQuery('foo', SearchPatternType.standard, true, undefined)).toMatchInlineSnapshot(
+            '"q=foo&patternType=standard&case=yes&sm=0"'
         ))
     it('appends the case parameter if `case:yes` exists in the query', () =>
-        expect(buildSearchURLQuery('foo case:yes', SearchPatternType.standard, false, undefined)).toBe(
-            'q=foo&patternType=standard&case=yes'
+        expect(buildSearchURLQuery('foo case:yes', SearchPatternType.standard, false, undefined)).toMatchInlineSnapshot(
+            '"q=foo&patternType=standard&case=yes&sm=0"'
         ))
     it('removes the case parameter if using a quoted value', () =>
-        expect(buildSearchURLQuery('foo case:"yes"', SearchPatternType.standard, true, undefined)).toBe(
-            'q=foo&patternType=standard&case=yes'
-        ))
+        expect(
+            buildSearchURLQuery('foo case:"yes"', SearchPatternType.standard, true, undefined)
+        ).toMatchInlineSnapshot('"q=foo&patternType=standard&case=yes&sm=0"'))
     it('removes the case parameter case:no exists in the query and caseSensitive is true', () =>
-        expect(buildSearchURLQuery('foo case:no', SearchPatternType.standard, true, undefined)).toBe(
-            'q=foo&patternType=standard'
+        expect(buildSearchURLQuery('foo case:no', SearchPatternType.standard, true, undefined)).toMatchInlineSnapshot(
+            '"q=foo&patternType=standard&sm=0"'
         ))
 })
 
 describe('isExternalLink', () => {
     it('returns false for the same site', () => {
-        jsdom.reconfigure({ url: 'https://github.com/here' })
-        expect(isExternalLink('https://github.com/there')).toBe(false)
+        const windowLocation = new URL('https://github.com/here')
+        expect(isExternalLink('https://github.com/there', windowLocation)).toBe(false)
     })
     it('returns false for relative links', () => {
-        jsdom.reconfigure({ url: 'https://github.com/here' })
-        expect(isExternalLink('/there')).toBe(false)
+        const windowLocation = new URL('https://github.com/here')
+        expect(isExternalLink('/there', windowLocation)).toBe(false)
     })
     it('returns false for invalid URLs', () => {
-        jsdom.reconfigure({ url: 'https://github.com/here' })
-
-        expect(isExternalLink(' ')).toBe(false)
+        const windowLocation = new URL('https://github.com/here')
+        expect(isExternalLink(' ', windowLocation)).toBe(false)
     })
     it('returns true for a different site', () => {
-        jsdom.reconfigure({ url: 'https://github.com/here' })
-        expect(isExternalLink('https://sourcegraph.com/here')).toBe(true)
+        const windowLocation = new URL('https://github.com/here')
+        expect(isExternalLink('https://sourcegraph.com/here', windowLocation)).toBe(true)
     })
 })
 

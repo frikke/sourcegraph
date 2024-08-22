@@ -1,4 +1,7 @@
-import { SourcegraphContext } from '../jscontext'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
+import { currentUserMock } from '@sourcegraph/shared/src/testing/integration/graphQlResults'
+
+import type { SourcegraphContext } from '../jscontext'
 
 export const siteID = 'TestSiteID'
 export const siteGQLID = 'TestGQLSiteID'
@@ -10,19 +13,42 @@ export const builtinAuthProvider = {
     displayName: 'Builtin username-password authentication',
     isBuiltin: true,
     authenticationURL: '',
+    noSignIn: false,
+    requiredForAuthz: false,
 }
 
 export const createJsContext = ({ sourcegraphBaseUrl }: { sourcegraphBaseUrl: string }): SourcegraphContext => ({
+    currentUser: currentUserMock,
+    temporarySettings: null,
     externalURL: sourcegraphBaseUrl,
     accessTokensAllow: 'all-users-create',
+    accessTokensAllowNoExpiration: false,
+    accessTokensExpirationDaysDefault: 60,
+    accessTokensExpirationDaysOptions: [7, 30, 60, 90],
     allowSignup: false,
     batchChangesEnabled: true,
+    applianceUpdateTarget: '',
+    applianceMenuTarget: '',
     batchChangesDisableWebhooksWarning: false,
     batchChangesWebhookLogsEnabled: true,
+    codeInsightsEnabled: true,
     executorsEnabled: true,
+    codyEnabledOnInstance: true,
+    codeSearchEnabledOnInstance: true,
+    codeIntelligenceEnabled: true,
+    codeMonitoringEnabled: true,
+    notebooksEnabled: true,
+    searchJobsEnabled: true,
+    searchAggregationEnabled: true,
+    searchContextsEnabled: true,
+    ownEnabled: true,
+    codyEnabledForCurrentUser: true,
+    codyRequiresVerifiedEmail: false,
+    extsvcConfigAllowEdits: false,
+    extsvcConfigFileExists: false,
     codeIntelAutoIndexingEnabled: true,
     codeIntelAutoIndexingAllowGlobalPolicies: true,
-    externalServicesUserMode: 'disabled',
+    codeIntelRankingDocumentReferenceCountsEnabled: false,
     productResearchPageEnabled: true,
     assetsRoot: new URL('/.assets', sourcegraphBaseUrl).href,
     deployType: 'dev',
@@ -30,9 +56,15 @@ export const createJsContext = ({ sourcegraphBaseUrl }: { sourcegraphBaseUrl: st
     emailEnabled: false,
     experimentalFeatures: {},
     isAuthenticatedUser: true,
-    likelyDockerOnMac: false,
+    licenseInfo: {
+        batchChanges: {
+            maxNumChangesets: -1,
+            unrestricted: true,
+        },
+    },
     needServerRestart: false,
     needsSiteInit: false,
+    needsRepositoryConfiguration: false,
     resetPasswordEnabled: false,
     sentryDSN: null,
     site: {},
@@ -44,5 +76,8 @@ export const createJsContext = ({ sourcegraphBaseUrl }: { sourcegraphBaseUrl: st
     xhrHeaders: {},
     authProviders: [builtinAuthProvider],
     authMinPasswordLength: 12,
-    enableLegacyExtensions: false,
+    runningOnMacOS: true,
+    primaryLoginProvidersCount: 5,
+    // use noOpTelemetryRecorder since this jsContext is only used for integration tests.
+    telemetryRecorder: noOpTelemetryRecorder,
 })

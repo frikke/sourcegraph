@@ -29,10 +29,26 @@ read/written please use atomic filesystem patterns. This usually involves
 heavy use of `os.Rename`. Search for existing uses of `os.Rename` to see
 examples.
 
-#### Scaling
+## Scaling
 
 gitserver's memory usage consists of short lived git subprocesses.
 
 This is an IO and compute heavy service since most Sourcegraph requests will trigger 1 or more git commands. As such we shard requests for a repo to a specific replica. This allows us to horizontally scale out the service.
 
 The service is stateful (maintaining git clones). However, it only contains data mirrored from upstream code hosts.
+
+## Perforce depots
+
+Syncing of Perforce depots is accomplished by either `p4-fusion` or `git p4` (deprecated), both of which clone Perforce depots into Git repositories in `gitserver`.
+
+### p4-fusion in development
+
+To use `p4-fusion` while developing Sourcegraph, there are a couple of options.
+
+#### Docker
+
+[Run `gitserver` in a Docker container](https://sourcegraph.com/github.com/sourcegraph/sourcegraph/-/blob/doc/dev/background-information/sg/index.md#run-gitserver-in-a-docker-container). This is the option that gives an experience closest to a deployed Sourcegraph instance, and will work for any platform/OS on which you're developing (running `sg start`).
+
+#### Bazel
+
+Native binaries are provided through Bazel, built via Nix in [our fork of p4-fusion](https://github.com/sourcegraph/p4-fusion/actions/workflows/nix-build-and-upload.yaml). It can be invoked either through `./dev/p4-fusion-dev` or directly with `bazel run //dev/tools:p4-fusion`.

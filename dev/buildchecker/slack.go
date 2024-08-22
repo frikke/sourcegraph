@@ -53,18 +53,6 @@ If unable to resolve the issue, please start an incident with the '/incident' Sl
 	return message
 }
 
-func generateWeeklySummary(dateFrom, dateTo string, builds, flakes int, avgFlakes float64, downtime time.Duration) string {
-	return fmt.Sprintf(`:bar_chart: Welcome to the weekly CI report for period *%s* to *%s*!
-
-• Total builds: *%d*
-• Total flakes: *%d*
-• Average %% of build flakes: *%v%%*
-• Total incident duration: *%v*
-
-For a more detailed breakdown, view the dashboards in <https://sourcegraph.grafana.net/d/iBBWbxFnk/buildkite?orgId=1&from=now-7d&to=now|Grafana>.
-`, dateFrom, dateTo, builds, flakes, avgFlakes, downtime)
-}
-
 // postSlackUpdate attempts to send the given summary to at each of the provided webhooks.
 func postSlackUpdate(webhooks []string, summary string) (bool, error) {
 	log.Printf("postSlackUpdate. len(webhooks)=%d\n", len(webhooks))
@@ -101,6 +89,7 @@ func postSlackUpdate(webhooks []string, summary string) (bool, error) {
 
 	// Attempt to send a message out to each
 	var oneSucceeded bool
+	var allErrs error
 	for i, webhook := range webhooks {
 		if len(webhook) == 0 {
 			return false, nil
@@ -110,7 +99,7 @@ func postSlackUpdate(webhooks []string, summary string) (bool, error) {
 
 		req, err := http.NewRequest(http.MethodPost, webhook, bytes.NewBuffer(body))
 		if err != nil {
-			err = errors.CombineErrors(err, errors.Newf("%s: NewRequest: %w", webhook, err))
+			allErrs = errors.CombineErrors(allErrs, errors.Newf("%s: NewRequest: %w", webhook, err))
 			continue
 		}
 		req.Header.Add("Content-Type", "application/json")
@@ -119,7 +108,7 @@ func postSlackUpdate(webhooks []string, summary string) (bool, error) {
 		client := &http.Client{Timeout: 10 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
-			err = errors.CombineErrors(err, errors.Newf("%s: client.Do: %w", webhook, err))
+			allErrs = errors.CombineErrors(allErrs, errors.Newf("%s: client.Do: %w", webhook, err))
 			continue
 		}
 
@@ -127,12 +116,12 @@ func postSlackUpdate(webhooks []string, summary string) (bool, error) {
 		buf := new(bytes.Buffer)
 		_, err = buf.ReadFrom(resp.Body)
 		if err != nil {
-			err = errors.CombineErrors(err, errors.Newf("%s: buf.ReadFrom(resp.Body): %w", webhook, err))
+			allErrs = errors.CombineErrors(allErrs, errors.Newf("%s: buf.ReadFrom(resp.Body): %w", webhook, err))
 			continue
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
-			err = errors.CombineErrors(err, errors.Newf("%s: Status code %d response from Slack: %s", webhook, resp.StatusCode, buf.String()))
+			allErrs = errors.CombineErrors(allErrs, errors.Newf("%s: Status code %d response from Slack: %s", webhook, resp.StatusCode, buf.String()))
 			continue
 		}
 

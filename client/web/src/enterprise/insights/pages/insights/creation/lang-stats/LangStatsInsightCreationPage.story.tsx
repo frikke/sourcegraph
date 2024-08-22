@@ -1,63 +1,71 @@
-import { Meta, Story } from '@storybook/react'
+import type { MockedResponse } from '@apollo/client/testing'
+import type { Meta, StoryFn } from '@storybook/react'
 import delay from 'delay'
 import { noop } from 'lodash'
 
+import { getDocumentNode } from '@sourcegraph/http-client'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 import { NOOP_TELEMETRY_SERVICE } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { MockedTestProvider } from '@sourcegraph/shared/src/testing/apollo'
 
 import { WebStory } from '../../../../../../components/WebStory'
-import { CodeInsightsBackendStoryMock } from '../../../../CodeInsightsBackendStoryMock'
+import type { LangStatsInsightContentResult } from '../../../../../../graphql-operations'
+import { SearchVersion } from '../../../../../../graphql-operations'
+import { GET_LANG_STATS_GQL } from '../../../../core/hooks/live-preview-insight'
+import { useCodeInsightsLicenseState } from '../../../../stores'
 
-import { getRandomLangStatsMock } from './components/live-preview-chart/constants'
 import { LangStatsInsightCreationPage as LangStatsInsightCreationPageComponent } from './LangStatsInsightCreationPage'
 
 const defaultStory: Meta = {
     title: 'web/insights/creation-ui/lang-stats/LangStatsInsightCreationPage',
     decorators: [story => <WebStory>{() => story()}</WebStory>],
-    parameters: {
-        chromatic: {
-            viewports: [576, 1440],
-            disableSnapshot: false,
-        },
-    },
+    parameters: {},
 }
 
 export default defaultStory
 
-function sleep(delay: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, delay))
-}
-
-const fakeAPIRequest = async () => {
-    await delay(1000)
-
-    throw new Error('Network error')
-}
-
-const codeInsightsBackend = {
-    getLangStatsInsightContent: async () => {
-        await sleep(2000)
-
-        return getRandomLangStatsMock()
+const LANG_STATS_MOCK: MockedResponse<LangStatsInsightContentResult> = {
+    request: {
+        query: getDocumentNode(GET_LANG_STATS_GQL),
+        variables: { version: SearchVersion.V3 },
     },
-    getRepositorySuggestions: async () => {
-        await sleep(2000)
-
-        return [
-            { id: '1', name: 'github.com/example/sub-repo-1' },
-            { id: '2', name: 'github.com/example/sub-repo-2' },
-            { id: '3', name: 'github.com/another-example/sub-repo-1' },
-            { id: '4', name: 'github.com/another-example/sub-repo-2' },
-        ]
+    result: {
+        data: {
+            search: {
+                results: { __typename: 'SearchResults', limitHit: false },
+                stats: {
+                    languages: [
+                        { name: 'JavaScript', totalLines: 1000 },
+                        { name: 'TypeScript', totalLines: 2000 },
+                        { name: 'Markdown', totalLines: 500 },
+                        { name: 'HTML', totalLines: 100 },
+                        { name: 'CSS', totalLines: 3000 },
+                        { name: 'Rust', totalLines: 5000 },
+                        { name: 'Julia', totalLines: 90 },
+                        { name: 'Go', totalLines: 3000 },
+                    ],
+                },
+            },
+        },
     },
 }
 
-export const LangStatsInsightCreationPage: Story = () => (
-    <CodeInsightsBackendStoryMock mocks={codeInsightsBackend}>
-        <LangStatsInsightCreationPageComponent
-            telemetryService={NOOP_TELEMETRY_SERVICE}
-            onInsightCreateRequest={fakeAPIRequest}
-            onSuccessfulCreation={noop}
-            onCancel={noop}
-        />
-    </CodeInsightsBackendStoryMock>
-)
+export const LangStatsInsightCreationPage: StoryFn = () => {
+    useCodeInsightsLicenseState.setState({ licensed: true, insightsLimit: null })
+
+    return (
+        <MockedTestProvider addTypename={true} mocks={[LANG_STATS_MOCK]}>
+            <LangStatsInsightCreationPageComponent
+                backUrl="/insights/create"
+                onInsightCreateRequest={async () => {
+                    await delay(1000)
+                    throw new Error('Network error')
+                }}
+                onCancel={noop}
+                onSuccessfulCreation={noop}
+                telemetryService={NOOP_TELEMETRY_SERVICE}
+                telemetryRecorder={noOpTelemetryRecorder}
+            />
+        </MockedTestProvider>
+    )
+}

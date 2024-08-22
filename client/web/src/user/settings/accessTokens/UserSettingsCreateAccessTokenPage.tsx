@@ -1,14 +1,13 @@
 import React, { useCallback, useMemo, useState } from 'react'
 
 import { mdiPlus } from '@mdi/js'
-import { RouteComponentProps } from 'react-router'
+import { useNavigate } from 'react-router-dom'
 import { concat, Subject } from 'rxjs'
 import { catchError, concatMap, tap } from 'rxjs/operators'
 
-import { ErrorAlert } from '@sourcegraph/branded/src/components/alerts'
-import { Form } from '@sourcegraph/branded/src/components/Form'
 import { asError, isErrorLike } from '@sourcegraph/common'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import {
     Container,
     PageHeader,
@@ -21,19 +20,19 @@ import {
     Input,
     Text,
     Label,
+    ErrorAlert,
+    Form,
+    Select,
 } from '@sourcegraph/wildcard'
 
-import { AccessTokenScopes } from '../../../auth/accessToken'
+import { AccessTokenScopes, getExpirationOptions } from '../../../auth/accessToken'
 import { PageTitle } from '../../../components/PageTitle'
-import { CreateAccessTokenResult } from '../../../graphql-operations'
-import { UserSettingsAreaRouteContext } from '../UserSettingsArea'
+import type { CreateAccessTokenResult } from '../../../graphql-operations'
+import type { UserSettingsAreaRouteContext } from '../UserSettingsArea'
 
 import { createAccessToken } from './create'
 
-interface Props
-    extends Pick<UserSettingsAreaRouteContext, 'user'>,
-        Pick<RouteComponentProps<{}>, 'history' | 'match'>,
-        TelemetryProps {
+interface Props extends Pick<UserSettingsAreaRouteContext, 'user'>, TelemetryProps, TelemetryV2Props {
     /**
      * Called when a new access token is created and should be temporarily displayed to the user.
      */
@@ -45,19 +44,28 @@ interface Props
  */
 export const UserSettingsCreateAccessTokenPage: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
     telemetryService,
+    telemetryRecorder,
     onDidCreateAccessToken,
     user,
-    history,
-    match,
 }) => {
+    const navigate = useNavigate()
+    const [expiryOptions, defaultExpiry] = useMemo(() => {
+        const options = getExpirationOptions(window.context.accessTokensExpirationDaysOptions)
+        return [options, window.context.accessTokensExpirationDaysDefault * 86400]
+    }, [])
+
     useMemo(() => {
         telemetryService.logViewEvent('NewAccessToken')
-    }, [telemetryService])
+        telemetryRecorder.recordEvent('settings.token.create', 'view')
+    }, [telemetryService, telemetryRecorder])
 
     /** The contents of the note input field. */
-    const [note, setNote] = useState<string>('')
+    const defaultNoteValue = new URLSearchParams(location.search).get('description') || undefined
+    const [note, setNote] = useState<string>(defaultNoteValue ?? '')
     /** The selected scopes checkboxes. */
     const [scopes, setScopes] = useState<string[]>([AccessTokenScopes.UserAll])
+    const [expiry, setExpiry] = useState<number | undefined>(defaultExpiry)
+    const allowNoExpiration = window.context.accessTokensAllowNoExpiration
 
     const onNoteChange = useCallback<React.ChangeEventHandler<HTMLInputElement>>(event => {
         setNote(event.currentTarget.value)
@@ -67,6 +75,14 @@ export const UserSettingsCreateAccessTokenPage: React.FunctionComponent<React.Pr
         const checked = event.currentTarget.checked
         const value = event.currentTarget.value
         setScopes(previous => (checked ? [...previous, value] : previous.filter(scope => scope !== value)))
+    }, [])
+
+    const onExpiryChange = useCallback<React.ChangeEventHandler<HTMLSelectElement>>(event => {
+        if (event.currentTarget.value === '') {
+            setExpiry(undefined)
+            return
+        }
+        setExpiry(parseInt(event.currentTarget.value, 10))
     }, [])
 
     const submits = useMemo(() => new Subject<React.FormEvent<HTMLFormElement>>(), [])
@@ -80,10 +96,16 @@ export const UserSettingsCreateAccessTokenPage: React.FunctionComponent<React.Pr
                     concatMap(() =>
                         concat(
                             ['loading'],
-                            createAccessToken(user.id, scopes, note).pipe(
+                            createAccessToken({
+                                user: user.id,
+                                scopes,
+                                note,
+                                durationSeconds: expiry !== undefined ? expiry : null,
+                                telemetryRecorder,
+                            }).pipe(
                                 tap(result => {
                                     // Go back to access tokens list page and display the token secret value.
-                                    history.push(`${match.url.replace(/\/new$/, '')}`)
+                                    navigate('..', { relative: 'path' })
                                     onDidCreateAccessToken(result)
                                 }),
                                 catchError(error => [asError(error)])
@@ -91,7 +113,7 @@ export const UserSettingsCreateAccessTokenPage: React.FunctionComponent<React.Pr
                         )
                     )
                 ),
-            [history, match.url, note, onDidCreateAccessToken, scopes, submits, user.id]
+            [navigate, note, onDidCreateAccessToken, scopes, submits, user.id, expiry, telemetryRecorder]
         )
     )
 
@@ -109,11 +131,12 @@ export const UserSettingsCreateAccessTokenPage: React.FunctionComponent<React.Pr
                         required={true}
                         autoFocus={true}
                         placeholder="What's this token for?"
+                        defaultValue={defaultNoteValue}
                         className="form-group"
                         label="Token description"
                     />
 
-                    <div className="form-group mb-0">
+                    <div className="form-group">
                         <Label htmlFor="user-settings-create-access-token-page__scope-user:all" className="mb-0">
                             Token scope
                         </Label>
@@ -152,6 +175,32 @@ export const UserSettingsCreateAccessTokenPage: React.FunctionComponent<React.Pr
                             />
                         )}
                     </div>
+
+                    <Select
+                        id="user-settings-create-access-token-page__expiry"
+                        label="Token expiration"
+                        disabled={creationOrError === 'loading'}
+                        value={expiry}
+                        onChange={onExpiryChange}
+                        description="Keep the validity of the token as short as feasible to ensure a secure environment."
+                        className="mb-2"
+                        message={
+                            <>
+                                {expiry === undefined && (
+                                    <span className="text-danger">
+                                        Access tokens without expiration are not recommended.
+                                    </span>
+                                )}
+                            </>
+                        }
+                    >
+                        {Object.entries(expiryOptions).map(([label, expiryInSeconds]) => (
+                            <option key={expiryInSeconds} value={expiryInSeconds}>
+                                {label}
+                            </option>
+                        ))}
+                        {allowNoExpiration && <option value="">No expiration</option>}
+                    </Select>
                 </Container>
                 <div className="mb-3">
                     <Button
@@ -167,12 +216,7 @@ export const UserSettingsCreateAccessTokenPage: React.FunctionComponent<React.Pr
                         )}{' '}
                         Generate token
                     </Button>
-                    <Button
-                        className="ml-2 test-create-access-token-cancel"
-                        to={match.url.replace(/\/new$/, '')}
-                        variant="secondary"
-                        as={Link}
-                    >
+                    <Button className="ml-2 test-create-access-token-cancel" to=".." variant="secondary" as={Link}>
                         Cancel
                     </Button>
                 </div>

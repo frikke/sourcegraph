@@ -2,51 +2,53 @@ package search
 
 import (
 	"archive/tar"
-	"bytes"
 	"context"
 	"hash"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/bmatcuk/doublestar"
 	"github.com/sourcegraph/zoekt/ignore"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
-	"github.com/sourcegraph/sourcegraph/internal/database"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver"
-	"github.com/sourcegraph/sourcegraph/schema"
 )
 
-// NewFilter calls gitserver to retrieve the ignore-file. If the file doesn't
-// exist we return an empty ignore.Matcher.
-func NewFilter(ctx context.Context, db database.DB, repo api.RepoName, commit api.CommitID) (FilterFunc, error) {
-	ignoreFile, err := gitserver.NewClient(db).ReadFile(ctx, repo, commit, ignore.IgnoreFile, nil)
-	if err != nil {
-		// We do not ignore anything if the ignore file does not exist.
-		if strings.Contains(err.Error(), "file does not exist") {
-			return func(*tar.Header) bool {
-				return false
-			}, nil
-		}
-		return nil, err
-	}
+// NewFilterFactory creates a filter function that calls gitserver to retrieve the
+// ignore-file. If the file doesn't exist we return an empty ignore.Matcher.
+func NewFilterFactory(client gitserver.Client) func(ctx context.Context, repo api.RepoName, commit api.CommitID) (FilterFunc, error) {
+	return func(ctx context.Context, repo api.RepoName, commit api.CommitID) (FilterFunc, error) {
+		r, err := client.NewFileReader(ctx, repo, commit, ignore.IgnoreFile)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// We do not ignore anything if the ignore file does not exist.
+				return func(*tar.Header) bool {
+					return false
+				}, nil
+			}
 
-	ig, err := ignore.ParseIgnoreFile(bytes.NewReader(ignoreFile))
-	if err != nil {
-		return nil, err
-	}
-
-	return func(header *tar.Header) bool {
-		if header.Size > maxFileSize {
-			return true
+			return nil, err
 		}
-		return ig.Match(header.Name)
-	}, nil
+		defer r.Close()
+
+		ig, err := ignore.ParseIgnoreFile(r)
+		if err != nil {
+			return nil, err
+		}
+
+		return func(header *tar.Header) bool {
+			if header.Size > maxFileSize {
+				return true
+			}
+			return ig.Match(header.Name)
+		}, nil
+	}
 }
 
-func newSearchableFilter(c *schema.SiteConfiguration) *searchableFilter {
+func newSearchableFilter(searchLargeFiles []string) *searchableFilter {
 	return &searchableFilter{
-		SearchLargeFiles: c.SearchLargeFiles,
+		SearchLargeFiles: searchLargeFiles,
 	}
 }
 
@@ -85,14 +87,31 @@ func (f *searchableFilter) SkipContent(hdr *tar.Header) bool {
 		return false
 	}
 
-	for _, pattern := range f.SearchLargeFiles {
-		pattern = strings.TrimSpace(pattern)
-		if m, _ := doublestar.Match(pattern, hdr.Name); m {
-			return false
+	// A pattern match will override preceding pattern matches.
+	for i := len(f.SearchLargeFiles) - 1; i >= 0; i-- {
+		pattern := strings.TrimSpace(f.SearchLargeFiles[i])
+		negated, validatedPattern := checkIsNegatePattern(pattern)
+		if m, _ := doublestar.PathMatch(validatedPattern, hdr.Name); m {
+			if negated {
+				return true // overrides any preceding inclusion patterns
+			} else {
+				return false // overrides any preceding exclusion patterns
+			}
 		}
 	}
 
 	return true
+}
+
+func checkIsNegatePattern(pattern string) (bool, string) {
+	negate := "!"
+
+	// if negated then strip prefix meta character which identifies negated filter pattern
+	if strings.HasPrefix(pattern, negate) {
+		return true, pattern[len(negate):]
+	}
+
+	return false, pattern
 }
 
 // HashKey will write the input of the filter to h.

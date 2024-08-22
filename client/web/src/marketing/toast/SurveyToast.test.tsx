@@ -2,17 +2,19 @@ import { gql } from '@apollo/client'
 import { createMockClient } from '@apollo/client/testing'
 import { cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { take } from 'rxjs/operators'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { TemporarySettings } from '@sourcegraph/shared/src/settings/temporary/TemporarySettings'
+import type { TemporarySettings } from '@sourcegraph/shared/src/settings/temporary/TemporarySettings'
 import { TemporarySettingsContext } from '@sourcegraph/shared/src/settings/temporary/TemporarySettingsProvider'
 import {
     InMemoryMockSettingsBackend,
     TemporarySettingsStorage,
 } from '@sourcegraph/shared/src/settings/temporary/TemporarySettingsStorage'
-import { renderWithBrandedContext, RenderWithBrandedContextResult } from '@sourcegraph/shared/src/testing'
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 import { MockedTestProvider } from '@sourcegraph/shared/src/testing/apollo'
+import { type RenderWithBrandedContextResult, renderWithBrandedContext } from '@sourcegraph/wildcard/src/testing'
 
-import { AuthenticatedUser } from '../../auth'
+import type { AuthenticatedUser } from '../../auth'
 import { mockVariables, submitSurveyMock } from '../page/SurveyPage.mocks'
 
 import { SurveyToast } from '.'
@@ -20,7 +22,7 @@ import { SurveyToast } from '.'
 export const mockAuthenticatedUser: AuthenticatedUser = {
     id: 'userID',
     username: 'username',
-    email: 'user@me.com',
+    emails: [{ email: 'user@me.com', isPrimary: true, verified: true }],
 } as AuthenticatedUser
 
 describe('SurveyToast', () => {
@@ -32,9 +34,9 @@ describe('SurveyToast', () => {
     })
 
     const mockClient = createMockClient(
-        { contents: JSON.stringify({}) },
+        { temporarySettings: { contents: JSON.stringify({}) } },
         gql`
-            query {
+            query GetTemporarySettings {
                 temporarySettings {
                     contents
                 }
@@ -50,7 +52,7 @@ describe('SurveyToast', () => {
         return renderWithBrandedContext(
             <MockedTestProvider mocks={[submitSurveyMock]}>
                 <TemporarySettingsContext.Provider value={settingsStorage}>
-                    <SurveyToast authenticatedUser={mockAuthenticatedUser} />
+                    <SurveyToast authenticatedUser={mockAuthenticatedUser} telemetryRecorder={noOpTelemetryRecorder} />
                 </TemporarySettingsContext.Provider>
             </MockedTestProvider>
         )

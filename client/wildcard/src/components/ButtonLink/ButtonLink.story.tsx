@@ -1,11 +1,9 @@
 import { mdiMagnify } from '@mdi/js'
-import { Meta, Story } from '@storybook/react'
+import type { Meta, StoryFn } from '@storybook/react'
 import { startCase } from 'lodash'
 
-import { BrandedStory } from '@sourcegraph/branded/src/components/BrandedStory'
-import webStyles from '@sourcegraph/web/src/SourcegraphWebApp.scss'
-
 import { ButtonLink, H1, H2, Text } from '..'
+import { BrandedStory } from '../../stories/BrandedStory'
 import { BUTTON_VARIANTS } from '../Button/constants'
 import { Grid } from '../Grid'
 import { Icon } from '../Icon'
@@ -13,18 +11,11 @@ import { Icon } from '../Icon'
 const Config: Meta = {
     title: 'wildcard/ButtonLink',
 
-    decorators: [
-        story => (
-            <BrandedStory styles={webStyles}>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>
-        ),
-    ],
+    decorators: [story => <BrandedStory>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>],
 
     parameters: {
         component: ButtonLink,
-        chromatic: {
-            enableDarkMode: true,
-            disableSnapshot: false,
-        },
+
         design: [
             {
                 type: 'figma',
@@ -42,7 +33,7 @@ const Config: Meta = {
 
 export default Config
 
-export const Overview: Story = () => (
+export const Overview: StoryFn = () => (
     <>
         <H1>ButtonLink</H1>
         <H2>Variants</H2>

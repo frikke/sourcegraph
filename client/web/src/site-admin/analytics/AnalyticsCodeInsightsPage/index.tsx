@@ -1,20 +1,20 @@
 import React, { useMemo, useEffect } from 'react'
 
 import { startCase } from 'lodash'
-import { RouteComponentProps } from 'react-router'
 
 import { useQuery } from '@sourcegraph/http-client'
-import { Card, LoadingSpinner, Text, LineChart, Series, H2 } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { Card, LoadingSpinner, Text, LineChart, type Series, H2 } from '@sourcegraph/wildcard'
 
-import { InsightsStatisticsResult, InsightsStatisticsVariables } from '../../../graphql-operations'
-import { eventLogger } from '../../../tracking/eventLogger'
+import type { InsightsStatisticsResult, InsightsStatisticsVariables } from '../../../graphql-operations'
 import { AnalyticsPageTitle } from '../components/AnalyticsPageTitle'
 import { ChartContainer } from '../components/ChartContainer'
 import { HorizontalSelect } from '../components/HorizontalSelect'
 import { ToggleSelect } from '../components/ToggleSelect'
-import { ValueLegendList, ValueLegendListProps } from '../components/ValueLegendList'
+import { ValueLegendList, type ValueLegendListProps } from '../components/ValueLegendList'
 import { useChartFilters } from '../useChartFilters'
-import { StandardDatum } from '../utils'
+import type { StandardDatum } from '../utils'
 
 import { INSIGHTS_STATISTICS } from './queries'
 
@@ -37,8 +37,14 @@ export const calculateMinutesSaved = (data: typeof MinutesSaved): number =>
     data.LanguageSeries * MinutesSaved.LanguageSeries +
     data.ComputeSeries * MinutesSaved.ComputeSeries
 
-export const AnalyticsCodeInsightsPage: React.FunctionComponent<RouteComponentProps> = () => {
-    const { dateRange, aggregation, grouping } = useChartFilters({ name: 'Insights', aggregation: 'count' })
+interface Props extends TelemetryV2Props {}
+
+export const AnalyticsCodeInsightsPage: React.FunctionComponent<Props> = ({ telemetryRecorder }) => {
+    const { dateRange, aggregation, grouping } = useChartFilters({
+        name: 'Insights',
+        aggregation: 'count',
+        telemetryRecorder,
+    })
     const { data, error, loading } = useQuery<InsightsStatisticsResult, InsightsStatisticsVariables>(
         INSIGHTS_STATISTICS,
         {
@@ -49,8 +55,9 @@ export const AnalyticsCodeInsightsPage: React.FunctionComponent<RouteComponentPr
         }
     )
     useEffect(() => {
-        eventLogger.logPageView('AdminAnalyticsCodeInsights')
-    }, [])
+        EVENT_LOGGER.logPageView('AdminAnalyticsCodeInsights')
+        telemetryRecorder.recordEvent('admin.analytics.codeInsights', 'view')
+    }, [telemetryRecorder])
 
     const legends = useMemo(() => {
         if (!data) {
@@ -64,7 +71,7 @@ export const AnalyticsCodeInsightsPage: React.FunctionComponent<RouteComponentPr
                 value:
                     aggregation.selected === 'count'
                         ? insightHovers.summary.totalCount
-                        : insightHovers.summary.totalRegisteredUsers,
+                        : insightHovers.summary.totalUniqueUsers,
                 description: aggregation.selected === 'count' ? 'Insight hovers' : 'Users hovering insights',
                 color: 'var(--orange)',
                 tooltip:
@@ -76,7 +83,7 @@ export const AnalyticsCodeInsightsPage: React.FunctionComponent<RouteComponentPr
                 value:
                     aggregation.selected === 'count'
                         ? insightDataPointClicks.summary.totalCount
-                        : insightDataPointClicks.summary.totalRegisteredUsers,
+                        : insightDataPointClicks.summary.totalUniqueUsers,
                 description: aggregation.selected === 'count' ? 'Datapoint clicks' : 'Users clicking datapoints',
                 color: 'var(--purple)',
                 tooltip:

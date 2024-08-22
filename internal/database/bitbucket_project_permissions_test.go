@@ -11,8 +11,9 @@ import (
 	"github.com/sourcegraph/log/logtest"
 
 	"github.com/sourcegraph/sourcegraph/internal/database/dbtest"
+	"github.com/sourcegraph/sourcegraph/internal/executor"
 	"github.com/sourcegraph/sourcegraph/internal/types"
-	"github.com/sourcegraph/sourcegraph/internal/workerutil"
+	"github.com/sourcegraph/sourcegraph/lib/pointers"
 )
 
 func TestBitbucketProjectPermissionsEnqueue(t *testing.T) {
@@ -23,7 +24,7 @@ func TestBitbucketProjectPermissionsEnqueue(t *testing.T) {
 
 	logger := logtest.Scoped(t)
 
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 	ctx := context.Background()
 
 	check := func(jobID int, projectKey string, permissions []types.UserPermission, unrestricted bool) {
@@ -111,7 +112,7 @@ func TestScanFirstBitbucketProjectPermissionsJob(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 
 	ctx := context.Background()
 	_, err := db.ExecContext(ctx, `--sql
@@ -162,18 +163,19 @@ func TestScanFirstBitbucketProjectPermissionsJob(t *testing.T) {
 	job, err := ScanBitbucketProjectPermissionJob(rows)
 	require.NoError(t, err)
 	require.NotNil(t, job)
+	entry := executor.ExecutionLogEntry{Key: "key", Command: []string{"command"}, StartTime: mustParseTime("2020-01-06"), ExitCode: pointers.Ptr(1), Out: "out", DurationMs: pointers.Ptr(1)}
 	require.Equal(t, &types.BitbucketProjectPermissionJob{
 		ID:                1,
 		State:             "queued",
-		FailureMessage:    stringPtr("failure message"),
+		FailureMessage:    pointers.Ptr("failure message"),
 		QueuedAt:          mustParseTime("2020-01-01"),
-		StartedAt:         timePtr(mustParseTime("2020-01-02")),
-		FinishedAt:        timePtr(mustParseTime("2020-01-03")),
-		ProcessAfter:      timePtr(mustParseTime("2020-01-04")),
+		StartedAt:         pointers.Ptr(mustParseTime("2020-01-02")),
+		FinishedAt:        pointers.Ptr(mustParseTime("2020-01-03")),
+		ProcessAfter:      pointers.Ptr(mustParseTime("2020-01-04")),
 		NumResets:         1,
 		NumFailures:       2,
 		LastHeartbeatAt:   mustParseTime("2020-01-05"),
-		ExecutionLogs:     []workerutil.ExecutionLogEntry{{Key: "key", Command: []string{"command"}, StartTime: mustParseTime("2020-01-06"), ExitCode: intPtr(1), Out: "out", DurationMs: intPtr(1)}},
+		ExecutionLogs:     []types.ExecutionLogEntry{&entry},
 		WorkerHostname:    "worker-hostname",
 		ProjectKey:        "project-key",
 		ExternalServiceID: 1,
@@ -188,7 +190,6 @@ func TestListJobsQuery(t *testing.T) {
 		gotString := got.Query(sqlf.PostgresBindVar)
 
 		want := `
--- source: internal/database/bitbucket_project_permissions.go:BitbucketProjectPermissionsStore.listWorkerJobsQuery
 SELECT id, state, failure_message, queued_at, started_at, finished_at, process_after, num_resets, num_failures, last_heartbeat_at, execution_logs, worker_hostname, project_key, external_service_id, permissions, unrestricted
 FROM explicit_permissions_bitbucket_projects_jobs
 
@@ -207,7 +208,6 @@ LIMIT 100
 
 		gotString := got.Query(sqlf.PostgresBindVar)
 		want := `
--- source: internal/database/bitbucket_project_permissions.go:BitbucketProjectPermissionsStore.listWorkerJobsQuery
 SELECT id, state, failure_message, queued_at, started_at, finished_at, process_after, num_resets, num_failures, last_heartbeat_at, execution_logs, worker_hostname, project_key, external_service_id, permissions, unrestricted
 FROM explicit_permissions_bitbucket_projects_jobs
 WHERE project_key IN ($1 , $2 , $3 , $4) AND state = $5
@@ -230,7 +230,7 @@ func TestListJobs(t *testing.T) {
 	}
 	t.Parallel()
 	logger := logtest.Scoped(t)
-	db := NewDB(logger, dbtest.NewDB(logger, t))
+	db := NewDB(logger, dbtest.NewDB(t))
 
 	ctx := context.Background()
 	_, err := db.ExecContext(ctx, `--sql
@@ -310,9 +310,6 @@ func TestListJobs(t *testing.T) {
 		require.Equal(t, 4, jobs[4].ID)
 	})
 }
-
-func intPtr(v int) *int          { return &v }
-func stringPtr(v string) *string { return &v }
 
 func mustParseTime(v string) time.Time {
 	t, err := time.Parse("2006-01-02", v)

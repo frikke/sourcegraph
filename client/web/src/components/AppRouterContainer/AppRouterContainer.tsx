@@ -1,8 +1,8 @@
-import React, { HTMLAttributes, useRef } from 'react'
+import React, { type HTMLAttributes, useRef } from 'react'
 
 import classNames from 'classnames'
 
-import { useScrollManager } from '../../hooks'
+import { useScrollManager } from '@sourcegraph/wildcard'
 
 import styles from './AppRouterContainer.module.scss'
 

@@ -1,29 +1,22 @@
 import * as React from 'react'
 
 import classNames from 'classnames'
-import * as H from 'history'
 import { Subject, Subscription } from 'rxjs'
 import { distinctUntilChanged, filter, map, startWith } from 'rxjs/operators'
 
-import * as GQL from '@sourcegraph/shared/src/schema'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { ThemeProps } from '@sourcegraph/shared/src/theme'
-import { LoadingSpinner } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
+import { BeforeUnloadPrompt, LoadingSpinner } from '@sourcegraph/wildcard'
 
+import settingsSchemaJSON from '../../../../schema/settings.schema.json'
 import { SaveToolbar } from '../components/SaveToolbar'
-import { eventLogger } from '../tracking/eventLogger'
+import type { SiteAdminSettingsCascadeFields } from '../graphql-operations'
 
 import styles from './SettingsFile.module.scss'
 
-interface Props extends ThemeProps, TelemetryProps {
-    history: H.History
-
-    settings: GQL.ISettings | null
-
-    /**
-     * JSON Schema of the document.
-     */
-    jsonSchema?: { $id: string }
+interface Props extends TelemetryProps, TelemetryV2Props {
+    settings: SiteAdminSettingsCascadeFields['subjects'][number]['latestSettings'] | null
 
     /**
      * Called when the user saves changes to the settings file's contents.
@@ -40,6 +33,8 @@ interface Props extends ThemeProps, TelemetryProps {
      * if any.
      */
     commitError?: Error
+
+    isLightTheme: boolean
 }
 
 interface State {
@@ -127,21 +122,6 @@ export class SettingsFile extends React.PureComponent<Props, State> {
         )
     }
 
-    public componentDidMount(): void {
-        // Prevent navigation when dirty.
-        this.subscriptions.add(
-            this.props.history.block((location: H.Location, action: H.Action) => {
-                if (action === 'REPLACE') {
-                    return undefined
-                }
-                if (this.state.saving || this.dirty) {
-                    return 'Discard settings changes?'
-                }
-                return undefined // allow navigation
-            })
-        )
-    }
-
     public componentDidUpdate(): void {
         this.componentUpdates.next(this.props)
     }
@@ -161,10 +141,11 @@ export class SettingsFile extends React.PureComponent<Props, State> {
 
         return (
             <div className={classNames('test-settings-file d-flex flex-grow-1 flex-column', styles.settingsFile)}>
+                <BeforeUnloadPrompt when={this.state.saving || this.dirty} message="Discard settings changes?" />
                 <React.Suspense fallback={<LoadingSpinner className="mt-2" />}>
                     <MonacoSettingsEditor
                         value={contents}
-                        jsonSchema={this.props.jsonSchema}
+                        jsonSchema={settingsSchemaJSON}
                         onChange={this.onEditorChange}
                         readOnly={this.state.saving}
                         isLightTheme={this.props.isLightTheme}
@@ -195,14 +176,16 @@ export class SettingsFile extends React.PureComponent<Props, State> {
             this.getPropsSettingsContentsOrEmpty() === this.state.contents ||
             window.confirm('Discard settings edits?')
         ) {
-            eventLogger.log('SettingsFileDiscard')
+            EVENT_LOGGER.log('SettingsFileDiscard')
+            this.props.telemetryRecorder.recordEvent('settings.file', 'discard')
             this.setState({
                 contents: undefined,
                 editingLastID: undefined,
             })
             this.props.onDidDiscard()
         } else {
-            eventLogger.log('SettingsFileDiscardCanceled')
+            EVENT_LOGGER.log('SettingsFileDiscardCanceled')
+            this.props.telemetryRecorder.recordEvent('settings.file', 'discardCancel')
         }
     }
 
@@ -214,7 +197,8 @@ export class SettingsFile extends React.PureComponent<Props, State> {
     }
 
     private save = (): void => {
-        eventLogger.log('SettingsFileSaved')
+        EVENT_LOGGER.log('SettingsFileSaved')
+        this.props.telemetryRecorder.recordEvent('settings.file', 'save')
         this.setState({ saving: true }, () => {
             this.props.onDidCommit(this.getPropsSettingsID(), this.state.contents!)
         })

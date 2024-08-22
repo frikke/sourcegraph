@@ -1,10 +1,9 @@
 import PollyAdapter from '@pollyjs/adapter'
-import { Polly, Request as PollyRequest } from '@pollyjs/core'
-import Protocol from 'devtools-protocol'
-import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping'
+import type { Polly, Request as PollyRequest } from '@pollyjs/core'
 import { noop } from 'lodash'
-import Puppeteer from 'puppeteer'
-import { Observable, Subject } from 'rxjs'
+import type { Protocol, ProtocolMapping } from 'puppeteer'
+import type Puppeteer from 'puppeteer'
+import { type Observable, Subject } from 'rxjs'
 
 import { isErrorLike, logger } from '@sourcegraph/common'
 
@@ -59,8 +58,11 @@ export class CdpAdapter extends PollyAdapter {
 
     /**
      * `adapterOptions` passed to Polly.
+     *
+     * Uses `declare` because otherwise esbuild overwrites the superclass PollyAdapter's `options`
+     * field. See https://github.com/evanw/esbuild/issues/885.
      */
-    public options!: CdpAdapterOptions
+    public declare options: CdpAdapterOptions
 
     private readonly _errors = new Subject<unknown>()
 

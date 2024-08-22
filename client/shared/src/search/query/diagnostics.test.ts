@@ -1,8 +1,10 @@
+import { describe, expect, test, afterAll } from 'vitest'
+
 import { SearchPatternType } from '../../graphql-operations'
 
 import { getDiagnostics } from './diagnostics'
-import { scanSearchQuery, ScanSuccess, ScanResult } from './scanner'
-import { Token } from './token'
+import { scanSearchQuery, type ScanSuccess, type ScanResult } from './scanner'
+import type { Token } from './token'
 
 expect.addSnapshotSerializer({
     serialize: value => JSON.stringify(value, null, 2),
@@ -74,7 +76,7 @@ describe('getDiagnostics()', () => {
                 [
                   {
                     "severity": "error",
-                    "message": "Invalid filter value, expected one of: diff, commit, symbol, repo, path, file.",
+                    "message": "Invalid filter value, expected one of: commit, diff, file, path, repo, symbol.",
                     "range": {
                       "start": 10,
                       "end": 15
@@ -606,8 +608,17 @@ describe('getDiagnostics()', () => {
     })
 
     describe('structural search and type: filter', () => {
+        const origContext = window.context
+        afterAll(() => {
+            window.context = origContext
+        })
+        window.context = {
+            experimentalFeatures: {
+                structuralSearch: 'enabled',
+            },
+        }
         test('detects type: filter in structural search', () => {
-            expect(parseAndDiagnose('type:symbol test', SearchPatternType.structural)).toMatchInlineSnapshot(`
+            expect(parseAndDiagnose('type:symbol test lang:go', SearchPatternType.structural)).toMatchInlineSnapshot(`
                 [
                   {
                     "severity": "error",
@@ -619,7 +630,7 @@ describe('getDiagnostics()', () => {
                   }
                 ]
             `)
-            expect(parseAndDiagnose('type:symbol test patterntype:structural', SearchPatternType.standard))
+            expect(parseAndDiagnose('type:symbol test lang:go patterntype:structural', SearchPatternType.standard))
                 .toMatchInlineSnapshot(`
                 [
                   {
@@ -641,6 +652,32 @@ describe('getDiagnostics()', () => {
             expect(
                 parseAndDiagnose('type:symbol test patterntype:literal', SearchPatternType.structural)
             ).toMatchInlineSnapshot('[]')
+        })
+    })
+
+    describe('structural search without lang: filter', () => {
+        const origContext = window.context
+        afterAll(() => {
+            window.context = origContext
+        })
+        window.context = {
+            experimentalFeatures: {
+                structuralSearch: 'enabled',
+            },
+        }
+        test('detects structural search without lang filter', () => {
+            expect(parseAndDiagnose('repo:foo bar', SearchPatternType.structural)).toMatchInlineSnapshot(`
+                [
+                  {
+                    "severity": "warning",
+                    "message": "Add a \`lang\` filter when using structural search. Structural search may miss results without a \`lang\` filter because it only guesses the language of files searched.",
+                    "range": {
+                      "start": 9,
+                      "end": 12
+                    }
+                  }
+                ]
+            `)
         })
     })
 })

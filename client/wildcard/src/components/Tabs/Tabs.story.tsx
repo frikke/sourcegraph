@@ -1,47 +1,37 @@
-import { Meta, Story } from '@storybook/react'
-
-import brandedStyles from '@sourcegraph/branded/src/global-styles/index.scss'
-import { usePrependStyles } from '@sourcegraph/storybook'
+import type { Meta, StoryFn } from '@storybook/react'
 
 import { H1, H2 } from '..'
+import { BrandedStory } from '../../stories/BrandedStory'
 
-import { Tabs, Tab, TabList, TabPanel, TabPanels, TabsProps } from '.'
+import { Tabs, Tab, TabList, TabPanel, TabPanels, type TabsProps } from '.'
 
-export const TabsStory: Story<TabsProps & { actions: boolean }> = args => {
-    usePrependStyles('branded-story-styles', brandedStyles)
-
-    return (
-        <>
-            <H1>Tabs</H1>
-            <Container title="Standard">
-                <TabsVariant {...args} />
-            </Container>
-            <Container width={300} title="Limited width">
-                <TabsVariant {...args} />
-            </Container>
-            <Container width={300} title="Scrolled tab list">
-                <TabsVariant {...args} longTabList="scroll" />
-            </Container>
-        </>
-    )
-}
+export const TabsStory: StoryFn<TabsProps & { actions: boolean }> = args => (
+    <>
+        <H1>Tabs</H1>
+        <Container title="Standard">
+            <TabsVariant {...args} />
+        </Container>
+        <Container width={300} title="Limited width">
+            <TabsVariant {...args} />
+        </Container>
+        <Container width={300} title="Scrolled tab list">
+            <TabsVariant {...args} longTabList="scroll" />
+        </Container>
+    </>
+)
 
 TabsStory.storyName = 'Tabs component'
 
 const config: Meta = {
     title: 'wildcard/Tabs',
     component: Tabs,
+    decorators: [story => <BrandedStory>{() => story()}</BrandedStory>],
     parameters: {
-        chromatic: {
-            enableDarkMode: true,
-            disableSnapshot: false,
-        },
         design: [
             {
                 type: 'figma',
                 name: 'Figma Light',
-                url:
-                    'https://www.figma.com/file/NIsN34NH7lPu04olBzddTw/Design-Refresh-Systemization-source-of-truth?node-id=954%3A5153',
+                url: 'https://www.figma.com/file/NIsN34NH7lPu04olBzddTw/Design-Refresh-Systemization-source-of-truth?node-id=954%3A5153',
             },
             {
                 type: 'figma',
@@ -70,7 +60,7 @@ const config: Meta = {
     },
 }
 
-const TabsVariant: Story<TabsProps & { actions: boolean }> = args => {
+const TabsVariant: StoryFn<TabsProps & { actions: boolean }> = args => {
     const { actions, lazy, behavior, size, ...props } = args
     return (
         <Tabs lazy={lazy} behavior={behavior} size={size} {...props}>

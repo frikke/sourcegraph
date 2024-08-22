@@ -1,6 +1,7 @@
 package result
 
 import (
+	"cmp"
 	"time"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
@@ -34,6 +35,7 @@ var (
 	_ Match = (*RepoMatch)(nil)
 	_ Match = (*CommitMatch)(nil)
 	_ Match = (*CommitDiffMatch)(nil)
+	_ Match = (*OwnerMatch)(nil)
 )
 
 // Match ranks are used for sorting the different match types.
@@ -44,6 +46,7 @@ const (
 	rankCommitMatch = 1
 	rankDiffMatch   = 2
 	rankRepoMatch   = 3
+	rankOwnerMatch  = 4
 )
 
 // Key is a sorting or deduplicating key for a Match. It contains all the
@@ -74,33 +77,46 @@ type Key struct {
 	// Empty if there is no file associated with the match (e.g. RepoMatch or CommitMatch)
 	Path string
 
+	// OwnerMetadata gives uniquely identifying information about an owner.
+	// Empty if this is not a Key for an OwnerMatch.
+	OwnerMetadata string
+
 	// TypeRank is the sorting rank of the type this key belongs to.
 	TypeRank int
 }
 
 // Less compares one key to another for sorting
 func (k Key) Less(other Key) bool {
-	if k.Repo != other.Repo {
-		return k.Repo < other.Repo
+	return k.Compare(other) < 0
+}
+
+// Compare k to other for sorting
+func (k Key) Compare(other Key) int {
+	if v := cmp.Compare(k.Repo, other.Repo); v != 0 {
+		return v
 	}
 
-	if k.Rev != other.Rev {
-		return k.Rev < other.Rev
+	if v := cmp.Compare(k.Rev, other.Rev); v != 0 {
+		return v
 	}
 
-	if !k.AuthorDate.Equal(other.AuthorDate) {
-		return k.AuthorDate.Before(other.AuthorDate)
+	if v := k.AuthorDate.Compare(other.AuthorDate); v != 0 {
+		return v
 	}
 
-	if k.Commit != other.Commit {
-		return k.Commit < other.Commit
+	if v := cmp.Compare(k.Commit, other.Commit); v != 0 {
+		return v
 	}
 
-	if k.Path != other.Path {
-		return k.Path < other.Path
+	if v := cmp.Compare(k.Path, other.Path); v != 0 {
+		return v
 	}
 
-	return k.TypeRank < other.TypeRank
+	if v := cmp.Compare(k.OwnerMetadata, other.OwnerMetadata); v != 0 {
+		return v
+	}
+
+	return cmp.Compare(k.TypeRank, other.TypeRank)
 }
 
 // Matches implements sort.Interface
@@ -129,4 +145,20 @@ func (m Matches) ResultCount() int {
 		count += match.ResultCount()
 	}
 	return count
+}
+
+// Deduper is a convenience type to deduplicate matches
+type Deduper map[Key]struct{}
+
+func NewDeduper() Deduper {
+	return make(map[Key]struct{})
+}
+
+func (d Deduper) Add(m Match) {
+	d[m.Key()] = struct{}{}
+}
+
+func (d Deduper) Seen(m Match) bool {
+	_, ok := d[m.Key()]
+	return ok
 }

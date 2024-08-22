@@ -1,40 +1,28 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import classNames from 'classnames'
-import { Observable } from 'rxjs'
+import type { Observable } from 'rxjs'
 import { useDeepCompareEffectNoCheck } from 'use-deep-compare-effect'
 
-import {
-    SearchPatternType,
-    fetchAutoDefinedSearchContexts,
-    getUserSearchContextNamespaces,
-    QueryState,
-} from '@sourcegraph/search'
-import {
-    IEditor,
-    SearchBox,
-    StreamingProgress,
-    StreamingSearchResultsList,
-    FetchFileParameters,
-} from '@sourcegraph/search-ui'
+import { type IEditor, SearchBox, StreamingProgress, StreamingSearchResultsList } from '@sourcegraph/branded'
 import { wrapRemoteObservable } from '@sourcegraph/shared/src/api/client/api/common'
-import { fetchHighlightedFileLineRanges } from '@sourcegraph/shared/src/backend/file'
+import { type FetchFileParameters, fetchHighlightedFileLineRanges } from '@sourcegraph/shared/src/backend/file'
+import { getUserSearchContextNamespaces, type QueryState, type SearchMode } from '@sourcegraph/shared/src/search'
 import { collectMetrics } from '@sourcegraph/shared/src/search/query/metrics'
 import {
     appendContextFilter,
     sanitizeQueryForTelemetry,
     updateFilters,
 } from '@sourcegraph/shared/src/search/query/transformer'
-import { LATEST_VERSION, RepositoryMatch, SearchMatch } from '@sourcegraph/shared/src/search/stream'
-import { globbingEnabledFromSettings } from '@sourcegraph/shared/src/util/globbing'
+import { LATEST_VERSION, type RepositoryMatch, type SearchMatch } from '@sourcegraph/shared/src/search/stream'
 import { buildSearchURLQuery } from '@sourcegraph/shared/src/util/url'
 
-import { SearchResultsState } from '../../state'
-import { WebviewPageProps } from '../platform/context'
+import { SearchPatternType } from '../../graphql-operations'
+import type { SearchResultsState } from '../../state'
+import type { WebviewPageProps } from '../platform/context'
 
 import { fetchSearchContexts } from './alias/fetchSearchContext'
 import { setFocusSearchBox } from './api'
-import { SavedSearchCreateForm } from './components/SavedSearchForm'
 import { SearchResultsInfoBar } from './components/SearchResultsInfoBar'
 import { MatchHandlersContext, useMatchHandlers } from './MatchHandlersContext'
 import { RepoView } from './RepoView'
@@ -50,7 +38,6 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
     authenticatedUser,
     platformContext,
     settingsCascade,
-    theme,
     context,
     instanceURL,
 }) => {
@@ -90,6 +77,7 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
                     queryState: newState,
                     searchCaseSensitivity: context.submittedSearchQueryState?.searchCaseSensitivity,
                     searchPatternType: context.submittedSearchQueryState?.searchPatternType,
+                    searchMode: context.submittedSearchQueryState?.searchMode,
                 })
                 .catch(error => {
                     // TODO surface error to users
@@ -100,6 +88,7 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
             extensionCoreAPI,
             context.submittedSearchQueryState.searchCaseSensitivity,
             context.submittedSearchQueryState.searchPatternType,
+            context.submittedSearchQueryState.searchMode,
         ]
     )
 
@@ -108,8 +97,6 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
         setAllExpanded(oldValue => !oldValue)
         platformContext.telemetryService.log(allExpanded ? 'allResultsExpanded' : 'allResultsCollapsed')
     }, [allExpanded, platformContext])
-
-    const [showSavedSearchForm, setShowSavedSearchForm] = useState(false)
 
     // Update local query state on sidebar query state updates.
     useDeepCompareEffectNoCheck(() => {
@@ -134,19 +121,27 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
     }, [platformContext, context.submittedSearchQueryState.queryState.query])
 
     const onSubmit = useCallback(
-        (options?: { caseSensitive?: boolean; patternType?: SearchPatternType; newQuery?: string }) => {
+        (options?: {
+            caseSensitive?: boolean
+            patternType?: SearchPatternType
+            newQuery?: string
+            searchMode?: SearchMode
+        }) => {
             const previousSearchQueryState = context.submittedSearchQueryState
 
             const query = options?.newQuery ?? userQueryState.query
             const caseSensitive = options?.caseSensitive ?? previousSearchQueryState.searchCaseSensitivity
             const patternType = options?.patternType ?? previousSearchQueryState.searchPatternType
+            const searchMode = options?.searchMode ?? previousSearchQueryState.searchMode
 
             extensionCoreAPI
                 .streamSearch(query, {
                     caseSensitive,
                     patternType,
+                    searchMode,
                     version: LATEST_VERSION,
                     trace: undefined,
+                    chunkMatches: true,
                 })
                 .then(() => {
                     editorReference.current?.focus()
@@ -162,6 +157,7 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
                     queryState: { query },
                     searchCaseSensitivity: caseSensitive,
                     searchPatternType: patternType,
+                    searchMode,
                 })
                 .catch(error => {
                     // TODO surface error to users
@@ -237,6 +233,13 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
         [onSubmit]
     )
 
+    const setSearchMode = useCallback(
+        (searchMode: SearchMode) => {
+            onSubmit({ searchMode })
+        },
+        [onSubmit]
+    )
+
     const fetchHighlightedFileLineRangesWithContext = useCallback(
         (parameters: FetchFileParameters) => fetchHighlightedFileLineRanges({ ...parameters, platformContext }),
         [platformContext]
@@ -247,8 +250,6 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
             wrapRemoteObservable(extensionCoreAPI.fetchStreamSuggestions(query, instanceURL)),
         [extensionCoreAPI, instanceURL]
     )
-
-    const globbing = useMemo(() => globbingEnabledFromSettings(settingsCascade), [settingsCascade])
 
     const setSelectedSearchContextSpec = useCallback(
         (spec: string) => {
@@ -275,7 +276,7 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
         [context.submittedSearchQueryState.queryState, platformContext, onSubmit]
     )
 
-    const onShareResultsClick = useCallback((): void => {
+    const onShareResultsClick = useCallback(async (): Promise<void> => {
         const queryState = context.submittedSearchQueryState
 
         const path = `/search?${buildSearchURLQuery(
@@ -284,9 +285,7 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
             queryState.searchCaseSensitivity,
             context.selectedSearchContextSpec
         )}&utm_campaign=vscode-extension&utm_medium=direct_traffic&utm_source=vscode-extension&utm_content=save-search`
-        extensionCoreAPI.copyLink(new URL(path, instanceURL).href).catch(error => {
-            console.error('Error copying search link to clipboard:', error)
-        })
+        await extensionCoreAPI.copyLink(new URL(path, instanceURL).href)
         platformContext.telemetryService.log('VSCEShareLinkClick')
     }, [context, instanceURL, extensionCoreAPI, platformContext])
 
@@ -323,7 +322,10 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
                     caseSensitive={context.submittedSearchQueryState?.searchCaseSensitivity}
                     setCaseSensitivity={setCaseSensitivity}
                     patternType={context.submittedSearchQueryState?.searchPatternType}
+                    defaultPatternType={SearchPatternType.standard}
                     setPatternType={setPatternType}
+                    searchMode={context.submittedSearchQueryState?.searchMode}
+                    setSearchMode={setSearchMode}
                     isSourcegraphDotCom={isSourcegraphDotCom}
                     structuralSearchDisabled={false}
                     queryState={userQueryState}
@@ -333,23 +335,18 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
                     searchContextsEnabled={true}
                     showSearchContext={true}
                     showSearchContextManagement={false}
-                    defaultSearchContextSpec="global"
                     setSelectedSearchContextSpec={setSelectedSearchContextSpec}
                     selectedSearchContextSpec={context.selectedSearchContextSpec}
                     fetchSearchContexts={fetchSearchContexts}
-                    fetchAutoDefinedSearchContexts={fetchAutoDefinedSearchContexts}
                     getUserSearchContextNamespaces={getUserSearchContextNamespaces}
                     fetchStreamSuggestions={fetchStreamSuggestions}
-                    settingsCascade={settingsCascade}
-                    globbing={globbing}
-                    isLightTheme={theme === 'theme-light'}
                     telemetryService={platformContext.telemetryService}
+                    telemetryRecorder={platformContext.telemetryRecorder}
                     platformContext={platformContext}
                     className={classNames('flex-grow-1 flex-shrink-past-contents', styles.searchBox)}
                     containerClassName={styles.searchBoxContainer}
                     autoFocus={true}
                     onEditorCreated={setEditor}
-                    editorComponent="monaco"
                 />
             </form>
 
@@ -357,20 +354,21 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
                 <div className={styles.resultsViewScrollContainer}>
                     <SearchResultsInfoBar
                         onShareResultsClick={onShareResultsClick}
-                        showSavedSearchForm={showSavedSearchForm}
-                        setShowSavedSearchForm={setShowSavedSearchForm}
                         extensionCoreAPI={extensionCoreAPI}
                         patternType={context.submittedSearchQueryState.searchPatternType}
                         authenticatedUser={authenticatedUser}
                         platformContext={platformContext}
                         stats={
                             <StreamingProgress
+                                query={context.submittedSearchQueryState.queryState.query}
                                 progress={
                                     context.searchResults?.progress || { durationMs: 0, matchCount: 0, skipped: [] }
                                 }
                                 state={context.searchResults?.state || 'loading'}
                                 onSearchAgain={onSearchAgain}
                                 showTrace={false}
+                                telemetryService={platformContext.telemetryService}
+                                telemetryRecorder={platformContext.telemetryRecorder}
                             />
                         }
                         allExpanded={allExpanded}
@@ -378,36 +376,27 @@ export const SearchResultsView: React.FunctionComponent<React.PropsWithChildren<
                         instanceURL={instanceURL}
                         fullQuery={fullQuery}
                     />
-                    {authenticatedUser && showSavedSearchForm && (
-                        <SavedSearchCreateForm
-                            authenticatedUser={authenticatedUser}
-                            submitLabel="Add saved search"
-                            title="Add saved search"
-                            fullQuery={`${fullQuery} patternType:${context.submittedSearchQueryState.searchPatternType}`}
-                            onComplete={() => setShowSavedSearchForm(false)}
-                            platformContext={platformContext}
-                            instanceURL={instanceURL}
-                        />
-                    )}
                     <MatchHandlersContext.Provider value={{ ...matchHandlers, instanceURL }}>
                         <StreamingSearchResultsList
-                            isLightTheme={theme === 'theme-light'}
                             settingsCascade={settingsCascade}
                             telemetryService={platformContext.telemetryService}
+                            telemetryRecorder={platformContext.telemetryRecorder}
                             allExpanded={allExpanded}
                             // Debt: dotcom prop used only for "run search" link
                             // for search examples. Fix on VSCE.
                             isSourcegraphDotCom={false}
                             searchContextsEnabled={true}
-                            showSearchContext={true}
                             platformContext={platformContext}
                             results={context.searchResults ?? undefined}
                             fetchHighlightedFileLineRanges={fetchHighlightedFileLineRangesWithContext}
                             executedQuery={context.submittedSearchQueryState.queryState.query}
                             resultClassName="mr-0"
-                            // TODO "no results" video thumbnail assets
-                            // In build, copy ui/assets/img folder to dist/
-                            assetsRoot="https://raw.githubusercontent.com/sourcegraph/sourcegraph/main/ui/assets"
+                            selectedSearchContextSpec={context.selectedSearchContextSpec}
+                            // The VSCode extension does not support file preview, so turn that off in the search results.
+                            hideFilePreviewButton={true}
+                            showQueryExamplesOnNoResultsPage={true}
+                            // For VSCode, the default pattern type is hardcoded to "standard".
+                            showQueryExamplesForKeywordSearch={false}
                         />
                     </MatchHandlersContext.Provider>
                 </div>

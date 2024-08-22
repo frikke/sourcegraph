@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sourcegraph/log/logtest"
 	"github.com/sourcegraph/sourcegraph/lib/gitservice"
 )
 
@@ -26,7 +25,7 @@ func TestHandler(t *testing.T) {
 	// Setup a repo with a commit so we can add bad refs
 	runCmd(t, root, "git", "init", repo)
 
-	for i := 0; i < numTestCommits; i++ {
+	for i := range numTestCommits {
 		runCmd(t, repo, "sh", "-c", fmt.Sprintf("echo hello world > hello-%d.txt", i+1))
 		runCmd(t, repo, "git", "add", fmt.Sprintf("hello-%d.txt", i+1))
 		runCmd(t, repo, "git", "commit", "-m", fmt.Sprintf("c%d", i+1))
@@ -34,7 +33,6 @@ func TestHandler(t *testing.T) {
 	}
 
 	ts := httptest.NewServer(&gitservice.Handler{
-		Logger: logtest.Scoped(t),
 		Dir: func(s string) string {
 			return filepath.Join(root, s, ".git")
 		},

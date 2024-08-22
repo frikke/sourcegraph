@@ -2,7 +2,7 @@ import * as vscode from 'vscode'
 
 import { log } from '../log'
 
-import { SourcegraphFileSystemProvider } from './SourcegraphFileSystemProvider'
+import type { SourcegraphFileSystemProvider } from './SourcegraphFileSystemProvider'
 import { SourcegraphUri } from './SourcegraphUri'
 
 export class FilesTreeDataProvider implements vscode.TreeDataProvider<string> {
@@ -25,9 +25,11 @@ export class FilesTreeDataProvider implements vscode.TreeDataProvider<string> {
             ? this.fs.sourcegraphUri(this.activeUri)
             : undefined
     }
+
     public isViewVisible(): boolean {
         return this._isViewVisible
     }
+
     public setTreeView(treeView: vscode.TreeView<string>): void {
         this.treeView = treeView
         treeView.onDidChangeSelection(async event => {

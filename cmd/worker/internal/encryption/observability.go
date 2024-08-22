@@ -3,7 +3,6 @@ package encryption
 import (
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/sourcegraph/sourcegraph/internal/database"
 	"github.com/sourcegraph/sourcegraph/internal/observation"
 )
 
@@ -18,14 +17,14 @@ type metrics struct {
 	numErrors           prometheus.Counter
 }
 
-func newMetrics(observationContext *observation.Context) *metrics {
+func newMetrics(observationCtx *observation.Context) *metrics {
 	gaugeVec := func(name, help string) *prometheus.GaugeVec {
 		gaugeVec := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: name,
 			Help: help,
 		}, []string{"tableName"})
 
-		observationContext.Registerer.MustRegister(gaugeVec)
+		observationCtx.Registerer.MustRegister(gaugeVec)
 		return gaugeVec
 	}
 
@@ -35,7 +34,7 @@ func newMetrics(observationContext *observation.Context) *metrics {
 			Help: help,
 		})
 
-		observationContext.Registerer.MustRegister(counter)
+		observationCtx.Registerer.MustRegister(counter)
 		return counter
 	}
 
@@ -45,7 +44,7 @@ func newMetrics(observationContext *observation.Context) *metrics {
 			Help: help,
 		}, []string{"tableName"})
 
-		observationContext.Registerer.MustRegister(counterVec)
+		observationCtx.Registerer.MustRegister(counterVec)
 		return counterVec
 	}
 
@@ -70,7 +69,7 @@ func newMetrics(observationContext *observation.Context) *metrics {
 		"The number of errors that occur during record encryption/decryption.",
 	)
 
-	for _, config := range database.EncryptionConfigs {
+	for _, config := range encryptionConfigs {
 		// Initialize counters to zero
 		numRecordsEncrypted.WithLabelValues(config.TableName).Add(0)
 		numRecordsDecrypted.WithLabelValues(config.TableName).Add(0)

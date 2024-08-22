@@ -7,12 +7,6 @@ import (
 )
 
 const yamlTestInput = `
-shared_steps:
-  - root: /
-    image: node:12
-    commands:
-      - yarn install --frozen-lockfile --non-interactive
-
 index_jobs:
   -
     steps:
@@ -35,15 +29,8 @@ func TestUnmarshalYAML(t *testing.T) {
 		t.Fatalf("unexpected error: %s", err)
 	}
 
-	expected := IndexConfiguration{
-		SharedSteps: []DockerStep{
-			{
-				Root:     "/",
-				Image:    "node:12",
-				Commands: []string{"yarn install --frozen-lockfile --non-interactive"},
-			},
-		},
-		IndexJobs: []IndexJob{
+	expected := AutoIndexJobSpecList{
+		JobSpecs: []AutoIndexJobSpec{
 			{
 				Steps: []DockerStep{
 					{

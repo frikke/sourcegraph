@@ -8,3 +8,5 @@ export { createTether } from './services/tether-registry'
 
 // Shared type interfaces
 export type { Tether } from './services/types'
+export type { TetherInstanceAPI } from './services/tether-registry'
+export { TetherAPI } from './services/tether-registry'

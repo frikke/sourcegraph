@@ -3,14 +3,13 @@ package structural
 import (
 	"context"
 
-	"github.com/opentracing/opentracing-go/log"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/search"
 	"github.com/sourcegraph/sourcegraph/internal/search/job"
 	"github.com/sourcegraph/sourcegraph/internal/search/query"
-	searchrepos "github.com/sourcegraph/sourcegraph/internal/search/repos"
 	"github.com/sourcegraph/sourcegraph/internal/search/result"
 	"github.com/sourcegraph/sourcegraph/internal/search/searcher"
 	"github.com/sourcegraph/sourcegraph/internal/search/streaming"
@@ -66,6 +65,7 @@ func (s *searchRepos) getJob(ctx context.Context) func() error {
 			Indexed:         s.repoSet.IsIndexed(),
 			UseFullDeadline: s.args.UseFullDeadline,
 			Features:        s.args.Features,
+			NumContextLines: s.args.NumContextLines,
 		}
 
 		_, err := searcherJob.Run(ctx, s.clients, s.stream)
@@ -120,9 +120,16 @@ func runStructuralSearch(ctx context.Context, clients job.RuntimeClients, args *
 	event := agg.SearchEvent
 	if len(event.Results) == 0 && err == nil {
 		// retry structural search with a higher limit.
-		agg := streaming.NewAggregatingStream()
-		err := retryStructuralSearch(ctx, clients, args, repos, agg)
+		aggRetry := streaming.NewAggregatingStream()
+		err := retryStructuralSearch(ctx, clients, args, repos, aggRetry)
 		if err != nil {
+			// It is possible that the retry couldn't search any repos before the context
+			// expired, in which case we send the stats from the first try.
+			stats := aggRetry.Stats
+			if stats.Zero() {
+				stats = agg.Stats
+			}
+			stream.Send(streaming.SearchEvent{Stats: stats})
 			return err
 		}
 
@@ -150,59 +157,40 @@ func runStructuralSearch(ctx context.Context, clients job.RuntimeClients, args *
 }
 
 type SearchJob struct {
-	SearcherArgs     *search.SearcherParameters
-	UseIndex         query.YesNoOnly
-	ContainsRefGlobs bool
-	BatchRetry       bool
+	SearcherArgs *search.SearcherParameters
+	UseIndex     query.YesNoOnly
+	BatchRetry   bool
 
-	RepoOpts search.RepoOptions
+	Indexed   *zoektutil.IndexedRepoRevs
+	Unindexed []*search.RepositoryRevisions
 }
 
 func (s *SearchJob) Run(ctx context.Context, clients job.RuntimeClients, stream streaming.Sender) (alert *search.Alert, err error) {
 	_, ctx, stream, finish := job.StartSpan(ctx, stream, s)
 	defer func() { finish(alert, err) }()
 
-	repos := searchrepos.NewResolver(clients.Logger, clients.DB, clients.SearcherURLs, clients.Zoekt)
-	return nil, repos.Paginate(ctx, s.RepoOpts, func(page *searchrepos.Resolved) error {
-		indexed, unindexed, err := zoektutil.PartitionRepos(
-			ctx,
-			clients.Logger,
-			page.RepoRevs,
-			clients.Zoekt,
-			search.TextRequest,
-			s.UseIndex,
-			s.ContainsRefGlobs,
-		)
-		if err != nil {
-			return err
-		}
-
-		repoSet := []repoData{UnindexedList(unindexed)}
-		if indexed != nil {
-			repoSet = append(repoSet, IndexedMap(indexed.RepoRevs))
-		}
-		return runStructuralSearch(ctx, clients, s.SearcherArgs, s.BatchRetry, repoSet, stream)
-	})
+	repoSet := []repoData{UnindexedList(s.Unindexed)}
+	if s.Indexed != nil {
+		repoRevsFromBranchRepos := s.Indexed.GetRepoRevsFromBranchRepos()
+		repoSet = append(repoSet, IndexedMap(repoRevsFromBranchRepos))
+	}
+	return nil, runStructuralSearch(ctx, clients, s.SearcherArgs, s.BatchRetry, repoSet, stream)
 }
 
 func (*SearchJob) Name() string {
 	return "StructuralSearchJob"
 }
 
-func (s *SearchJob) Fields(v job.Verbosity) (res []log.Field) {
+func (s *SearchJob) Attributes(v job.Verbosity) (res []attribute.KeyValue) {
 	switch v {
 	case job.VerbosityMax:
 		res = append(res,
-			log.Bool("useFullDeadline", s.SearcherArgs.UseFullDeadline),
-			log.Bool("containsRefGlobs", s.ContainsRefGlobs),
-			log.String("useIndex", string(s.UseIndex)),
+			attribute.Bool("useFullDeadline", s.SearcherArgs.UseFullDeadline),
+			attribute.String("useIndex", string(s.UseIndex)),
 		)
 		fallthrough
 	case job.VerbosityBasic:
-		res = append(res,
-			trace.Scoped("patternInfo", s.SearcherArgs.PatternInfo.Fields()...),
-			trace.Scoped("repoOpts", s.RepoOpts.Tags()...),
-		)
+		res = append(res, trace.Scoped("patternInfo", s.SearcherArgs.PatternInfo.Fields()...)...)
 	}
 	return res
 }

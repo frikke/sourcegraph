@@ -3,24 +3,33 @@ import React from 'react'
 import { mdiArrowRight } from '@mdi/js'
 import classNames from 'classnames'
 
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import { Link, Icon, H3 } from '@sourcegraph/wildcard'
 
 import { MarketingBlock } from '../MarketingBlock'
 
-export interface SelfHostedCtaProps extends TelemetryProps {
+export interface SelfHostedCtaProps extends TelemetryProps, TelemetryV2Props {
     className?: string
     contentClassName?: string
-    // the name of the page the CTA will be posted. DO NOT include full URLs
-    // here, because this will be logged to our analytics systems. We do not
-    // want to expose private repo names or search queries to our analytics.
-    page: string
+    // The name of the page the CTA will be posted. Add more as needed. DO NOT
+    // include full URLs here, because this will be logged to our analytics
+    // systems. We do not want to expose private repo names or search queries
+    // to our analytics.
+    page: 'organizations' | 'storybook'
+}
+
+// pages as numbers for v2 telemetry
+const V2Pages: { [k in SelfHostedCtaProps['page']]: number } = {
+    organizations: 0,
+    storybook: 1,
 }
 
 export const SelfHostedCta: React.FunctionComponent<React.PropsWithChildren<SelfHostedCtaProps>> = ({
     className,
     contentClassName,
     telemetryService,
+    telemetryRecorder,
     page,
     children,
 }) => {
@@ -28,14 +37,12 @@ export const SelfHostedCta: React.FunctionComponent<React.PropsWithChildren<Self
 
     const gettingStartedCTAOnClick = (): void => {
         telemetryService.log('InstallSourcegraphCTAClicked', { page }, { page })
-    }
-
-    const selfVsCloudDocumentsLinkOnClick = (): void => {
-        telemetryService.log('SelfVsCloudDocsLink', { page }, { page })
+        telemetryRecorder.recordEvent('selfHostedCTA.install', 'click', { metadata: { page: V2Pages[page] } })
     }
 
     const helpGettingStartedCTAOnClick = (): void => {
         telemetryService.log('HelpGettingStartedCTA', { page }, { page })
+        telemetryRecorder.recordEvent('selfHostedCTA.talkToADev', 'click', { metadata: { page: V2Pages[page] } })
     }
 
     return (
@@ -50,21 +57,8 @@ export const SelfHostedCta: React.FunctionComponent<React.PropsWithChildren<Self
 
                 <ul>
                     <li>
-                        <Link
-                            onClick={gettingStartedCTAOnClick}
-                            to="https://docs.sourcegraph.com/admin/install"
-                            {...linkProps}
-                        >
+                        <Link onClick={gettingStartedCTAOnClick} to="/help/admin/deploy" {...linkProps}>
                             Learn how to install
-                        </Link>
-                    </li>
-                    <li>
-                        <Link
-                            onClick={selfVsCloudDocumentsLinkOnClick}
-                            to="https://docs.sourcegraph.com/code_search/explanations/sourcegraph_cloud#who-is-sourcegraph-cloud-for-why-should-i-use-this-over-sourcegraph-self-hosted"
-                            {...linkProps}
-                        >
-                            Self-hosted vs. cloud features
                         </Link>
                     </li>
                 </ul>

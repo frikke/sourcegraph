@@ -6,7 +6,7 @@ FROM alpine:3.14@sha256:92d13cc58a46e012300ef49924edc56de5642ada25c9a457dce4a6db
 
 LABEL org.opencontainers.image.url=https://sourcegraph.com/
 LABEL org.opencontainers.image.source=https://github.com/sourcegraph/sourcegraph/
-LABEL org.opencontainers.image.documentation=https://docs.sourcegraph.com/
+LABEL org.opencontainers.image.documentation=https://sourcegraph.com/docs/
 
 # Add the sourcegraph group, user, and create the home directory.
 #
@@ -27,7 +27,8 @@ RUN apk update && apk add --no-cache \
     'bind-tools>=9.16.33-r0' \
     busybox \
     ca-certificates \
-    'curl>=7.79.1-r2' \
+    # Don't use alpine/edge, the curl release on this segfaults
+    curl --repository=http://dl-cdn.alpinelinux.org/alpine/v3.17/main \
     mailcap \
     tini \
     wget
@@ -36,4 +37,5 @@ RUN apk update && apk add --no-cache \
 # Issue: https://github.com/sourcegraph/sourcegraph/issues/32679
 # PR: https://github.com/sourcegraph/sourcegraph/pull/32682
 # @TODO: Remove this with the next release of Alpine
-RUN apk add --upgrade --no-cache 'libcrypto1.1>=1.1.1n-r0' 'libssl1.1>=1.1.1n-r0'
+RUN apk add --upgrade --no-cache 'libcrypto1.1>=1.1.1t-r2' 'libssl1.1>=1.1.1t-r2' \
+    'libxml2>=2.9.14-r2'  # CVE-2022-40303 CVE-2022-40304

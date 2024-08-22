@@ -70,7 +70,7 @@ func CheckBuilds(ctx context.Context, branch BranchLocker, teammates team.Teamma
 
 	// if failed, check if failures are consecutive
 	var exceeded bool
-	results.FailedCommits, exceeded, _ = findConsecutiveFailures(
+	results.FailedCommits, exceeded = findConsecutiveFailures(
 		builds[max(firstFailedBuildIndex-1, 0):], // Check builds starting with the one we found
 		opts.FailuresThreshold,
 		opts.BuildTimeout)
@@ -129,11 +129,4 @@ func isBuildFailed(build buildkite.Build, timeout time.Duration) bool {
 		return time.Now().After(build.CreatedAt.Add(timeout))
 	}
 	return false
-}
-
-func max(x, y int) int {
-	if x < y {
-		return y
-	}
-	return x
 }

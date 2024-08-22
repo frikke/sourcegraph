@@ -7,10 +7,11 @@ import (
 )
 
 type Notebooks struct {
+	Ctx       context.Context
 	DateRange string
 	Grouping  string
 	DB        database.DB
-	Cache     bool
+	Cache     KeyValue
 }
 
 func (s *Notebooks) Creations() (*AnalyticsFetcher, error) {

@@ -1,74 +1,46 @@
-import { useCallback, useLayoutEffect, useMemo, useState } from 'react'
+import { useLayoutEffect, useState } from 'react'
 
 import { gql, useQuery } from '@apollo/client'
-import { useHistory, useLocation } from 'react-router'
 
-import { SearchAggregationMode } from '@sourcegraph/shared/src/graphql-operations'
-import { SearchPatternType } from '@sourcegraph/shared/src/schema'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryService } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { useSyncedWithURLState, type SetStateResult } from '@sourcegraph/wildcard'
 
-import { GetSearchAggregationResult, GetSearchAggregationVariables } from '../../../../graphql-operations'
+import {
+    type GetSearchAggregationResult,
+    type GetSearchAggregationVariables,
+    SearchAggregationMode,
+    NotAvailableReasonType,
+    type SearchPatternType,
+} from '../../../../graphql-operations'
 
 import { AGGREGATION_MODE_URL_KEY, AGGREGATION_UI_MODE_URL_KEY } from './constants'
+import { GroupResultsPing } from './pings'
+import { V2SearchAggregationModeTypes } from './SearchAggregationResult'
 import { AggregationUIMode } from './types'
 
-interface URLStateOptions<State, SerializedState> {
-    urlKey: string
-    deserializer: (value: SerializedState | null) => State
-    serializer: (state: State) => string | null
-}
-
-type SetStateResult<State> = [state: State, dispatch: (state: State) => void]
-
-/**
- * React hook analog standard react useState hook but with synced value with URL
- * through URL query parameter.
- */
-function useSyncedWithURLState<State, SerializedState>(
-    options: URLStateOptions<State, SerializedState>
-): SetStateResult<State> {
-    const { urlKey, serializer, deserializer } = options
-    const history = useHistory()
-    const { search } = useLocation()
-
-    const urlSearchParameters = useMemo(() => new URLSearchParams(search), [search])
-    const queryParameter = useMemo(
-        () => deserializer((urlSearchParameters.get(urlKey) as unknown) as SerializedState | null),
-        [urlSearchParameters, urlKey, deserializer]
-    )
-
-    const setNextState = useCallback(
-        (nextState: State) => {
-            const serializedValue = serializer(nextState)
-
-            if (serializedValue === null) {
-                urlSearchParameters.delete(urlKey)
-            } else {
-                urlSearchParameters.set(urlKey, serializedValue)
-            }
-
-            history.replace({ search: `?${urlSearchParameters.toString()}` })
-        },
-        [history, serializer, urlKey, urlSearchParameters]
-    )
-
-    return [queryParameter, setNextState]
-}
-
-type SerializedAggregationMode = 'repo' | 'path' | 'author' | 'group' | ''
+type SerializedAggregationMode = 'repo' | 'path' | 'author' | 'group' | 'repo-metadata' | ''
 
 const aggregationModeSerializer = (mode: SearchAggregationMode | null): SerializedAggregationMode => {
     switch (mode) {
-        case SearchAggregationMode.REPO:
+        case SearchAggregationMode.REPO: {
             return 'repo'
-        case SearchAggregationMode.PATH:
+        }
+        case SearchAggregationMode.PATH: {
             return 'path'
-        case SearchAggregationMode.AUTHOR:
+        }
+        case SearchAggregationMode.AUTHOR: {
             return 'author'
-        case SearchAggregationMode.CAPTURE_GROUP:
+        }
+        case SearchAggregationMode.CAPTURE_GROUP: {
             return 'group'
-
-        default:
+        }
+        case SearchAggregationMode.REPO_METADATA: {
+            return 'repo-metadata'
+        }
+        default: {
             return ''
+        }
     }
 }
 
@@ -76,17 +48,25 @@ const aggregationModeDeserializer = (
     serializedValue: SerializedAggregationMode | null
 ): SearchAggregationMode | null => {
     switch (serializedValue) {
-        case 'repo':
+        case 'repo': {
             return SearchAggregationMode.REPO
-        case 'path':
+        }
+        case 'path': {
             return SearchAggregationMode.PATH
-        case 'author':
+        }
+        case 'author': {
             return SearchAggregationMode.AUTHOR
-        case 'group':
+        }
+        case 'group': {
             return SearchAggregationMode.CAPTURE_GROUP
+        }
+        case 'repo-metadata': {
+            return SearchAggregationMode.REPO_METADATA
+        }
 
-        default:
+        default: {
             return null
+        }
     }
 }
 
@@ -94,18 +74,12 @@ const aggregationModeDeserializer = (
  * Shared state hook for syncing aggregation type state between different UI trough
  * ULR query param {@link AGGREGATION_MODE_URL_KEY}
  */
-export const useAggregationSearchMode = (): SetStateResult<SearchAggregationMode | null> => {
-    const [aggregationMode, setAggregationMode] = useSyncedWithURLState<
-        SearchAggregationMode | null,
-        SerializedAggregationMode
-    >({
+export const useAggregationSearchMode = (): SetStateResult<SearchAggregationMode | null> =>
+    useSyncedWithURLState<SearchAggregationMode | null, SerializedAggregationMode>({
         urlKey: AGGREGATION_MODE_URL_KEY,
         serializer: aggregationModeSerializer,
         deserializer: aggregationModeDeserializer,
     })
-
-    return [aggregationMode, setAggregationMode]
-}
 
 /**
  * Serialized UI mode values
@@ -116,21 +90,25 @@ type SerializedAggregationUIMode = '' | null
 
 const aggregationUIModeSerializer = (uiMode: AggregationUIMode): SerializedAggregationUIMode => {
     switch (uiMode) {
-        case AggregationUIMode.SearchPage:
+        case AggregationUIMode.SearchPage: {
             return ''
+        }
         // Null means here that we will delete uiMode query param from the URL
-        case AggregationUIMode.Sidebar:
+        case AggregationUIMode.Sidebar: {
             return null
+        }
     }
 }
 
 const aggregationUIModeDeserializer = (serializedValue: SerializedAggregationUIMode | null): AggregationUIMode => {
     switch (serializedValue) {
-        case '':
+        case '': {
             return AggregationUIMode.SearchPage
+        }
 
-        default:
+        default: {
             return AggregationUIMode.Sidebar
+        }
     }
 }
 
@@ -138,15 +116,12 @@ const aggregationUIModeDeserializer = (serializedValue: SerializedAggregationUIM
  * Shared state hook for syncing aggregation UI mode state between different UI trough
  * ULR query param {@link AGGREGATION_UI_MODE_URL_KEY}
  */
-export const useAggregationUIMode = (): SetStateResult<AggregationUIMode> => {
-    const [aggregationMode, setAggregationMode] = useSyncedWithURLState({
+export const useAggregationUIMode = (): SetStateResult<AggregationUIMode> =>
+    useSyncedWithURLState({
         urlKey: AGGREGATION_UI_MODE_URL_KEY,
         serializer: aggregationUIModeSerializer,
         deserializer: aggregationUIModeDeserializer,
     })
-
-    return [aggregationMode, setAggregationMode]
-}
 
 export const AGGREGATION_SEARCH_QUERY = gql`
     fragment SearchAggregationModeAvailability on AggregationModeAvailability {
@@ -203,13 +178,14 @@ export const AGGREGATION_SEARCH_QUERY = gql`
     }
 `
 
-interface SearchAggregationDataInput {
+interface SearchAggregationDataInput extends TelemetryV2Props {
     query: string
     patternType: SearchPatternType
     aggregationMode: SearchAggregationMode | null
     caseSensitive: boolean
     extendedTimeout: boolean
     proactive?: boolean
+    telemetryService: TelemetryService
 }
 
 interface AggregationState {
@@ -225,9 +201,18 @@ type SearchAggregationResults =
     | { data: GetSearchAggregationResult; loading: false; error: undefined }
 
 export const useSearchAggregationData = (input: SearchAggregationDataInput): SearchAggregationResults => {
-    const { query, patternType, aggregationMode, proactive, caseSensitive, extendedTimeout } = input
+    const {
+        query,
+        patternType,
+        aggregationMode,
+        caseSensitive,
+        extendedTimeout,
+        proactive = false,
+        telemetryService,
+        telemetryRecorder,
+    } = input
 
-    const [, setAggregationMode] = useAggregationSearchMode()
+    const [, setURLAggregationMode] = useAggregationSearchMode()
     const [state, setState] = useState<AggregationState>(INITIAL_STATE)
 
     // Search parses out the case argument, but backend needs it in the query
@@ -270,12 +255,13 @@ export const useSearchAggregationData = (input: SearchAggregationDataInput): Sea
                 // Catch initial page mount when aggregation mode isn't set on the FE and BE
                 // calculated aggregation mode automatically on the backend based on given query
                 if (calculatedAggregationMode !== aggregationMode) {
-                    setAggregationMode(calculatedAggregationMode)
+                    setURLAggregationMode(calculatedAggregationMode)
                 }
 
                 // skip: true resets data field in the useQuery hook, in order to use previously
                 // saved data we use useState to store data outside useQuery hook
                 setState({ data, calculatedMode: calculatedAggregationMode })
+                sendAggregationPing({ data, extendedTimeout, proactive, telemetryService, telemetryRecorder })
             },
         }
     )
@@ -317,4 +303,74 @@ export const isNonExhaustiveAggregationResults = (response?: GetSearchAggregatio
     }
 
     return response.searchQueryAggregate?.aggregations?.__typename === 'NonExhaustiveSearchAggregationResult'
+}
+
+interface UseAggregationPingsArgs extends TelemetryV2Props {
+    data: GetSearchAggregationResult | undefined
+    proactive: boolean
+    extendedTimeout: boolean
+    telemetryService: TelemetryService
+}
+
+function sendAggregationPing(props: UseAggregationPingsArgs): void {
+    const { data, proactive, extendedTimeout, telemetryService, telemetryRecorder } = props
+
+    const aggregation = data?.searchQueryAggregate.aggregations
+
+    if (!aggregation) {
+        return
+    }
+
+    const { __typename: aggregationType } = aggregation
+
+    if (aggregationType === 'SearchAggregationNotAvailable') {
+        const { reasonType, mode } = aggregation
+
+        const extensionAvailable = reasonType === NotAvailableReasonType.TIMEOUT_EXTENSION_AVAILABLE
+        const noExtensionAvailable = reasonType === NotAvailableReasonType.TIMEOUT_NO_EXTENSION_AVAILABLE
+
+        if (proactive && extensionAvailable) {
+            telemetryService.log(
+                GroupResultsPing.ProactiveLimitHit,
+                { aggregationMode: mode },
+                { aggregationMode: mode }
+            )
+            telemetryRecorder.recordEvent('search.group.results.proactiveLimit', 'hit', {
+                metadata: { aggregationMode: mode ? V2SearchAggregationModeTypes[mode] : 0 },
+            })
+        }
+
+        if (noExtensionAvailable) {
+            telemetryService.log(
+                GroupResultsPing.ExplicitLimitHit,
+                { aggregationMode: mode },
+                { aggregationMode: mode }
+            )
+            telemetryRecorder.recordEvent('search.group.results.explicitLimit', 'hit', {
+                metadata: { aggregationMode: mode ? V2SearchAggregationModeTypes[mode] : 0 },
+            })
+        }
+    } else {
+        const { mode } = aggregation
+
+        if (extendedTimeout) {
+            telemetryService.log(
+                GroupResultsPing.ExplicitLimitSuccess,
+                { aggregationMode: mode },
+                { aggregationMode: mode }
+            )
+            telemetryRecorder.recordEvent('search.group.results.explicitLimit', 'success', {
+                metadata: { aggregationMode: mode ? V2SearchAggregationModeTypes[mode] : 0 },
+            })
+        } else {
+            telemetryService.log(
+                GroupResultsPing.ProactiveLimitSuccess,
+                { aggregationMode: mode },
+                { aggregationMode: mode }
+            )
+            telemetryRecorder.recordEvent('search.group.results.proactiveLimit', 'success', {
+                metadata: { aggregationMode: mode ? V2SearchAggregationModeTypes[mode] : 0 },
+            })
+        }
+    }
 }

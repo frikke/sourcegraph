@@ -1,10 +1,9 @@
-import { FunctionComponent, useContext } from 'react'
+import { type FunctionComponent, useContext } from 'react'
 
-import classNames from 'classnames'
-
-import { SyntaxHighlightedSearchQuery } from '@sourcegraph/search-ui'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { Button, Link, LegendItem, LegendList, ParentSize } from '@sourcegraph/wildcard'
+import { SyntaxHighlightedSearchQuery } from '@sourcegraph/branded'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { Button, Link, LegendItem, LegendList, ParentSize, LegendItemPoint } from '@sourcegraph/wildcard'
 
 import { useSeriesToggle } from '../../../../../../../../insights/utils/use-series-toggle'
 import {
@@ -14,7 +13,7 @@ import {
     SeriesBasedChartTypes,
     SeriesChart,
 } from '../../../../../../components'
-import { CodeInsightsBackendContext, InsightType } from '../../../../../../core'
+import { InsightType } from '../../../../../../core'
 import { CodeInsightTrackType, useCodeInsightViewPings } from '../../../../../../pings'
 import {
     CodeInsightsLandingPageContext,
@@ -22,7 +21,7 @@ import {
     useLogEventName,
 } from '../../../../CodeInsightsLandingPageContext'
 import { CodeInsightsQueryBlock } from '../../code-insights-query-block/CodeInsightsQueryBlock'
-import { CaptureGroupExampleContent, SearchInsightExampleContent } from '../types'
+import type { CaptureGroupExampleContent, SearchInsightExampleContent } from '../types'
 
 import styles from './CodeInsightExampleCard.module.scss'
 
@@ -39,7 +38,7 @@ export const CodeInsightExampleCard: FunctionComponent<CodeInsightExampleProps> 
     return <CodeInsightCaptureExample {...props} />
 }
 
-interface CodeInsightSearchExampleProps extends TelemetryProps {
+interface CodeInsightSearchExampleProps extends TelemetryProps, TelemetryV2Props {
     type: InsightType.SearchBased
     content: SearchInsightExampleContent<any>
     templateLink?: string
@@ -47,18 +46,16 @@ interface CodeInsightSearchExampleProps extends TelemetryProps {
 }
 
 const CodeInsightSearchExample: FunctionComponent<CodeInsightSearchExampleProps> = props => {
-    const { templateLink, className, content, telemetryService } = props
+    const { templateLink, className, content, telemetryService, telemetryRecorder } = props
     const seriesToggleState = useSeriesToggle()
 
     const { mode } = useContext(CodeInsightsLandingPageContext)
-    const {
-        UIFeatures: { licensed },
-    } = useContext(CodeInsightsBackendContext)
 
     const bigTemplateClickPingName = useLogEventName('InsightsGetStartedBigTemplateClick')
 
     const { trackMouseEnter, trackMouseLeave } = useCodeInsightViewPings({
         telemetryService,
+        telemetryRecorder,
         insightType:
             mode === CodeInsightsLandingPageType.Cloud
                 ? CodeInsightTrackType.CloudLandingPageInsight
@@ -67,6 +64,7 @@ const CodeInsightSearchExample: FunctionComponent<CodeInsightSearchExampleProps>
 
     const handleTemplateLinkClick = (): void => {
         telemetryService.log(bigTemplateClickPingName)
+        telemetryRecorder.recordEvent('insights.getStarted.bigTemplate', 'click')
     }
 
     return (
@@ -90,7 +88,7 @@ const CodeInsightSearchExample: FunctionComponent<CodeInsightSearchExampleProps>
                         to={templateLink}
                         onClick={handleTemplateLinkClick}
                     >
-                        {licensed ? 'Use as template' : 'Explore template'}
+                        Use as template
                     </Button>
                 )}
             </InsightCardHeader>
@@ -109,8 +107,9 @@ const CodeInsightSearchExample: FunctionComponent<CodeInsightSearchExampleProps>
 
             <LegendList className={styles.legend}>
                 {content.series.map(series => (
-                    <LegendItem key={series.id as string} color={series.color} name={series.name}>
-                        <span className={classNames(styles.legendItem, 'flex-shrink-0 mr-2')}>{series.name}</span>
+                    <LegendItem key={series.id as string}>
+                        <LegendItemPoint color={series.color} />
+                        <span className={styles.legendItem}>{series.name}</span>
                         <CodeInsightsQueryBlock as={SyntaxHighlightedSearchQuery} query={series.query} />
                     </LegendItem>
                 ))}
@@ -119,7 +118,7 @@ const CodeInsightSearchExample: FunctionComponent<CodeInsightSearchExampleProps>
     )
 }
 
-interface CodeInsightCaptureExampleProps extends TelemetryProps {
+interface CodeInsightCaptureExampleProps extends TelemetryProps, TelemetryV2Props {
     type: InsightType.CaptureGroup
     content: CaptureGroupExampleContent<any>
     templateLink?: string
@@ -132,18 +131,16 @@ const CodeInsightCaptureExample: FunctionComponent<CodeInsightCaptureExampleProp
         templateLink,
         className,
         telemetryService,
+        telemetryRecorder,
     } = props
     const seriesToggleState = useSeriesToggle()
-
-    const {
-        UIFeatures: { licensed },
-    } = useContext(CodeInsightsBackendContext)
 
     const { mode } = useContext(CodeInsightsLandingPageContext)
     const bigTemplateClickPingName = useLogEventName('InsightsGetStartedBigTemplateClick')
 
     const { trackMouseEnter, trackMouseLeave } = useCodeInsightViewPings({
         telemetryService,
+        telemetryRecorder,
         insightType:
             mode === CodeInsightsLandingPageType.Cloud
                 ? CodeInsightTrackType.CloudLandingPageInsight
@@ -152,6 +149,7 @@ const CodeInsightCaptureExample: FunctionComponent<CodeInsightCaptureExampleProp
 
     const handleTemplateLinkClick = (): void => {
         telemetryService.log(bigTemplateClickPingName)
+        telemetryRecorder.recordEvent('insights.getStarted.bigTemplate', 'click')
     }
 
     return (
@@ -171,7 +169,7 @@ const CodeInsightCaptureExample: FunctionComponent<CodeInsightCaptureExampleProp
                         to={templateLink}
                         onClick={handleTemplateLinkClick}
                     >
-                        {licensed ? 'Use as template' : 'Explore template'}
+                        Use as template
                     </Button>
                 )}
             </InsightCardHeader>

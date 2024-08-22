@@ -1,49 +1,45 @@
-import React, { useCallback, useState } from 'react'
+import React, { useCallback } from 'react'
 
-import { useHistory, useLocation } from 'react-router'
+import { useLocation } from 'react-router-dom'
 import { of } from 'rxjs'
 
-import { Button, Container, Link, H2, H3 } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { Container, H2, H3 } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../auth'
+import type { AuthenticatedUser } from '../../auth'
 import { FilteredConnection } from '../../components/FilteredConnection'
-import { CodeMonitorFields, ListUserCodeMonitorsResult, ListUserCodeMonitorsVariables } from '../../graphql-operations'
+import type {
+    CodeMonitorFields,
+    ListAllCodeMonitorsResult,
+    ListAllCodeMonitorsVariables,
+    ListUserCodeMonitorsResult,
+    ListUserCodeMonitorsVariables,
+} from '../../graphql-operations'
 
-import { CodeMonitorNode, CodeMonitorNodeProps } from './CodeMonitoringNode'
-import { CodeMonitoringPageProps } from './CodeMonitoringPage'
-import { CodeMonitorSignUpLink } from './CodeMonitoringSignUpLink'
-
-type CodeMonitorFilter = 'all' | 'user'
+import { CodeMonitorNode, type CodeMonitorNodeProps } from './CodeMonitoringNode'
+import type { CodeMonitoringPageProps } from './CodeMonitoringPage'
 
 interface CodeMonitorListProps
-    extends Required<Pick<CodeMonitoringPageProps, 'fetchUserCodeMonitors' | 'toggleCodeMonitorEnabled'>> {
+    extends TelemetryV2Props,
+        Required<
+            Pick<CodeMonitoringPageProps, 'fetchUserCodeMonitors' | 'fetchCodeMonitors' | 'toggleCodeMonitorEnabled'>
+        > {
     authenticatedUser: AuthenticatedUser | null
 }
 
-const CodeMonitorEmptyList: React.FunctionComponent<
-    React.PropsWithChildren<{ authenticatedUser: AuthenticatedUser | null }>
-> = ({ authenticatedUser }) => (
+const CodeMonitorEmptyList: React.FunctionComponent<React.PropsWithChildren<{}>> = () => (
     <div className="text-center">
         <H2 className="text-muted mb-2">No code monitors have been created.</H2>
-        {!authenticatedUser && (
-            <CodeMonitorSignUpLink
-                className="my-3"
-                eventName="SignUpPLGMonitor_EmptyList"
-                text="Get started with code monitors"
-                forDotcom={false}
-            />
-        )}
     </div>
 )
 
 export const CodeMonitorList: React.FunctionComponent<React.PropsWithChildren<CodeMonitorListProps>> = ({
     authenticatedUser,
     fetchUserCodeMonitors,
+    fetchCodeMonitors,
     toggleCodeMonitorEnabled,
 }) => {
     const location = useLocation()
-    const history = useHistory()
-    const [monitorListFilter, setMonitorListFilter] = useState<CodeMonitorFilter>('all')
 
     const queryConnection = useCallback(
         (args: Partial<ListUserCodeMonitorsVariables>) => {
@@ -64,38 +60,28 @@ export const CodeMonitorList: React.FunctionComponent<React.PropsWithChildren<Co
         [authenticatedUser, fetchUserCodeMonitors]
     )
 
+    const queryAllConnection = useCallback(
+        (args: Omit<Partial<ListAllCodeMonitorsVariables>, 'first'> & { first?: number | null }) =>
+            fetchCodeMonitors({
+                first: args.first ?? 10,
+                after: args.after ?? null,
+            }),
+        [fetchCodeMonitors]
+    )
+
     return (
         <>
             <div className="row mb-5">
-                <div className="d-flex flex-column col-2 mr-2">
-                    <H3 as={H2}>Filters</H3>
-                    <Button
-                        className="text-left"
-                        onClick={() => setMonitorListFilter('all')}
-                        variant={monitorListFilter === 'all' ? 'primary' : undefined}
-                    >
-                        All
-                    </Button>
-                    <Button
-                        className="text-left"
-                        onClick={() => setMonitorListFilter('user')}
-                        variant={monitorListFilter === 'user' ? 'primary' : undefined}
-                    >
-                        Your code monitors
-                    </Button>
-                </div>
                 <div className="d-flex flex-column w-100 col">
-                    <H3 className="mb-2">
-                        {`${monitorListFilter === 'all' ? 'All code monitors' : 'Your code monitors'}`}
-                    </H3>
+                    <div className="d-flex align-items-center justify-content-between">
+                        <H3 className="mb-2">Your code monitors</H3>
+                    </div>
                     <Container className="py-3">
                         <FilteredConnection<
                             CodeMonitorFields,
                             Omit<CodeMonitorNodeProps, 'node'>,
                             (ListUserCodeMonitorsResult['node'] & { __typename: 'User' })['monitors']
                         >
-                            location={location}
-                            history={history}
                             defaultFirst={10}
                             queryConnection={queryConnection}
                             hideSearch={true}
@@ -103,20 +89,53 @@ export const CodeMonitorList: React.FunctionComponent<React.PropsWithChildren<Co
                             nodeComponentProps={{
                                 location,
                                 toggleCodeMonitorEnabled,
+                                showOwner: false,
                             }}
                             noun="code monitor"
                             pluralNoun="code monitors"
                             noSummaryIfAllNodesVisible={true}
                             cursorPaging={true}
                             withCenteredSummary={true}
-                            emptyElement={<CodeMonitorEmptyList authenticatedUser={authenticatedUser} />}
+                            emptyElement={<CodeMonitorEmptyList />}
                             listComponent="div"
                         />
                     </Container>
                 </div>
             </div>
-            <div className="mt-5">
-                We want to hear your feedback! <Link to="mailto:feedback@sourcegraph.com">Share your thoughts</Link>
+            <div className="row mb-5">
+                <div className="d-flex flex-column w-100 col">
+                    {authenticatedUser?.siteAdmin && (
+                        <>
+                            <div className="d-flex align-items-center justify-content-between">
+                                <H3 className="mb-2">All code monitors</H3>
+                            </div>
+                            <Container className="py-3">
+                                <FilteredConnection<
+                                    CodeMonitorFields,
+                                    Omit<CodeMonitorNodeProps, 'node'>,
+                                    ListAllCodeMonitorsResult['monitors']['nodes']
+                                >
+                                    defaultFirst={10}
+                                    queryConnection={queryAllConnection}
+                                    hideSearch={true}
+                                    nodeComponent={CodeMonitorNode}
+                                    nodeComponentProps={{
+                                        location,
+                                        toggleCodeMonitorEnabled,
+                                        showOwner: authenticatedUser?.siteAdmin ?? false,
+                                    }}
+                                    noun="code monitor"
+                                    pluralNoun="code monitors"
+                                    noSummaryIfAllNodesVisible={true}
+                                    cursorPaging={true}
+                                    withCenteredSummary={true}
+                                    emptyElement={<CodeMonitorEmptyList />}
+                                    listComponent="div"
+                                />
+                            </Container>
+                        </>
+                    )}
+                </div>
             </div>
         </>
     )

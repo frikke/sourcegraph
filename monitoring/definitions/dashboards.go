@@ -12,7 +12,6 @@ func Default() Dashboards {
 	return []*monitoring.Dashboard{
 		Frontend(),
 		GitServer(),
-		GitHubProxy(),
 		Postgres(),
 		PreciseCodeIntelWorker(),
 		Redis(),
@@ -26,10 +25,13 @@ func Default() Dashboards {
 		Executor(),
 		Containers(),
 		CodeIntelAutoIndexing(),
-		CodeIntelUploads(),
-		CodeIntelPolicies(),
 		CodeIntelCodeNav(),
+		CodeIntelPolicies(),
+		CodeIntelRanking(),
+		CodeIntelUploads(),
 		Telemetry(),
+		OtelCollector(),
+		Embeddings(),
 	}
 }
 

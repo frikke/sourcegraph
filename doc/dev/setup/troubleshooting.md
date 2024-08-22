@@ -6,9 +6,8 @@ Noticing problems with <code>node_modules/</code> or package versions? Try
 running this command to clear the local package cache.
 
 ```bash
-yarn cache clean
-rm -rf node_modules
-yarn
+rm -rf node_modules ./client/*/node_modules
+pnpm install --force
 ```
 
 ## Node version out of date
@@ -28,10 +27,10 @@ This means the `frontend` server failed to start, for some reason. Look through 
 If you see this error when opening the app:
 
 ```
-500 Internal Server Error template: app.html:21:70: executing "app.html" at <version "styles/styl...>: error calling version: open ui/assets/styles/app.bundle.css: no such file or directory
+500 Internal Server Error template: app.html:21:70: executing "app.html" at <version "styles/styl...>: error calling version: open client/web/dist/main-ABCD.css: no such file or directory
 ```
 
-that means Webpack hasn't finished compiling the styles yet (it takes about 3 minutes). Simply wait a little while for a message from webpack like `web | Time: 180000ms` to appear in the terminal.
+that means the web builder hasn't finished compiling the styles yet (it takes about 3 minutes).
 
 ## Increase maximum available file descriptors.
 
@@ -89,29 +88,11 @@ If you see a certificate expiry warning you may need to delete your certificate 
 
 On macOS, the certificate can be removed from here: `~/Library/Application\ Support/Caddy/certificates/local/sourcegraph.test`
 
-## Running out of disk space
-
-If you see errors similar to this:
-
-```
-gitserver | ERROR cleanup: error freeing up space, error: only freed 1124101958 bytes, wanted to free 29905298227
-```
-
-You are probably low on disk space. By default it tries to cleanup when there is less than 10% of available disk space.
-You can override that by setting this env variable:
-
-```bash
-# means 5%. You may want to put that into .bashrc for convinience
-SRC_REPOS_DESIRED_PERCENT_FREE=5
-```
-
 ## CPU/RAM/bandwidth/battery usage
 
 On first install, the program will use quite a bit of bandwidth to concurrently download all the Go and Node packages. After packages have been installed, the Javascript assets will be compiled into a single Javascript file, which can take up to 5 minutes, and can be heavy on the CPU at times.
 
 After the initial install/compile is complete, the Docker for Mac binary uses about 1.5GB of RAM. The numerous different Go binaries don't use that much RAM or CPU each, about 5MB of RAM each.
-
-If you notice heavy battery and CPU usage running `gulp --color watch`, please first [double check that Spotlight is not indexing your Sourcegraph repository](https://www.macobserver.com/tips/how-to/stop-spotlight-indexing/), as this can lead to additional, unnecessary, poll events.
 
 If you're running macOS 10.15.x (Catalina) reinstalling the Xcode Command Line Tools may be necessary as follows:
 

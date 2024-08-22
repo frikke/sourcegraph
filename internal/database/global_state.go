@@ -83,7 +83,6 @@ SELECT coalesce(bool_or(gs.initialized), false) FROM global_state gs
 `
 
 var globalStateGetQuery = fmt.Sprintf(`
--- source: internal/database/global_state.go:Get
 SELECT (%s) AS site_id, (%s) AS initialized
 `,
 	globalStateSiteIDFragment,
@@ -95,12 +94,7 @@ func (g *globalStateStore) SiteInitialized(ctx context.Context) (bool, error) {
 	return alreadyInitialized, err
 }
 
-var globalStateSiteInitializedQuery = fmt.Sprintf(`
--- source: internal/database/global_state.go:SiteInitialized
-%s
-`,
-	globalStateInitializedFragment,
-)
+var globalStateSiteInitializedQuery = globalStateInitializedFragment
 
 func (g *globalStateStore) EnsureInitialized(ctx context.Context) (_ bool, err error) {
 	if err := g.initializeDBState(ctx); err != nil {
@@ -126,7 +120,6 @@ func (g *globalStateStore) EnsureInitialized(ctx context.Context) (_ bool, err e
 }
 
 var globalStateEnsureInitializedQuery = `
--- source: internal/database/global_state.go:EnsureInitialized
 UPDATE global_state SET initialized = true
 `
 
@@ -136,7 +129,6 @@ func (g *globalStateStore) initializeDBState(ctx context.Context) (err error) {
 		return err
 	}
 	defer func() { err = tx.Done(err) }()
-
 	if err := tx.Exec(ctx, sqlf.Sprintf(globalStateInitializeDBStateUpdateQuery)); err != nil {
 		return err
 	}
@@ -152,21 +144,18 @@ func (g *globalStateStore) initializeDBState(ctx context.Context) (err error) {
 }
 
 var globalStateInitializeDBStateUpdateQuery = fmt.Sprintf(`
--- source: internal/database/global_state.go:initializeDBState
 UPDATE global_state SET initialized = (%s)
 `,
 	globalStateInitializedFragment,
 )
 
 var globalStateInitializeDBStatePruneQuery = fmt.Sprintf(`
--- source: internal/database/global_state.go:initializeDBState
 DELETE FROM global_state WHERE site_id NOT IN (%s)
 `,
 	globalStateSiteIDFragment,
 )
 
 var globalStateInitializeDBStateInsertIfNotExistsQuery = `
--- source: internal/database/global_state.go:initializeDBState
 INSERT INTO global_state(
 	site_id,
 	initialized

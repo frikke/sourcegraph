@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/sourcegraph/sourcegraph/cmd/searcher/protocol"
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/search"
 	"github.com/sourcegraph/sourcegraph/internal/search/job"
@@ -17,6 +16,7 @@ import (
 	"github.com/sourcegraph/sourcegraph/internal/search/result"
 	"github.com/sourcegraph/sourcegraph/internal/search/searcher"
 	"github.com/sourcegraph/sourcegraph/internal/search/streaming"
+	"github.com/sourcegraph/sourcegraph/internal/searcher/protocol"
 )
 
 func TestFileContainsFilterJob(t *testing.T) {
@@ -256,21 +256,22 @@ func TestFileContainsFilterJob(t *testing.T) {
 				s.Send(tc.inputEvent)
 				return nil, nil
 			})
-			searcher.MockSearch = func(_ context.Context, _ api.RepoName, _ api.RepoID, _ api.CommitID, p *search.TextPatternInfo, _ time.Duration, onMatches func([]*protocol.FileMatch)) (limitHit bool, err error) {
-				if len(p.IncludePatterns) > 0 {
-					onMatches([]*protocol.FileMatch{{Path: "file4"}})
+			searcher.MockSearch = func(_ context.Context, _ api.RepoName, _ api.RepoID, _ api.CommitID, p *search.TextPatternInfo, _ time.Duration, onMatch func(*protocol.FileMatch)) (limitHit bool, err error) {
+				if len(p.IncludePaths) > 0 {
+					onMatch(&protocol.FileMatch{Path: "file4"})
 				}
 				return false, nil
 			}
-			var result streaming.SearchEvent
+			var resultEvent streaming.SearchEvent
 			streamCollector := streaming.StreamFunc(func(ev streaming.SearchEvent) {
-				result = ev
+				resultEvent = ev
 			})
-			j := NewFileContainsFilterJob(tc.includePatterns, tc.originalPattern, tc.caseSensitive, childJob)
+			j, err := NewFileContainsFilterJob(tc.includePatterns, tc.originalPattern, tc.caseSensitive, childJob)
+			require.NoError(t, err)
 			alert, err := j.Run(context.Background(), job.RuntimeClients{}, streamCollector)
 			require.Nil(t, alert)
 			require.NoError(t, err)
-			require.Equal(t, tc.outputEvent, result)
+			require.Equal(t, tc.outputEvent, resultEvent)
 		})
 	}
 }

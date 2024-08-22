@@ -1,31 +1,35 @@
 import React, { useCallback, useEffect, useMemo } from 'react'
 
 import { mdiPlus } from '@mdi/js'
-import { RouteComponentProps } from 'react-router'
-import { Observable, Subject } from 'rxjs'
+import { Subject, type Observable } from 'rxjs'
 import { map } from 'rxjs/operators'
 
 import { dataOrThrowErrors, gql } from '@sourcegraph/http-client'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { Container, PageHeader, Button, Link, Icon, Text } from '@sourcegraph/wildcard'
+import type { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { Button, ButtonLink, Container, Icon, PageHeader, Text, Tooltip } from '@sourcegraph/wildcard'
 
 import { requestGraphQL } from '../../../backend/graphql'
 import { FilteredConnection } from '../../../components/FilteredConnection'
 import { PageTitle } from '../../../components/PageTitle'
-import {
+import type {
     AccessTokenFields,
     AccessTokensConnectionFields,
     AccessTokensResult,
     AccessTokensVariables,
     CreateAccessTokenResult,
 } from '../../../graphql-operations'
-import { accessTokenFragment, AccessTokenNode, AccessTokenNodeProps } from '../../../settings/tokens/AccessTokenNode'
-import { UserSettingsAreaRouteContext } from '../UserSettingsArea'
+import {
+    AccessTokenNode,
+    accessTokenFragment,
+    type AccessTokenNodeProps,
+} from '../../../settings/tokens/AccessTokenNode'
+import type { UserSettingsAreaRouteContext } from '../UserSettingsArea'
 
 interface Props
     extends Pick<UserSettingsAreaRouteContext, 'authenticatedUser' | 'user'>,
-        Pick<RouteComponentProps<{}>, 'history' | 'location' | 'match'>,
-        TelemetryProps {
+        TelemetryProps,
+        TelemetryV2Props {
     /**
      * The newly created token, if any. This component must call onDidPresentNewToken
      * when it is finished presenting the token secret to the user.
@@ -44,17 +48,16 @@ interface Props
  */
 export const UserSettingsTokensPage: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
     telemetryService,
-    history,
-    location,
-    match,
     authenticatedUser,
     user,
     newToken,
     onDidPresentNewToken,
+    telemetryRecorder,
 }) => {
     useEffect(() => {
         telemetryService.logViewEvent('UserSettingsTokens')
-    }, [telemetryService])
+        telemetryRecorder.recordEvent('settings.tokens', 'view')
+    }, [telemetryService, telemetryRecorder])
 
     useEffect(
         () => () => {
@@ -71,11 +74,14 @@ export const UserSettingsTokensPage: React.FunctionComponent<React.PropsWithChil
     }, [accessTokenUpdates])
 
     const queryUserAccessTokens = useCallback(
-        (args: { first?: number }) => queryAccessTokens({ first: args.first ?? null, user: user.id }),
+        (args: { first?: number | null }) => queryAccessTokens({ first: args.first ?? null, user: user.id }),
         [user.id]
     )
 
     const siteAdminViewingOtherUser = authenticatedUser && authenticatedUser.id !== user.id
+    const accessTokensEnabled =
+        (authenticatedUser.siteAdmin && window.context.accessTokensAllow === 'site-admin-create') ||
+        (!siteAdminViewingOtherUser && window.context.accessTokensAllow === 'all-users-create')
 
     return (
         <div className="user-settings-tokens-page">
@@ -85,11 +91,26 @@ export const UserSettingsTokensPage: React.FunctionComponent<React.PropsWithChil
                 path={[{ text: 'Access tokens' }]}
                 description="Access tokens may be used to access the Sourcegraph API."
                 actions={
-                    !siteAdminViewingOtherUser && (
-                        <Button to={`${match.url}/new`} variant="primary" as={Link}>
-                            <Icon role="img" aria-hidden={true} svgPath={mdiPlus} /> Generate new token
-                        </Button>
-                    )
+                    <>
+                        {accessTokensEnabled && (
+                            <ButtonLink variant="primary" className="ml-2" to="new">
+                                <Icon aria-hidden={true} svgPath={mdiPlus} /> Generate new token
+                            </ButtonLink>
+                        )}
+                        {!accessTokensEnabled && (
+                            <Tooltip
+                                content={
+                                    siteAdminViewingOtherUser
+                                        ? 'Access token creation for other users is disabled in site configuration'
+                                        : 'Access token creation is disabled in site configuration'
+                                }
+                            >
+                                <Button variant="primary" className="ml-2" disabled={true}>
+                                    <Icon aria-hidden={true} svgPath={mdiPlus} /> Generate new token
+                                </Button>
+                            </Tooltip>
+                        )}
+                    </>
                 }
                 className="mb-3"
             />
@@ -108,8 +129,6 @@ export const UserSettingsTokensPage: React.FunctionComponent<React.PropsWithChil
                     updates={accessTokenUpdates}
                     hideSearch={true}
                     noSummaryIfAllNodesVisible={true}
-                    history={history}
-                    location={location}
                     emptyElement={
                         <Text alignment="center" className="text-muted w-100 mb-0">
                             You don't have any access tokens.
@@ -153,7 +172,7 @@ const queryAccessTokens = (variables: AccessTokensVariables): Observable<AccessT
                 throw new Error('User not found')
             }
             if (data.node.__typename !== 'User') {
-                throw new Error(`Mode is a ${data.node.__typename}, not a User`)
+                throw new Error(`Node is a ${data.node.__typename}, not a User`)
             }
             return data.node.accessTokens
         })

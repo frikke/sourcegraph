@@ -2,13 +2,16 @@ package repos
 
 import (
 	"context"
+	"net/url"
 	"path"
 	"sort"
-
-	"github.com/goware/urlx"
+	"strconv"
+	"strings"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
+	"github.com/sourcegraph/sourcegraph/internal/conf/reposource"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc"
+	"github.com/sourcegraph/sourcegraph/internal/extsvc/auth"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc/gerrit"
 	"github.com/sourcegraph/sourcegraph/internal/httpcli"
 	"github.com/sourcegraph/sourcegraph/internal/jsonc"
@@ -20,10 +23,18 @@ import (
 // A GerritSource yields repositories from a single Gerrit connection configured
 // in Sourcegraph via the external services configuration.
 type GerritSource struct {
-	svc       *types.ExternalService
-	cli       *gerrit.Client
-	serviceID string
-	perPage   int
+	svc             *types.ExternalService
+	cli             gerrit.Client
+	serviceID       string
+	perPage         int
+	private         bool
+	allowedProjects map[string]struct{}
+	// disallowedProjects is a set of project names that will never be added
+	// by this source. This takes precedence over allowedProjects.
+	disallowedProjects map[string]struct{}
+	// If true, the connection is configured to use SSH instead of HTTPS.
+	ssh                   bool
+	repositoryPathPattern string
 }
 
 // NewGerritSource returns a new GerritSource from the given external service.
@@ -46,23 +57,60 @@ func NewGerritSource(ctx context.Context, svc *types.ExternalService, cf *httpcl
 		return nil, err
 	}
 
-	cli, err := gerrit.NewClient(svc.URN(), &c, httpCli)
+	u, err := url.Parse(c.Url)
 	if err != nil {
 		return nil, err
 	}
 
+	cli, err := gerrit.NewClient(svc.URN(), u, &gerrit.AccountCredentials{
+		Username: c.Username,
+		Password: c.Password,
+	}, httpCli)
+	if err != nil {
+		return nil, err
+	}
+
+	allowedProjects := make(map[string]struct{})
+	for _, project := range c.Projects {
+		allowedProjects[project] = struct{}{}
+	}
+
+	disallowedProjects := make(map[string]struct{})
+	for _, project := range c.Exclude {
+		disallowedProjects[project.Name] = struct{}{}
+	}
+
 	return &GerritSource{
-		svc:       svc,
-		cli:       cli,
-		serviceID: extsvc.NormalizeBaseURL(cli.URL).String(),
-		perPage:   100,
+		svc:                   svc,
+		cli:                   cli,
+		allowedProjects:       allowedProjects,
+		disallowedProjects:    disallowedProjects,
+		serviceID:             extsvc.NormalizeBaseURL(cli.GetURL()).String(),
+		perPage:               100,
+		private:               c.Authorization != nil,
+		ssh:                   c.GitURLType == "ssh",
+		repositoryPathPattern: c.RepositoryPathPattern,
 	}, nil
+}
+
+// CheckConnection at this point assumes availability and relies on errors returned
+// from the subsequent calls. This is going to be expanded as part of issue #44683
+// to actually only return true if the source can serve requests.
+func (s *GerritSource) CheckConnection(ctx context.Context) error {
+	return nil
 }
 
 // ListRepos returns all Gerrit repositories configured with this GerritSource's config.
 func (s *GerritSource) ListRepos(ctx context.Context, results chan SourceResult) {
 	args := gerrit.ListProjectsArgs{
-		Cursor: &gerrit.Pagination{PerPage: s.perPage, Page: 1},
+		Cursor:           &gerrit.Pagination{PerPage: s.perPage, Page: 1},
+		OnlyCodeProjects: true,
+	}
+
+	sshHostname, sshPort, err := s.cli.GetSSHInfo(ctx)
+	if err != nil {
+		results <- SourceResult{Source: s, Err: errors.Wrap(err, "failed to get ssh info for Gerrit instance")}
+		return
 	}
 
 	for {
@@ -73,21 +121,27 @@ func (s *GerritSource) ListRepos(ctx context.Context, results chan SourceResult)
 		}
 
 		// Unfortunately, because Gerrit API responds with a map, we have to sort it to maintain proper ordering
-		pageAsMap := map[string]*gerrit.Project(*page)
-		pageKeySlice := make([]string, 0, len(pageAsMap))
+		pageKeySlice := make([]string, 0, len(page))
 
-		for p := range pageAsMap {
+		for p := range page {
 			pageKeySlice = append(pageKeySlice, p)
 		}
 
 		sort.Strings(pageKeySlice)
 
 		for _, p := range pageKeySlice {
-			repo, err := s.makeRepo(p, pageAsMap[p])
-			if err != nil {
-				results <- SourceResult{Source: s, Err: err}
-				return
+			if _, ok := s.disallowedProjects[p]; ok {
+				continue
 			}
+
+			// Only check if the project is allowed if we have a list of allowed projects
+			if len(s.allowedProjects) != 0 {
+				if _, ok := s.allowedProjects[p]; !ok {
+					continue
+				}
+			}
+
+			repo := s.makeRepo(page[p], s.cli.GetURL(), sshHostname, sshPort)
 			results <- SourceResult{Source: s, Repo: repo}
 		}
 
@@ -104,18 +158,35 @@ func (s *GerritSource) ExternalServices() types.ExternalServices {
 	return types.ExternalServices{s.svc}
 }
 
-func (s *GerritSource) makeRepo(projectName string, p *gerrit.Project) (*types.Repo, error) {
+func (s *GerritSource) makeRepo(p *gerrit.Project, instanceHTTPURL *url.URL, sshHostname string, sshPort int) *types.Repo {
+	u := *instanceHTTPURL
+	u.User = nil
+	// Gerrit encodes slashes in IDs, so need to decode them.
+	decodedName := strings.ReplaceAll(p.ID, "%2F", "/")
+	// The 'a' is for cloning with auth.
+	u.Path = path.Join("a", decodedName)
+
 	urn := s.svc.URN()
 
-	fullURL, err := urlx.Parse(s.cli.URL.String() + projectName)
-	if err != nil {
-		return nil, err
+	p.HTTPURLToRepo = u.String()
+	p.SSHURLToRepo = "ssh://" + sshHostname + ":" + strconv.Itoa(sshPort) + "/" + decodedName
+
+	cloneURL := p.HTTPURLToRepo
+	if s.ssh {
+		cloneURL = p.SSHURLToRepo
 	}
 
-	name := path.Join(fullURL.Host, fullURL.Path)
 	return &types.Repo{
-		Name:        api.RepoName(name),
-		URI:         name,
+		Name: reposource.GerritRepoName(
+			s.repositoryPathPattern,
+			u.Host,
+			decodedName,
+		),
+		URI: string(reposource.GerritRepoName(
+			"",
+			u.Host,
+			decodedName,
+		)),
 		Description: p.Description,
 		Fork:        p.Parent != "",
 		ExternalRepo: api.ExternalRepoSpec{
@@ -126,9 +197,24 @@ func (s *GerritSource) makeRepo(projectName string, p *gerrit.Project) (*types.R
 		Sources: map[string]*types.SourceInfo{
 			urn: {
 				ID:       urn,
-				CloneURL: fullURL.String(),
+				CloneURL: cloneURL,
 			},
 		},
 		Metadata: p,
-	}, nil
+		Private:  s.private,
+	}
+}
+
+// WithAuthenticator returns a copy of the original Source configured to use the
+// given authenticator, provided that authenticator type is supported by the
+// code host.
+func (s *GerritSource) WithAuthenticator(a auth.Authenticator) (Source, error) {
+	sc := *s
+	cli, err := sc.cli.WithAuthenticator(a)
+	if err != nil {
+		return nil, err
+	}
+	sc.cli = cli
+
+	return &sc, nil
 }

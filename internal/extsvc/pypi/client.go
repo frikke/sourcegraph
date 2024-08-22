@@ -22,7 +22,6 @@
 package pypi
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -33,10 +32,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
+
+	"golang.org/x/net/html"
+
+	"github.com/sourcegraph/log"
 
 	"github.com/sourcegraph/sourcegraph/internal/conf/reposource"
-	"golang.org/x/net/html"
 
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
 	"github.com/sourcegraph/sourcegraph/internal/httpcli"
@@ -45,36 +46,44 @@ import (
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
-// rateLimitingWaitThreshold is maximum rate limiting wait duration after which
-// a warning log is produced to help site admins debug why syncing may be taking
-// longer than expected.
-const rateLimitingWaitThreshold = 200 * time.Millisecond
-
 type Client struct {
 	// A list of PyPI proxies. Each url should point to the root of the simple-API.
 	// For example for pypi.org the url should be https://pypi.org/simple with or
 	// without a trailing slash.
-	urls []string
-	cli  httpcli.Doer
+	urls           []string
+	uncachedClient httpcli.Doer
+	cachedClient   httpcli.Doer
 
 	// Self-imposed rate-limiter. pypi.org does not impose a rate limiting policy.
 	limiter *ratelimit.InstrumentedLimiter
 }
 
-func NewClient(urn string, urls []string, cli httpcli.Doer) *Client {
-	return &Client{
-		urls:    urls,
-		cli:     cli,
-		limiter: ratelimit.DefaultRegistry.Get(urn),
+func NewClient(urn string, urls []string, httpfactory *httpcli.Factory) (*Client, error) {
+	uncached, err := httpfactory.Doer(httpcli.NewCachedTransportOpt(httpcli.NoopCache{}, false))
+	if err != nil {
+		return nil, err
 	}
+	cached, err := httpfactory.Doer()
+	if err != nil {
+		return nil, err
+	}
+
+	return &Client{
+		urls:           urls,
+		uncachedClient: uncached,
+		cachedClient:   cached,
+		limiter:        ratelimit.NewInstrumentedLimiter(urn, ratelimit.NewGlobalRateLimiter(log.Scoped("PyPiClient"), urn)),
+	}, nil
 }
 
 // Project returns the Files of the simple-API /<project>/ endpoint.
 func (c *Client) Project(ctx context.Context, project reposource.PackageName) ([]File, error) {
-	data, err := c.get(ctx, reposource.PackageName(normalize(string(project))))
+	data, err := c.get(ctx, c.cachedClient, reposource.PackageName(normalize(string(project))))
 	if err != nil {
 		return nil, errors.Wrap(err, "PyPI")
 	}
+	defer data.Close()
+
 	return parse(data)
 }
 
@@ -189,10 +198,10 @@ type File struct {
 
 // parse parses the output of Client.Project into a list of files. Anchor tags
 // without href are ignored.
-func parse(b []byte) ([]File, error) {
+func parse(b io.Reader) ([]File, error) {
 	var files []File
 
-	z := html.NewTokenizer(bytes.NewReader(b))
+	z := html.NewTokenizer(b)
 
 	// We want to iterate over the anchor tags. Quoting from PEP503: "[The project]
 	// URL must respond with a valid HTML5 page with a single anchor element per
@@ -269,7 +278,7 @@ OUTER:
 }
 
 // Download downloads a file located at url, respecting the rate limit.
-func (c *Client) Download(ctx context.Context, url string) ([]byte, error) {
+func (c *Client) Download(ctx context.Context, url string) (io.ReadCloser, error) {
 	if err := c.limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
@@ -279,7 +288,7 @@ func (c *Client) Download(ctx context.Context, url string) ([]byte, error) {
 		return nil, err
 	}
 
-	b, err := c.do(req)
+	b, err := c.do(c.uncachedClient, req)
 	if err != nil {
 		return nil, errors.Wrap(err, "PyPI")
 	}
@@ -405,7 +414,7 @@ func ToWheel(f File) (*Wheel, error) {
 	}
 }
 
-func (c *Client) get(ctx context.Context, project reposource.PackageName) (respBody []byte, err error) {
+func (c *Client) get(ctx context.Context, doer httpcli.Doer, project reposource.PackageName) (respBody io.ReadCloser, err error) {
 	var (
 		reqURL *url.URL
 		req    *http.Request
@@ -433,7 +442,7 @@ func (c *Client) get(ctx context.Context, project reposource.PackageName) (respB
 			return nil, err
 		}
 
-		respBody, err = c.do(req)
+		respBody, err = c.do(doer, req)
 		if err == nil || !errcode.IsNotFound(err) {
 			break
 		}
@@ -442,24 +451,23 @@ func (c *Client) get(ctx context.Context, project reposource.PackageName) (respB
 	return respBody, err
 }
 
-func (c *Client) do(req *http.Request) ([]byte, error) {
-	resp, err := c.cli.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-
-	bs, err := io.ReadAll(resp.Body)
+func (c *Client) do(doer httpcli.Doer, req *http.Request) (io.ReadCloser, error) {
+	resp, err := doer.Do(req)
 	if err != nil {
 		return nil, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+
+		bs, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, &Error{path: req.URL.Path, code: resp.StatusCode, message: fmt.Sprintf("failed to read non-200 body: %v", err)}
+		}
 		return nil, &Error{path: req.URL.Path, code: resp.StatusCode, message: string(bs)}
 	}
 
-	return bs, nil
+	return resp.Body, nil
 }
 
 type Error struct {

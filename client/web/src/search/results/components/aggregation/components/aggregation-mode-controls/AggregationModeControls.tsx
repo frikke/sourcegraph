@@ -1,11 +1,13 @@
-import { FC, HTMLAttributes } from 'react'
+import type { FC, HTMLAttributes } from 'react'
 
 import classNames from 'classnames'
+import { useDebouncedCallback } from 'use-debounce'
 
 import { SearchAggregationMode } from '@sourcegraph/shared/src/graphql-operations'
 import { Button, Tooltip } from '@sourcegraph/wildcard'
 
-import { SearchAggregationModeAvailability } from '../../../../../../graphql-operations'
+import { useFeatureFlag } from '../../../../../../featureFlags/useFeatureFlag'
+import type { SearchAggregationModeAvailability } from '../../../../../../graphql-operations'
 
 import styles from './AggregationModeControls.module.scss'
 
@@ -20,6 +22,9 @@ interface AggregationModeControlsProps extends HTMLAttributes<HTMLDivElement> {
 
 export const AggregationModeControls: FC<AggregationModeControlsProps> = props => {
     const { mode, loading, availability = [], size, className, onModeChange, onModeHover, ...attributes } = props
+
+    const debouncedOnModeHover = useDebouncedCallback(onModeHover, 1000)
+    const [enableRepositoryMetadata] = useFeatureFlag('repository-metadata', true)
 
     const availabilityGroups = availability.reduce((store, availability) => {
         store[availability.mode] = availability
@@ -42,8 +47,12 @@ export const AggregationModeControls: FC<AggregationModeControlsProps> = props =
         return isAvailable ?? true
     }
 
-    const handleModeHover = (aggregationMode: SearchAggregationMode): void => {
-        onModeHover(aggregationMode, isModeAvailable(aggregationMode))
+    const handleModeEnter = (aggregationMode: SearchAggregationMode): void => {
+        debouncedOnModeHover(aggregationMode, isModeAvailable(aggregationMode))
+    }
+
+    const handleMouseLeave = (): void => {
+        debouncedOnModeHover.cancel()
     }
 
     return (
@@ -55,7 +64,8 @@ export const AggregationModeControls: FC<AggregationModeControlsProps> = props =
             <div
                 // Div onMouseEnter is needed here because button with disabled true doesn't
                 // emit any mouse or pointer events.
-                onMouseEnter={() => handleModeHover(SearchAggregationMode.REPO)}
+                onMouseEnter={() => handleModeEnter(SearchAggregationMode.REPO)}
+                onMouseLeave={handleMouseLeave}
             >
                 <Tooltip content={availabilityGroups[SearchAggregationMode.REPO]?.reasonUnavailable}>
                     <Button
@@ -71,7 +81,7 @@ export const AggregationModeControls: FC<AggregationModeControlsProps> = props =
                 </Tooltip>
             </div>
 
-            <div onMouseEnter={() => handleModeHover(SearchAggregationMode.PATH)}>
+            <div onMouseEnter={() => handleModeEnter(SearchAggregationMode.PATH)} onMouseLeave={handleMouseLeave}>
                 <Tooltip content={availabilityGroups[SearchAggregationMode.PATH]?.reasonUnavailable}>
                     <Button
                         variant="secondary"
@@ -86,7 +96,7 @@ export const AggregationModeControls: FC<AggregationModeControlsProps> = props =
                 </Tooltip>
             </div>
 
-            <div onMouseEnter={() => handleModeHover(SearchAggregationMode.AUTHOR)}>
+            <div onMouseEnter={() => handleModeEnter(SearchAggregationMode.AUTHOR)} onMouseLeave={handleMouseLeave}>
                 <Tooltip content={availabilityGroups[SearchAggregationMode.AUTHOR]?.reasonUnavailable}>
                     <Button
                         variant="secondary"
@@ -101,7 +111,10 @@ export const AggregationModeControls: FC<AggregationModeControlsProps> = props =
                 </Tooltip>
             </div>
 
-            <div onMouseEnter={() => handleModeHover(SearchAggregationMode.CAPTURE_GROUP)}>
+            <div
+                onMouseEnter={() => handleModeEnter(SearchAggregationMode.CAPTURE_GROUP)}
+                onMouseLeave={handleMouseLeave}
+            >
                 <Tooltip content={availabilityGroups[SearchAggregationMode.CAPTURE_GROUP]?.reasonUnavailable}>
                     <Button
                         variant="secondary"
@@ -115,6 +128,25 @@ export const AggregationModeControls: FC<AggregationModeControlsProps> = props =
                     </Button>
                 </Tooltip>
             </div>
+            {enableRepositoryMetadata && (
+                <div
+                    onMouseEnter={() => handleModeEnter(SearchAggregationMode.REPO_METADATA)}
+                    onMouseLeave={handleMouseLeave}
+                >
+                    <Tooltip content={availabilityGroups[SearchAggregationMode.REPO_METADATA]?.reasonUnavailable}>
+                        <Button
+                            variant="secondary"
+                            size={size}
+                            outline={mode !== SearchAggregationMode.REPO_METADATA}
+                            disabled={!isModeAvailable(SearchAggregationMode.REPO_METADATA)}
+                            data-testid="repoMetadata-aggregation-mode"
+                            onClick={() => onModeChange(SearchAggregationMode.REPO_METADATA)}
+                        >
+                            Repo metadata
+                        </Button>
+                    </Tooltip>
+                </div>
+            )}
         </div>
     )
 }

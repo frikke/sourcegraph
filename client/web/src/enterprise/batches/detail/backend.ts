@@ -1,11 +1,12 @@
-import { EMPTY, Observable } from 'rxjs'
+import type { QueryResult, QueryTuple } from '@apollo/client'
+import { EMPTY, lastValueFrom, type Observable } from 'rxjs'
 import { expand, map, reduce } from 'rxjs/operators'
 
-import { dataOrThrowErrors, gql } from '@sourcegraph/http-client'
+import { dataOrThrowErrors, gql, useLazyQuery, useQuery } from '@sourcegraph/http-client'
 
 import { diffStatFields, fileDiffFields } from '../../../backend/diff'
 import { requestGraphQL } from '../../../backend/graphql'
-import {
+import type {
     BatchChangeChangesetsVariables,
     BatchChangeChangesetsResult,
     BatchChangeFields,
@@ -18,7 +19,6 @@ import {
     SyncChangesetVariables,
     Scalars,
     ChangesetCountsOverTimeVariables,
-    ChangesetCountsOverTimeFields,
     ChangesetCountsOverTimeResult,
     DeleteBatchChangeResult,
     ChangesetDiffResult,
@@ -47,6 +47,8 @@ import {
     AvailableBulkOperationsVariables,
     AvailableBulkOperationsResult,
     BulkOperationType,
+    GetChangesetsByIDsResult,
+    GetChangesetsByIDsVariables,
 } from '../../../graphql-operations'
 import { VIEWER_BATCH_CHANGES_CODE_HOST_FRAGMENT } from '../MissingCredentialsAlert'
 
@@ -61,6 +63,12 @@ const changesetsStatsFragment = gql`
         open
         unpublished
         archived
+        isCompleted
+        percentComplete
+        failed
+        retrying
+        scheduled
+        processing
     }
 `
 
@@ -80,6 +88,7 @@ const bulkOperationFragment = gql`
                         url
                     }
                     repository {
+                        id
                         name
                         url
                     }
@@ -157,6 +166,24 @@ const batchChangeFragment = gql`
         currentSpec {
             id
             originalInput
+            description {
+                __typename
+                name
+            }
+            files {
+                totalCount
+                pageInfo {
+                    endCursor
+                    hasNextPage
+                }
+                nodes {
+                    id
+                    name
+                    binary
+                    byteSize
+                    url
+                }
+            }
             source
             supersedingBatchSpec {
                 createdAt
@@ -294,6 +321,11 @@ export const externalChangesetFieldsFragment = gql`
         createdAt
         updatedAt
         nextSyncAt
+        commitVerification {
+            ... on GitHubCommitVerification {
+                verified
+            }
+        }
         currentSpec {
             id
             type
@@ -427,41 +459,43 @@ export const queryChangesets = ({
     )
 
 export async function syncChangeset(changeset: Scalars['ID']): Promise<void> {
-    const result = await requestGraphQL<SyncChangesetResult, SyncChangesetVariables>(
-        gql`
-            mutation SyncChangeset($changeset: ID!) {
-                syncChangeset(changeset: $changeset) {
-                    alwaysNil
+    const result = await lastValueFrom(
+        requestGraphQL<SyncChangesetResult, SyncChangesetVariables>(
+            gql`
+                mutation SyncChangeset($changeset: ID!) {
+                    syncChangeset(changeset: $changeset) {
+                        alwaysNil
+                    }
                 }
-            }
-        `,
-        { changeset }
-    ).toPromise()
+            `,
+            { changeset }
+        )
+    )
     dataOrThrowErrors(result)
 }
 
 export async function reenqueueChangeset(changeset: Scalars['ID']): Promise<ChangesetFields> {
-    return requestGraphQL<ReenqueueChangesetResult, ReenqueueChangesetVariables>(
-        gql`
-            mutation ReenqueueChangeset($changeset: ID!) {
-                reenqueueChangeset(changeset: $changeset) {
-                    ...ChangesetFields
+    return lastValueFrom(
+        requestGraphQL<ReenqueueChangesetResult, ReenqueueChangesetVariables>(
+            gql`
+                mutation ReenqueueChangeset($changeset: ID!) {
+                    reenqueueChangeset(changeset: $changeset) {
+                        ...ChangesetFields
+                    }
                 }
-            }
 
-            ${changesetFieldsFragment}
-        `,
-        { changeset }
-    )
-        .pipe(
+                ${changesetFieldsFragment}
+            `,
+            { changeset }
+        ).pipe(
             map(dataOrThrowErrors),
             map(data => data.reenqueueChangeset)
         )
-        .toPromise()
+    )
 }
 
 // Because thats the name in the API:
-// eslint-disable-next-line unicorn/prevent-abbreviations
+
 export const gitRefSpecFields = gql`
     fragment GitRefSpecFields on GitRevSpec {
         __typename
@@ -568,50 +602,46 @@ const changesetCountsOverTimeFragment = gql`
     }
 `
 
-export const queryChangesetCountsOverTime = ({
-    batchChange,
-    includeArchived,
-}: ChangesetCountsOverTimeVariables): Observable<ChangesetCountsOverTimeFields[]> =>
-    requestGraphQL<ChangesetCountsOverTimeResult, ChangesetCountsOverTimeVariables>(
-        gql`
-            query ChangesetCountsOverTime($batchChange: ID!, $includeArchived: Boolean!) {
-                node(id: $batchChange) {
-                    __typename
-                    ... on BatchChange {
-                        changesetCountsOverTime(includeArchived: $includeArchived) {
-                            ...ChangesetCountsOverTimeFields
-                        }
-                    }
+export const CHANGESET_COUNTS_OVER_TIME = gql`
+    query ChangesetCountsOverTime($batchChange: ID!, $includeArchived: Boolean!) {
+        node(id: $batchChange) {
+            __typename
+            ... on BatchChange {
+                changesetCountsOverTime(includeArchived: $includeArchived) {
+                    ...ChangesetCountsOverTimeFields
                 }
             }
+        }
+    }
 
-            ${changesetCountsOverTimeFragment}
-        `,
-        { batchChange, includeArchived }
-    ).pipe(
-        map(dataOrThrowErrors),
-        map(({ node }) => {
-            if (!node) {
-                throw new Error(`BatchChange with ID ${batchChange} does not exist`)
-            }
-            if (node.__typename !== 'BatchChange') {
-                throw new Error(`The given ID is a ${node.__typename}, not a BatchChange`)
-            }
-            return node.changesetCountsOverTime
-        })
-    )
+    ${changesetCountsOverTimeFragment}
+`
+
+export const useChangesetCountsOverTime = (
+    batchChange: Scalars['ID'],
+    includeArchived: boolean
+): QueryResult<ChangesetCountsOverTimeResult, ChangesetCountsOverTimeVariables> =>
+    useQuery<ChangesetCountsOverTimeResult, ChangesetCountsOverTimeVariables>(CHANGESET_COUNTS_OVER_TIME, {
+        variables: {
+            batchChange,
+            includeArchived,
+        },
+        fetchPolicy: 'cache-and-network',
+    })
 
 export async function deleteBatchChange(batchChange: Scalars['ID']): Promise<void> {
-    const result = await requestGraphQL<DeleteBatchChangeResult, DeleteBatchChangeVariables>(
-        gql`
-            mutation DeleteBatchChange($batchChange: ID!) {
-                deleteBatchChange(batchChange: $batchChange) {
-                    alwaysNil
+    const result = await lastValueFrom(
+        requestGraphQL<DeleteBatchChangeResult, DeleteBatchChangeVariables>(
+            gql`
+                mutation DeleteBatchChange($batchChange: ID!) {
+                    deleteBatchChange(batchChange: $batchChange) {
+                        alwaysNil
+                    }
                 }
-            }
-        `,
-        { batchChange }
-    ).toPromise()
+            `,
+            { batchChange }
+        )
+    )
     dataOrThrowErrors(result)
 }
 
@@ -619,6 +649,7 @@ const changesetDiffFragment = gql`
     fragment ChangesetDiffFields on ExternalChangeset {
         currentSpec {
             description {
+                __typename
                 ... on GitBranchChangesetDescription {
                     commits {
                         diff
@@ -630,20 +661,20 @@ const changesetDiffFragment = gql`
 `
 
 export async function getChangesetDiff(changeset: Scalars['ID']): Promise<string> {
-    return requestGraphQL<ChangesetDiffResult, ChangesetDiffVariables>(
-        gql`
-            query ChangesetDiff($changeset: ID!) {
-                node(id: $changeset) {
-                    __typename
-                    ...ChangesetDiffFields
+    return lastValueFrom(
+        requestGraphQL<ChangesetDiffResult, ChangesetDiffVariables>(
+            gql`
+                query ChangesetDiff($changeset: ID!) {
+                    node(id: $changeset) {
+                        __typename
+                        ...ChangesetDiffFields
+                    }
                 }
-            }
 
-            ${changesetDiffFragment}
-        `,
-        { changeset }
-    )
-        .pipe(
+                ${changesetDiffFragment}
+            `,
+            { changeset }
+        ).pipe(
             map(dataOrThrowErrors),
             map(({ node }) => {
                 if (!node) {
@@ -666,7 +697,7 @@ export async function getChangesetDiff(changeset: Scalars['ID']): Promise<string
                 return commits[0].diff
             })
         )
-        .toPromise()
+    )
 }
 
 const changesetScheduleEstimateFragment = gql`
@@ -676,20 +707,20 @@ const changesetScheduleEstimateFragment = gql`
 `
 
 export async function getChangesetScheduleEstimate(changeset: Scalars['ID']): Promise<Scalars['DateTime'] | null> {
-    return requestGraphQL<ChangesetScheduleEstimateResult, ChangesetScheduleEstimateVariables>(
-        gql`
-            query ChangesetScheduleEstimate($changeset: ID!) {
-                node(id: $changeset) {
-                    __typename
-                    ...ChangesetScheduleEstimateFields
+    return lastValueFrom(
+        requestGraphQL<ChangesetScheduleEstimateResult, ChangesetScheduleEstimateVariables>(
+            gql`
+                query ChangesetScheduleEstimate($changeset: ID!) {
+                    node(id: $changeset) {
+                        __typename
+                        ...ChangesetScheduleEstimateFields
+                    }
                 }
-            }
 
-            ${changesetScheduleEstimateFragment}
-        `,
-        { changeset }
-    )
-        .pipe(
+                ${changesetScheduleEstimateFragment}
+            `,
+            { changeset }
+        ).pipe(
             map(dataOrThrowErrors),
             map(({ node }) => {
                 if (!node) {
@@ -703,20 +734,22 @@ export async function getChangesetScheduleEstimate(changeset: Scalars['ID']): Pr
                 return node.scheduleEstimateAt
             })
         )
-        .toPromise()
+    )
 }
 
 export async function detachChangesets(batchChange: Scalars['ID'], changesets: Scalars['ID'][]): Promise<void> {
-    const result = await requestGraphQL<DetachChangesetsResult, DetachChangesetsVariables>(
-        gql`
-            mutation DetachChangesets($batchChange: ID!, $changesets: [ID!]!) {
-                detachChangesets(batchChange: $batchChange, changesets: $changesets) {
-                    id
+    const result = await lastValueFrom(
+        requestGraphQL<DetachChangesetsResult, DetachChangesetsVariables>(
+            gql`
+                mutation DetachChangesets($batchChange: ID!, $changesets: [ID!]!) {
+                    detachChangesets(batchChange: $batchChange, changesets: $changesets) {
+                        id
+                    }
                 }
-            }
-        `,
-        { batchChange, changesets }
-    ).toPromise()
+            `,
+            { batchChange, changesets }
+        )
+    )
     dataOrThrowErrors(result)
 }
 
@@ -725,30 +758,34 @@ export async function createChangesetComments(
     changesets: Scalars['ID'][],
     body: string
 ): Promise<void> {
-    const result = await requestGraphQL<CreateChangesetCommentsResult, CreateChangesetCommentsVariables>(
-        gql`
-            mutation CreateChangesetComments($batchChange: ID!, $changesets: [ID!]!, $body: String!) {
-                createChangesetComments(batchChange: $batchChange, changesets: $changesets, body: $body) {
-                    id
+    const result = await lastValueFrom(
+        requestGraphQL<CreateChangesetCommentsResult, CreateChangesetCommentsVariables>(
+            gql`
+                mutation CreateChangesetComments($batchChange: ID!, $changesets: [ID!]!, $body: String!) {
+                    createChangesetComments(batchChange: $batchChange, changesets: $changesets, body: $body) {
+                        id
+                    }
                 }
-            }
-        `,
-        { batchChange, changesets, body }
-    ).toPromise()
+            `,
+            { batchChange, changesets, body }
+        )
+    )
     dataOrThrowErrors(result)
 }
 
 export async function reenqueueChangesets(batchChange: Scalars['ID'], changesets: Scalars['ID'][]): Promise<void> {
-    const result = await requestGraphQL<ReenqueueChangesetsResult, ReenqueueChangesetsVariables>(
-        gql`
-            mutation ReenqueueChangesets($batchChange: ID!, $changesets: [ID!]!) {
-                reenqueueChangesets(batchChange: $batchChange, changesets: $changesets) {
-                    id
+    const result = await lastValueFrom(
+        requestGraphQL<ReenqueueChangesetsResult, ReenqueueChangesetsVariables>(
+            gql`
+                mutation ReenqueueChangesets($batchChange: ID!, $changesets: [ID!]!) {
+                    reenqueueChangesets(batchChange: $batchChange, changesets: $changesets) {
+                        id
+                    }
                 }
-            }
-        `,
-        { batchChange, changesets }
-    ).toPromise()
+            `,
+            { batchChange, changesets }
+        )
+    )
     dataOrThrowErrors(result)
 }
 
@@ -757,30 +794,34 @@ export async function mergeChangesets(
     changesets: Scalars['ID'][],
     squash: boolean
 ): Promise<void> {
-    const result = await requestGraphQL<MergeChangesetsResult, MergeChangesetsVariables>(
-        gql`
-            mutation MergeChangesets($batchChange: ID!, $changesets: [ID!]!, $squash: Boolean!) {
-                mergeChangesets(batchChange: $batchChange, changesets: $changesets, squash: $squash) {
-                    id
+    const result = await lastValueFrom(
+        requestGraphQL<MergeChangesetsResult, MergeChangesetsVariables>(
+            gql`
+                mutation MergeChangesets($batchChange: ID!, $changesets: [ID!]!, $squash: Boolean!) {
+                    mergeChangesets(batchChange: $batchChange, changesets: $changesets, squash: $squash) {
+                        id
+                    }
                 }
-            }
-        `,
-        { batchChange, changesets, squash }
-    ).toPromise()
+            `,
+            { batchChange, changesets, squash }
+        )
+    )
     dataOrThrowErrors(result)
 }
 
 export async function closeChangesets(batchChange: Scalars['ID'], changesets: Scalars['ID'][]): Promise<void> {
-    const result = await requestGraphQL<CloseChangesetsResult, CloseChangesetsVariables>(
-        gql`
-            mutation CloseChangesets($batchChange: ID!, $changesets: [ID!]!) {
-                closeChangesets(batchChange: $batchChange, changesets: $changesets) {
-                    id
+    const result = await lastValueFrom(
+        requestGraphQL<CloseChangesetsResult, CloseChangesetsVariables>(
+            gql`
+                mutation CloseChangesets($batchChange: ID!, $changesets: [ID!]!) {
+                    closeChangesets(batchChange: $batchChange, changesets: $changesets) {
+                        id
+                    }
                 }
-            }
-        `,
-        { batchChange, changesets }
-    ).toPromise()
+            `,
+            { batchChange, changesets }
+        )
+    )
     dataOrThrowErrors(result)
 }
 
@@ -789,18 +830,52 @@ export async function publishChangesets(
     changesets: Scalars['ID'][],
     draft: boolean
 ): Promise<void> {
-    const result = await requestGraphQL<PublishChangesetsResult, PublishChangesetsVariables>(
-        gql`
-            mutation PublishChangesets($batchChange: ID!, $changesets: [ID!]!, $draft: Boolean!) {
-                publishChangesets(batchChange: $batchChange, changesets: $changesets, draft: $draft) {
-                    id
+    const result = await lastValueFrom(
+        requestGraphQL<PublishChangesetsResult, PublishChangesetsVariables>(
+            gql`
+                mutation PublishChangesets($batchChange: ID!, $changesets: [ID!]!, $draft: Boolean!) {
+                    publishChangesets(batchChange: $batchChange, changesets: $changesets, draft: $draft) {
+                        id
+                    }
                 }
-            }
-        `,
-        { batchChange, changesets, draft }
-    ).toPromise()
+            `,
+            { batchChange, changesets, draft }
+        )
+    )
     dataOrThrowErrors(result)
 }
+
+// We pass in the batchChange because this Query is configured to only fetch changesets with the given ID that
+// belong to a specific batch change. This is because we only use this for exporting changesets in a particular
+// batch change and we check if the user has permission to view/administer the Batch Change on the backend.
+export const GET_CHANGESETS_BY_IDS_QUERY = gql`
+    query GetChangesetsByIDs($batchChange: ID!, $changesets: [ID!]!) {
+        getChangesetsByIDs(batchChange: $batchChange, changesets: $changesets) {
+            nodes {
+                ... on ExternalChangeset {
+                    id
+                    title
+                    state
+                    reviewState
+                    externalURL {
+                        url
+                    }
+                    repository {
+                        name
+                    }
+                }
+            }
+        }
+    }
+`
+
+export const useGetChangesetsByIDs = (
+    batchChange: Scalars['ID'],
+    changesets: Scalars['ID'][]
+): QueryTuple<GetChangesetsByIDsResult, GetChangesetsByIDsVariables> =>
+    useLazyQuery(GET_CHANGESETS_BY_IDS_QUERY, {
+        variables: { batchChange, changesets },
+    })
 
 export const BULK_OPERATIONS = gql`
     query BatchChangeBulkOperations($batchChange: ID!, $first: Int, $after: String) {

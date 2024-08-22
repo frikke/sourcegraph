@@ -6,7 +6,7 @@ pushd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null
 
 mkdir -p .bin
 
-version="2.4.5"
+version="2.7.3"
 case "$(go env GOOS)" in
   linux)
     os="linux"
@@ -29,4 +29,6 @@ chmod +x "${target}"
 
 popd >/dev/null
 
-exec "${target}" "$@"
+trap '${target} stop' EXIT SIGINT
+eval "${target} start"
+"${target}" "$@"

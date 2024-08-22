@@ -9,13 +9,16 @@ import { createRoot } from 'react-dom/client'
 import { wrapRemoteObservable } from '@sourcegraph/shared/src/api/client/api/common'
 import { AnchorLink, setLinkComponent, useObservable } from '@sourcegraph/wildcard'
 
-import { ExtensionCoreAPI, HelpSidebarAPI } from '../../../contract'
+import type { ExtensionCoreAPI, HelpSidebarAPI } from '../../../contract'
+import type { VsCodeApi } from '../../../vsCodeApi'
 import { createEndpointsForWebToNode } from '../../comlink/webviewEndpoint'
 import { createPlatformContext } from '../../platform/context'
 
 import { HelpSidebarView } from './HelpSidebarView'
 
-const vsCodeApi = window.acquireVsCodeApi()
+declare const acquireVsCodeApi: () => VsCodeApi
+
+const vsCodeApi = acquireVsCodeApi()
 
 const { proxy, expose } = createEndpointsForWebToNode(vsCodeApi)
 

@@ -1,20 +1,21 @@
 import React, { useEffect } from 'react'
 
-import { useLocation, useParams } from 'react-router'
+import { useParams, useLocation } from 'react-router-dom'
 
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import { EVENT_LOGGER } from '@sourcegraph/shared/src/telemetry/web/eventLogger'
 import { FeedbackText } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../../auth'
+import type { AuthenticatedUser } from '../../auth'
 import { HeroPage } from '../../components/HeroPage'
 import { PageTitle } from '../../components/PageTitle'
-import { eventLogger } from '../../tracking/eventLogger'
 import { TweetFeedback } from '../components/TweetFeedback'
 
-import { SurveyForm, SurveyFormLocationState } from './SurveyForm'
+import { SurveyForm } from './SurveyForm'
 
 import styles from './SurveyPage.module.scss'
 
-interface SurveyPageProps {
+interface SurveyPageProps extends TelemetryV2Props {
     authenticatedUser: AuthenticatedUser | null
     /**
      * For Storybook only
@@ -26,13 +27,14 @@ const getScoreFromString = (score?: string): number | undefined =>
     score ? Math.max(0, Math.min(10, Math.round(+score))) : undefined
 
 export const SurveyPage: React.FunctionComponent<React.PropsWithChildren<SurveyPageProps>> = props => {
-    const location = useLocation<SurveyFormLocationState>()
+    const location = useLocation()
     const matchParameters = useParams<{ score?: string }>()
     const score = props.forceScore || matchParameters.score
 
     useEffect(() => {
-        eventLogger.logViewEvent('Survey')
-    }, [])
+        EVENT_LOGGER.logViewEvent('Survey')
+        props.telemetryRecorder.recordEvent('surveyNPS.page', 'view')
+    }, [props.telemetryRecorder])
 
     if (score === 'thanks') {
         return (
@@ -52,7 +54,13 @@ export const SurveyPage: React.FunctionComponent<React.PropsWithChildren<SurveyP
             <PageTitle title="Almost there..." />
             <HeroPage
                 title="Almost there..."
-                cta={<SurveyForm score={getScoreFromString(score)} authenticatedUser={props.authenticatedUser} />}
+                cta={
+                    <SurveyForm
+                        score={getScoreFromString(score)}
+                        authenticatedUser={props.authenticatedUser}
+                        telemetryRecorder={props.telemetryRecorder}
+                    />
+                }
             />
         </div>
     )

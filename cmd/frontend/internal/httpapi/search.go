@@ -2,23 +2,28 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/sourcegraph/log"
 	"github.com/sourcegraph/zoekt"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
+	proto "github.com/sourcegraph/zoekt/cmd/zoekt-sourcegraph-indexserver/protos/sourcegraph/zoekt/configuration/v1"
+
+	"github.com/sourcegraph/sourcegraph/cmd/frontend/enterprise"
 	"github.com/sourcegraph/sourcegraph/internal/api"
+	citypes "github.com/sourcegraph/sourcegraph/internal/codeintel/types"
 	"github.com/sourcegraph/sourcegraph/internal/conf"
 	"github.com/sourcegraph/sourcegraph/internal/database"
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver"
 	searchbackend "github.com/sourcegraph/sourcegraph/internal/search/backend"
 	"github.com/sourcegraph/sourcegraph/internal/types"
+	"github.com/sourcegraph/sourcegraph/lib/errors"
 	"github.com/sourcegraph/sourcegraph/schema"
 )
 
@@ -34,7 +39,7 @@ func repoRankFromConfig(siteConfig schema.SiteConfiguration, repoName string) fl
 	// try every "directory" in the repo name to assign it a value, so a repoName like
 	// "github.com/sourcegraph/zoekt" will have "github.com", "github.com/sourcegraph",
 	// and "github.com/sourcegraph/zoekt" tested.
-	for i := 0; i < len(repoName); i++ {
+	for i := range len(repoName) {
 		if repoName[i] == '/' {
 			val += scores[repoName[:i]]
 		}
@@ -43,83 +48,162 @@ func repoRankFromConfig(siteConfig schema.SiteConfiguration, repoName string) fl
 	return val
 }
 
+type searchIndexerGRPCServer struct {
+	server *searchIndexerServer
+	proto.ZoektConfigurationServiceServer
+}
+
+func (s *searchIndexerGRPCServer) SearchConfiguration(ctx context.Context, request *proto.SearchConfigurationRequest) (*proto.SearchConfigurationResponse, error) {
+	repoIDs := make([]api.RepoID, 0, len(request.GetRepoIds()))
+	for _, repoID := range request.GetRepoIds() {
+		repoIDs = append(repoIDs, api.RepoID(repoID))
+	}
+
+	var fingerprint searchbackend.ConfigFingerprint
+	fingerprint.FromProto(request.GetFingerprint())
+
+	parameters := searchConfigurationParameters{
+		fingerprint: fingerprint,
+		repoIDs:     repoIDs,
+	}
+
+	r, err := s.server.doSearchConfiguration(ctx, parameters)
+	if err != nil {
+		var parameterErr *parameterError
+		if errors.As(err, &parameterErr) {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+
+		return nil, err
+	}
+
+	options := make([]*proto.ZoektIndexOptions, 0, len(r.options))
+	for _, o := range r.options {
+		options = append(options, o.ToProto())
+	}
+
+	return &proto.SearchConfigurationResponse{
+		UpdatedOptions: options,
+		Fingerprint:    r.fingerprint.ToProto(),
+	}, nil
+}
+
+func (s *searchIndexerGRPCServer) List(ctx context.Context, r *proto.ListRequest) (*proto.ListResponse, error) {
+	indexedIDs := make([]api.RepoID, 0, len(r.GetIndexedIds()))
+	for _, repoID := range r.GetIndexedIds() {
+		indexedIDs = append(indexedIDs, api.RepoID(repoID))
+	}
+
+	var parameters listParameters
+	parameters.IndexedIDs = indexedIDs
+	parameters.Hostname = r.GetHostname()
+
+	repoIDs, err := s.server.doList(ctx, &parameters)
+	if err != nil {
+		return nil, err
+	}
+
+	var response proto.ListResponse
+	response.RepoIds = make([]int32, 0, len(repoIDs))
+	for _, repoID := range repoIDs {
+		response.RepoIds = append(response.RepoIds, int32(repoID))
+	}
+
+	return &response, nil
+}
+
+func (s *searchIndexerGRPCServer) DocumentRanks(ctx context.Context, request *proto.DocumentRanksRequest) (*proto.DocumentRanksResponse, error) {
+	ranks, err := s.server.Ranking.GetDocumentRanks(ctx, api.RepoName(request.Repository))
+	if err != nil {
+		if errcode.IsNotFound(err) {
+			return nil, status.Error(codes.NotFound, err.Error())
+		}
+
+		return nil, err
+	}
+
+	return repoPathRanksToProto(&ranks), nil
+}
+
+func (s *searchIndexerGRPCServer) UpdateIndexStatus(ctx context.Context, req *proto.UpdateIndexStatusRequest) (*proto.UpdateIndexStatusResponse, error) {
+	var request indexStatusUpdateArgs
+	request.FromProto(req)
+
+	err := s.server.doIndexStatusUpdate(ctx, &request)
+	if err != nil {
+		return nil, err
+	}
+
+	return &proto.UpdateIndexStatusResponse{}, nil
+}
+
+var _ proto.ZoektConfigurationServiceServer = &searchIndexerGRPCServer{}
+
+// indexers is the subset of searchbackend.Indexers methods we use. ReposSubset
+// is used by indexed-search to get the list of repositories to index. These
+// methods are used to return the correct subset for horizontal indexed search.
+// Declared as an interface for testing.
+type indexers interface {
+	// ReposSubset returns the subset of repoNames that hostname should
+	// index.
+	ReposSubset(ctx context.Context, hostname string, indexed zoekt.ReposMap, indexable []types.MinimalRepo) ([]types.MinimalRepo, error)
+	// Enabled is true if horizontal indexed search is enabled.
+	Enabled() bool
+}
+
+// repoStore is a subset of database.RepoStore used by searchIndexerServer.
+type repoStore interface {
+	List(context.Context, database.ReposListOptions) ([]*types.Repo, error)
+	StreamMinimalRepos(context.Context, database.ReposListOptions, func(*types.MinimalRepo)) error
+}
+
 // searchIndexerServer has handlers that zoekt-sourcegraph-indexserver
 // interacts with (search-indexer).
 type searchIndexerServer struct {
-	db database.DB
+	db     database.DB
+	logger log.Logger
+
+	gitserverClient gitserver.Client
 	// ListIndexable returns the repositories to index.
 	ListIndexable func(context.Context) ([]types.MinimalRepo, error)
 
-	// RepoStore is a subset of database.RepoStore used by searchIndexerServer.
-	RepoStore interface {
-		List(context.Context, database.ReposListOptions) ([]*types.Repo, error)
-		StreamMinimalRepos(context.Context, database.ReposListOptions, func(*types.MinimalRepo)) error
-	}
+	repoStore repoStore
 
 	SearchContextsRepoRevs func(context.Context, []api.RepoID) (map[api.RepoID][]string, error)
 
-	// Indexers is the subset of searchbackend.Indexers methods we
-	// use. reposListServer is used by indexed-search to get the list of
-	// repositories to index. These methods are used to return the correct
-	// subset for horizontal indexed search. Declared as an interface for
-	// testing.
-	Indexers interface {
-		// ReposSubset returns the subset of repoNames that hostname should
-		// index.
-		ReposSubset(ctx context.Context, hostname string, indexed map[uint32]*zoekt.MinimalRepoListEntry, indexable []types.MinimalRepo) ([]types.MinimalRepo, error)
-		// Enabled is true if horizontal indexed search is enabled.
-		Enabled() bool
-	}
+	indexers indexers
+
+	// Ranking is a service that provides ranking scores for various code objects.
+	Ranking enterprise.RankingService
 
 	// MinLastChangedDisabled is a feature flag for disabling more efficient
 	// polling by zoekt. This can be removed after v3.34 is cut (Dec 2021).
 	MinLastChangedDisabled bool
 }
 
-// serveConfiguration is _only_ used by the zoekt index server. Zoekt does
-// not depend on frontend and therefore does not have access to `conf.Watch`.
-// Additionally, it only cares about certain search specific settings so this
-// search specific endpoint is used rather than serving the entire site settings
-// from /.internal/configuration.
-//
-// This endpoint also supports batch requests to avoid managing concurrency in
-// zoekt. On vertically scaled instances we have observed zoekt requesting
-// this endpoint concurrently leading to socket starvation.
-func (h *searchIndexerServer) serveConfiguration(w http.ResponseWriter, r *http.Request) error {
-	ctx := r.Context()
+func (h *searchIndexerServer) doSearchConfiguration(ctx context.Context, parameters searchConfigurationParameters) (*searchConfigurationResponse, error) {
 	siteConfig := conf.Get().SiteConfiguration
 
-	if err := r.ParseForm(); err != nil {
-		return err
-	}
-
-	indexedIDs := make([]api.RepoID, 0, len(r.Form["repoID"]))
-	for _, idStr := range r.Form["repoID"] {
-		id, err := strconv.Atoi(idStr)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid repo id %s: %s", idStr, err), http.StatusBadRequest)
-			return nil
-		}
-		indexedIDs = append(indexedIDs, api.RepoID(id))
-	}
-
-	if len(indexedIDs) == 0 {
-		http.Error(w, "atleast one repoID required", http.StatusBadRequest)
-		return nil
+	if len(parameters.repoIDs) == 0 {
+		return nil, &parameterError{err: "at least one repoID required"}
 	}
 
 	var minLastChanged time.Time
+	nextFingerPrint := parameters.fingerprint
 	if !h.MinLastChangedDisabled {
 		var err error
-		minLastChanged, err = searchbackend.ParseAndSetConfigFingerprint(w, r, &siteConfig)
+		fp, err := searchbackend.NewConfigFingerprint(&siteConfig)
 		if err != nil {
-			return err
+			return nil, err
 		}
+
+		minLastChanged = parameters.fingerprint.ChangesSince(fp)
+		nextFingerPrint = *fp
 	}
 
 	// Preload repos to support fast lookups by repo ID.
-	repos, loadReposErr := h.RepoStore.List(ctx, database.ReposListOptions{
-		IDs: indexedIDs,
+	repos, loadReposErr := h.repoStore.List(ctx, database.ReposListOptions{
+		IDs: parameters.repoIDs,
 		// When minLastChanged is non-zero we will only return the
 		// repositories that have changed since minLastChanged. This takes
 		// into account repo metadata, repo content and search context
@@ -136,30 +220,39 @@ func (h *searchIndexerServer) serveConfiguration(w http.ResponseWriter, r *http.
 	// If we used MinLastChanged, we should only return information for the
 	// repositories that we found from List.
 	if !minLastChanged.IsZero() {
-		filtered := indexedIDs[:0]
-		for _, id := range indexedIDs {
+		filtered := parameters.repoIDs[:0]
+		for _, id := range parameters.repoIDs {
 			if _, ok := reposMap[id]; ok {
 				filtered = append(filtered, id)
 			}
 		}
-		indexedIDs = filtered
+		parameters.repoIDs = filtered
 	}
 
-	getRepoIndexOptions := func(repoID int32) (*searchbackend.RepoIndexOptions, error) {
+	rankingLastUpdatedAt, err := h.Ranking.LastUpdatedAt(ctx, parameters.repoIDs)
+	if err != nil {
+		h.logger.Warn("failed to get ranking last updated timestamps, falling back to no ranking",
+			log.Int("repos", len(parameters.repoIDs)),
+			log.Error(err),
+		)
+		rankingLastUpdatedAt = make(map[api.RepoID]time.Time)
+	}
+
+	getRepoIndexOptions := func(repoID api.RepoID) (*searchbackend.RepoIndexOptions, error) {
 		if loadReposErr != nil {
 			return nil, loadReposErr
 		}
 		// Replicate what database.Repos.GetByName would do here:
-		repo, ok := reposMap[api.RepoID(repoID)]
+		repo, ok := reposMap[repoID]
 		if !ok {
-			return nil, &database.RepoNotFoundErr{ID: api.RepoID(repoID)}
+			return nil, &database.RepoNotFoundErr{ID: repoID}
 		}
 
 		getVersion := func(branch string) (string, error) {
 			metricGetVersion.Inc()
 			// Do not to trigger a repo-updater lookup since this is a batch job.
-			commitID, err := gitserver.NewClient(h.db).ResolveRevision(ctx, repo.Name, branch, gitserver.ResolveRevisionOptions{
-				NoEnsureRevision: true,
+			commitID, err := h.gitserverClient.ResolveRevision(ctx, repo.Name, branch, gitserver.ResolveRevisionOptions{
+				EnsureRevision: false,
 			})
 			if err != nil && errcode.HTTP(err) == http.StatusNotFound {
 				// GetIndexOptions wants an empty rev for a missing rev or empty
@@ -171,75 +264,82 @@ func (h *searchIndexerServer) serveConfiguration(w http.ResponseWriter, r *http.
 
 		priority := float64(repo.Stars) + repoRankFromConfig(siteConfig, string(repo.Name))
 
+		var documentRanksVersion string
+		if t, ok := rankingLastUpdatedAt[repoID]; ok {
+			documentRanksVersion = t.String()
+		}
+
 		return &searchbackend.RepoIndexOptions{
 			Name:       string(repo.Name),
-			RepoID:     int32(repo.ID),
+			RepoID:     repo.ID,
 			Public:     !repo.Private,
 			Priority:   priority,
 			Fork:       repo.Fork,
 			Archived:   repo.Archived,
 			GetVersion: getVersion,
+
+			DocumentRanksVersion: documentRanksVersion,
 		}, nil
 	}
 
-	revisionsForRepo, revisionsForRepoErr := h.SearchContextsRepoRevs(ctx, indexedIDs)
-	getSearchContextRevisions := func(repoID int32) ([]string, error) {
+	revisionsForRepo, revisionsForRepoErr := h.SearchContextsRepoRevs(ctx, parameters.repoIDs)
+	getSearchContextRevisions := func(repoID api.RepoID) ([]string, error) {
 		if revisionsForRepoErr != nil {
 			return nil, revisionsForRepoErr
 		}
-		return revisionsForRepo[api.RepoID(repoID)], nil
+		return revisionsForRepo[repoID], nil
 	}
 
-	// searchbackend uses int32 instead of api.RepoID currently, so build
-	// up a slice of that.
-	repoIDs := make([]int32, len(indexedIDs))
-	for i := range indexedIDs {
-		repoIDs[i] = int32(indexedIDs[i])
-	}
-
-	b := searchbackend.GetIndexOptions(
+	indexOptions := searchbackend.GetIndexOptions(
+		h.logger,
 		&siteConfig,
 		getRepoIndexOptions,
 		getSearchContextRevisions,
-		repoIDs...,
+		parameters.repoIDs...,
 	)
-	_, _ = w.Write(b)
-	return nil
+
+	return &searchConfigurationResponse{
+		options:     indexOptions,
+		fingerprint: nextFingerPrint,
+	}, nil
 }
 
-// serveList is used by zoekt to get the list of repositories for it to index.
-func (h *searchIndexerServer) serveList(w http.ResponseWriter, r *http.Request) error {
-	var opt struct {
-		// Hostname is used to determine the subset of repos to return
-		Hostname string
-		// IndexedIDs are the repository IDs of indexed repos by Hostname.
-		IndexedIDs []api.RepoID
-	}
+type parameterError struct {
+	err string
+}
 
-	err := json.NewDecoder(r.Body).Decode(&opt)
+func (e *parameterError) Error() string { return e.err }
+
+type searchConfigurationParameters struct {
+	repoIDs     []api.RepoID
+	fingerprint searchbackend.ConfigFingerprint
+}
+
+type searchConfigurationResponse struct {
+	options     []searchbackend.ZoektIndexOptions
+	fingerprint searchbackend.ConfigFingerprint
+}
+
+func (h *searchIndexerServer) doList(ctx context.Context, parameters *listParameters) (repoIDS []api.RepoID, err error) {
+	indexable, err := h.ListIndexable(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	indexable, err := h.ListIndexable(r.Context())
-	if err != nil {
-		return err
-	}
-
-	if h.Indexers.Enabled() {
-		indexed := make(map[uint32]*zoekt.MinimalRepoListEntry, len(opt.IndexedIDs))
-		if len(opt.IndexedIDs) > 0 {
-			err = h.RepoStore.StreamMinimalRepos(r.Context(), database.ReposListOptions{
-				IDs: opt.IndexedIDs,
-			}, func(r *types.MinimalRepo) { indexed[uint32(r.ID)] = nil })
+	if h.indexers.Enabled() {
+		indexed := make(zoekt.ReposMap, len(parameters.IndexedIDs))
+		add := func(r *types.MinimalRepo) { indexed[uint32(r.ID)] = zoekt.MinimalRepoListEntry{} }
+		if len(parameters.IndexedIDs) > 0 {
+			opts := database.ReposListOptions{IDs: parameters.IndexedIDs}
+			err = h.repoStore.StreamMinimalRepos(ctx, opts, add)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 
-		indexable, err = h.Indexers.ReposSubset(r.Context(), opt.Hostname, indexed, indexable)
+		indexable, err = h.indexers.ReposSubset(ctx, parameters.Hostname, indexed, indexable)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -248,21 +348,116 @@ func (h *searchIndexerServer) serveList(w http.ResponseWriter, r *http.Request) 
 	// 2. Stream out each object marshalled rather than marshall the full list in memory.
 
 	ids := make([]api.RepoID, 0, len(indexable))
-
 	for _, r := range indexable {
 		ids = append(ids, r.ID)
 	}
 
-	data := struct {
-		RepoIDs []api.RepoID
-	}{
-		RepoIDs: ids,
-	}
+	return ids, nil
+}
 
-	return json.NewEncoder(w).Encode(&data)
+type listParameters struct {
+	// Hostname is used to determine the subset of repos to return
+	Hostname string
+	// IndexedIDs are the repository IDs of indexed repos by Hostname.
+	IndexedIDs []api.RepoID
 }
 
 var metricGetVersion = promauto.NewCounter(prometheus.CounterOpts{
 	Name: "src_search_get_version_total",
 	Help: "The total number of times we poll gitserver for the version of a indexable branch.",
 })
+
+func (h *searchIndexerServer) doIndexStatusUpdate(ctx context.Context, args *indexStatusUpdateArgs) error {
+	var (
+		ids     = make([]int32, len(args.Repositories))
+		minimal = make(zoekt.ReposMap, len(args.Repositories))
+	)
+
+	for i, repo := range args.Repositories {
+		ids[i] = int32(repo.RepoID)
+		minimal[repo.RepoID] = zoekt.MinimalRepoListEntry{Branches: repo.Branches, IndexTimeUnix: repo.IndexTimeUnix}
+	}
+
+	h.logger.Info("updating index status", log.Int32s("repositories", ids))
+	return h.db.ZoektRepos().UpdateIndexStatuses(ctx, minimal)
+}
+
+type indexStatusUpdateArgs struct {
+	Repositories []indexStatusUpdateRepository
+}
+
+type indexStatusUpdateRepository struct {
+	RepoID        uint32
+	Branches      []zoekt.RepositoryBranch
+	IndexTimeUnix int64
+}
+
+func (a *indexStatusUpdateArgs) FromProto(req *proto.UpdateIndexStatusRequest) {
+	a.Repositories = make([]indexStatusUpdateRepository, 0, len(req.Repositories))
+
+	for _, repo := range req.Repositories {
+		branches := make([]zoekt.RepositoryBranch, 0, len(repo.Branches))
+		for _, b := range repo.Branches {
+			branches = append(branches, zoekt.RepositoryBranch{
+				Name:    b.Name,
+				Version: b.Version,
+			})
+		}
+
+		a.Repositories = append(a.Repositories, indexStatusUpdateRepository{
+			RepoID:        repo.RepoId,
+			Branches:      branches,
+			IndexTimeUnix: repo.GetIndexTimeUnix(),
+		})
+	}
+}
+
+func (a *indexStatusUpdateArgs) ToProto() *proto.UpdateIndexStatusRequest {
+	repos := make([]*proto.UpdateIndexStatusRequest_Repository, 0, len(a.Repositories))
+
+	for _, repo := range a.Repositories {
+		branches := make([]*proto.ZoektRepositoryBranch, 0, len(repo.Branches))
+		for _, b := range repo.Branches {
+			branches = append(branches, &proto.ZoektRepositoryBranch{
+				Name:    b.Name,
+				Version: b.Version,
+			})
+		}
+
+		repos = append(repos, &proto.UpdateIndexStatusRequest_Repository{
+			RepoId:        repo.RepoID,
+			Branches:      branches,
+			IndexTimeUnix: repo.IndexTimeUnix,
+		})
+	}
+
+	return &proto.UpdateIndexStatusRequest{
+		Repositories: repos,
+	}
+}
+
+func repoPathRanksToProto(r *citypes.RepoPathRanks) *proto.DocumentRanksResponse {
+	paths := make(map[string]float64, len(r.Paths))
+	for path, counts := range r.Paths {
+		paths[path] = counts
+	}
+
+	return &proto.DocumentRanksResponse{
+		Paths:    paths,
+		MeanRank: r.MeanRank,
+	}
+}
+
+func repoPathRanksFromProto(x *proto.DocumentRanksResponse) *citypes.RepoPathRanks {
+	protoPaths := x.GetPaths()
+
+	paths := make(map[string]float64, len(protoPaths))
+	for path, counts := range protoPaths {
+		paths[path] = counts
+	}
+
+	return &citypes.RepoPathRanks{
+		Paths:    paths,
+		MeanRank: x.MeanRank,
+	}
+}

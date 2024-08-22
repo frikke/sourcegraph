@@ -1,182 +1,86 @@
 package symbols
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"io"
-	"net/http"
-	"strings"
-	"sync"
-	"time"
 
-	"github.com/gobwas/glob"
-	"github.com/neelance/parallel"
-	"github.com/opentracing-contrib/go-stdlib/nethttp"
-	"github.com/opentracing/opentracing-go/ext"
-	otlog "github.com/opentracing/opentracing-go/log"
-
-	"github.com/sourcegraph/go-ctags"
+	"github.com/sourcegraph/log"
+	"go.opentelemetry.io/otel/attribute"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/sourcegraph/sourcegraph/internal/actor"
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/authz"
+	"github.com/sourcegraph/sourcegraph/internal/conf/conftypes"
 	"github.com/sourcegraph/sourcegraph/internal/endpoint"
-	"github.com/sourcegraph/sourcegraph/internal/env"
-	"github.com/sourcegraph/sourcegraph/internal/httpcli"
-	"github.com/sourcegraph/sourcegraph/internal/resetonce"
+	"github.com/sourcegraph/sourcegraph/internal/grpc/defaults"
 	"github.com/sourcegraph/sourcegraph/internal/search"
 	"github.com/sourcegraph/sourcegraph/internal/search/result"
-	"github.com/sourcegraph/sourcegraph/internal/trace/ot"
+	proto "github.com/sourcegraph/sourcegraph/internal/symbols/v1"
+	"github.com/sourcegraph/sourcegraph/internal/trace"
 	"github.com/sourcegraph/sourcegraph/internal/types"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 )
 
-var symbolsURL = env.Get("SYMBOLS_URL", "k8s+http://symbols:3184", "symbols service URL")
+func defaultEndpoints() *endpoint.Map {
+	return endpoint.ConfBased(func(conns conftypes.ServiceConnections) []string {
+		return conns.Symbols
+	})
+}
 
-var defaultDoer = func() httpcli.Doer {
-	d, err := httpcli.NewInternalClientFactory("symbols").Doer()
-	if err != nil {
-		panic(err)
+func LoadConfig() {
+	DefaultClient = &Client{
+		Endpoints:           defaultEndpoints(),
+		GRPCConnectionCache: defaults.NewConnectionCache(log.Scoped("symbolsConnectionCache")),
+		SubRepoPermsChecker: func() authz.SubRepoPermissionChecker { return authz.DefaultSubRepoPermsChecker },
 	}
-	return d
-}()
+}
 
 // DefaultClient is the default Client. Unless overwritten, it is connected to the server specified by the
 // SYMBOLS_URL environment variable.
-var DefaultClient = &Client{
-	URL:                 symbolsURL,
-	HTTPClient:          defaultDoer,
-	HTTPLimiter:         parallel.NewRun(500),
-	SubRepoPermsChecker: func() authz.SubRepoPermissionChecker { return authz.DefaultSubRepoPermsChecker },
-}
+var DefaultClient *Client
 
 // Client is a symbols service client.
 type Client struct {
-	// URL to symbols service.
-	URL string
+	// Endpoints to symbols service.
+	Endpoints *endpoint.Map
 
-	// HTTP client to use
-	HTTPClient httpcli.Doer
-
-	// Limits concurrency of outstanding HTTP posts
-	HTTPLimiter *parallel.Run
+	GRPCConnectionCache *defaults.ConnectionCache
 
 	// SubRepoPermsChecker is function to return the checker to use. It needs to be a
 	// function since we expect the client to be set at runtime once we have a
 	// database connection.
 	SubRepoPermsChecker func() authz.SubRepoPermissionChecker
-
-	endpointOnce sync.Once
-	endpoint     *endpoint.Map
-
-	langMappingOnce  resetonce.Once
-	langMappingCache map[string][]glob.Glob
-}
-
-func (c *Client) url(repo api.RepoName) (string, error) {
-	c.endpointOnce.Do(func() {
-		if len(strings.Fields(c.URL)) == 0 {
-			c.endpoint = endpoint.Empty(errors.New("a symbols service has not been configured"))
-		} else {
-			c.endpoint = endpoint.New(c.URL)
-		}
-	})
-	return c.endpoint.Get(string(repo))
-}
-
-func (c *Client) ListLanguageMappings(ctx context.Context, repo api.RepoName) (_ map[string][]glob.Glob, err error) {
-	c.langMappingOnce.Do(func() {
-		var resp *http.Response
-		resp, err = c.httpPost(ctx, "list-languages", repo, nil)
-		if err != nil {
-			return
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			// best-effort inclusion of body in error message
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
-			err = errors.Errorf(
-				"Symbol.ListLanguageMappings http status %d: %s",
-				resp.StatusCode,
-				string(body),
-			)
-			return
-		}
-
-		mapping := make(map[string][]string)
-		err = json.NewDecoder(resp.Body).Decode(&mapping)
-
-		globs := make(map[string][]glob.Glob, len(ctags.SupportedLanguages))
-
-		for _, allowedLanguage := range ctags.SupportedLanguages {
-			for _, pattern := range mapping[allowedLanguage] {
-				var compiled glob.Glob
-				compiled, err = glob.Compile(pattern)
-				if err != nil {
-					return
-				}
-
-				globs[allowedLanguage] = append(globs[allowedLanguage], compiled)
-			}
-		}
-
-		c.langMappingCache = globs
-		time.AfterFunc(time.Minute*10, c.langMappingOnce.Reset)
-	})
-
-	return c.langMappingCache, nil
 }
 
 // Search performs a symbol search on the symbols service.
-func (c *Client) Search(ctx context.Context, args search.SymbolsParameters) (symbols result.Symbols, err error) {
-	span, ctx := ot.StartSpanFromContext(ctx, "symbols.Client.Search")
-	defer func() {
-		if err != nil {
-			ext.Error.Set(span, true)
-			span.LogFields(otlog.Error(err))
-		}
-		span.Finish()
-	}()
-	span.SetTag("Repo", string(args.Repo))
-	span.SetTag("CommitID", string(args.CommitID))
+func (c *Client) Search(ctx context.Context, args search.SymbolsParameters) (symbols result.Symbols, limitHit bool, err error) {
+	tr, ctx := trace.New(ctx, "symbols.Search",
+		args.Repo.Attr(),
+		args.CommitID.Attr())
+	defer tr.EndWithErr(&err)
 
-	resp, err := c.httpPost(ctx, "search", args.Repo, args)
+	response, err := c.searchGRPC(ctx, args)
 	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// best-effort inclusion of body in error message
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
-		return nil, errors.Errorf(
-			"Symbol.Search http status %d: %s",
-			resp.StatusCode,
-			string(body),
-		)
-	}
-
-	var response search.SymbolsResponse
-	err = json.NewDecoder(resp.Body).Decode(&response)
-	if err != nil {
-		return nil, err
+		return nil, false, errors.Wrap(err, "executing symbols search request")
 	}
 	if response.Err != "" {
-		return nil, errors.New(response.Err)
+		return nil, false, errors.New(response.Err)
 	}
+
 	symbols = response.Symbols
+	limitHit = response.LimitHit
 
 	// 🚨 SECURITY: We have valid results, so we need to apply sub-repo permissions
 	// filtering.
 	if c.SubRepoPermsChecker == nil {
-		return symbols, err
+		return symbols, limitHit, err
 	}
 
 	checker := c.SubRepoPermsChecker()
 	if !authz.SubRepoEnabled(checker) {
-		return symbols, err
+		return symbols, limitHit, err
 	}
 
 	a := actor.FromContext(ctx)
@@ -189,159 +93,168 @@ func (c *Client) Search(ctx context.Context, args search.SymbolsParameters) (sym
 		}
 		perm, err := authz.ActorPermissions(ctx, checker, a, rc)
 		if err != nil {
-			return nil, errors.Wrap(err, "checking sub-repo permissions")
+			return nil, false, errors.Wrap(err, "checking sub-repo permissions")
 		}
 		if perm.Include(authz.Read) {
 			filtered = append(filtered, r)
 		}
 	}
 
-	return filtered, nil
+	return filtered, limitHit, nil
 }
 
-func (c *Client) LocalCodeIntel(ctx context.Context, args types.RepoCommitPath) (result *types.LocalCodeIntelPayload, err error) {
-	span, ctx := ot.StartSpanFromContext(ctx, "squirrel.Client.LocalCodeIntel")
-	defer func() {
-		if err != nil {
-			ext.Error.Set(span, true)
-			span.LogFields(otlog.Error(err))
+func (c *Client) searchGRPC(ctx context.Context, args search.SymbolsParameters) (search.SymbolsResponse, error) {
+	grpcClient, err := c.gRPCClient(string(args.Repo))
+	if err != nil {
+		return search.SymbolsResponse{}, errors.Wrap(err, "getting gRPC symbols client")
+	}
+
+	var protoArgs proto.SearchRequest
+	protoArgs.FromInternal(&args)
+
+	protoResponse, err := grpcClient.Search(ctx, &protoArgs)
+	if err != nil {
+		return search.SymbolsResponse{}, translateGRPCError(err)
+	}
+
+	response := protoResponse.ToInternal()
+	return response, nil
+}
+
+func (c *Client) LocalCodeIntel(ctx context.Context, path types.RepoCommitPath) (result *types.LocalCodeIntelPayload, err error) {
+	tr, ctx := trace.New(ctx, "symbols.LocalCodeIntel",
+		attribute.String("repo", path.Repo),
+		attribute.String("commitID", path.Commit))
+	defer tr.EndWithErr(&err)
+
+	grpcClient, err := c.gRPCClient(path.Repo)
+	if err != nil {
+		return nil, errors.Wrap(err, "getting gRPC symbols client")
+	}
+
+	var rcp proto.RepoCommitPath
+	rcp.FromInternal(&path)
+
+	protoArgs := proto.LocalCodeIntelRequest{RepoCommitPath: &rcp}
+
+	client, err := grpcClient.LocalCodeIntel(ctx, &protoArgs)
+	if err != nil {
+		if status.Code(err) == codes.Unimplemented {
+			// This ignores errors from LocalCodeIntel to match the behavior found here:
+			// https://sourcegraph.com/github.com/sourcegraph/sourcegraph@a1631d58604815917096acc3356447c55baebf22/-/blob/cmd/symbols/squirrel/http_handlers.go?L57-57
+			//
+			// This is weird, and maybe not intentional, but things break if we return an error.
+			return nil, nil
 		}
-		span.Finish()
-	}()
-	span.SetTag("Repo", args.Repo)
-	span.SetTag("CommitID", args.Commit)
-
-	resp, err := c.httpPost(ctx, "localCodeIntel", api.RepoName(args.Repo), args)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// best-effort inclusion of body in error message
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
-		return nil, errors.Errorf(
-			"Squirrel.LocalCodeIntel http status %d: %s",
-			resp.StatusCode,
-			string(body),
-		)
+		return nil, translateGRPCError(err)
 	}
 
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil {
-		return nil, errors.Wrap(err, "decoding response body")
-	}
+	var out types.LocalCodeIntelPayload
+	for {
+		resp, err := client.Recv()
+		if err != nil {
+			if errors.Is(err, io.EOF) { // end of stream
+				return &out, nil
+			}
 
-	return result, nil
+			if status.Code(err) == codes.Unimplemented {
+				// This ignores errors from LocalCodeIntel to match the behavior found here:
+				// https://sourcegraph.com/github.com/sourcegraph/sourcegraph@a1631d58604815917096acc3356447c55baebf22/-/blob/cmd/symbols/squirrel/http_handlers.go?L57-57
+				//
+				// This is weird, and maybe not intentional, but things break if we return an error.
+				return nil, nil
+			}
+
+			return nil, translateGRPCError(err)
+		}
+
+		partial := resp.ToInternal()
+		if partial != nil {
+			out.Symbols = append(out.Symbols, partial.Symbols...)
+		}
+	}
 }
 
 func (c *Client) SymbolInfo(ctx context.Context, args types.RepoCommitPathPoint) (result *types.SymbolInfo, err error) {
-	span, ctx := ot.StartSpanFromContext(ctx, "squirrel.Client.SymbolInfo")
-	defer func() {
-		if err != nil {
-			ext.Error.Set(span, true)
-			span.LogFields(otlog.Error(err))
-		}
-		span.Finish()
-	}()
-	span.SetTag("Repo", args.Repo)
-	span.SetTag("CommitID", args.Commit)
+	tr, ctx := trace.New(ctx, "squirrel.SymbolInfo",
+		attribute.String("repo", args.Repo),
+		attribute.String("commitID", args.Commit))
+	defer tr.EndWithErr(&err)
 
-	resp, err := c.httpPost(ctx, "symbolInfo", api.RepoName(args.Repo), args)
+	result, err = c.symbolInfoGRPC(ctx, args)
 	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// best-effort inclusion of body in error message
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
-		return nil, errors.Errorf(
-			"Squirrel.SymbolInfo http status %d: %s",
-			resp.StatusCode,
-			string(body),
-		)
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil {
-		return nil, errors.Wrap(err, "decoding response body")
+		return nil, errors.Wrap(err, "executing symbol info request")
 	}
 
 	// 🚨 SECURITY: We have a valid result, so we need to apply sub-repo permissions filtering.
-	if c.SubRepoPermsChecker == nil {
-		return result, err
-	}
-
-	checker := c.SubRepoPermsChecker()
-	if !authz.SubRepoEnabled(checker) {
-		return result, err
-	}
-
-	a := actor.FromContext(ctx)
-	// Filter in place
-	rc := authz.RepoContent{
-		Repo: api.RepoName(args.Repo),
-		Path: args.Path,
-	}
-	perm, err := authz.ActorPermissions(ctx, checker, a, rc)
+	ok, err := authz.FilterActorPath(ctx, c.SubRepoPermsChecker(), actor.FromContext(ctx), api.RepoName(args.Repo), args.Path)
 	if err != nil {
 		return nil, errors.Wrap(err, "checking sub-repo permissions")
 	}
-	if !perm.Include(authz.Read) {
+	if !ok {
 		return nil, nil
 	}
 
 	return result, nil
 }
 
-func (c *Client) httpPost(
-	ctx context.Context,
-	method string,
-	repo api.RepoName,
-	payload any,
-) (resp *http.Response, err error) {
-	span, ctx := ot.StartSpanFromContext(ctx, "symbols.Client.httpPost")
-	defer func() {
-		if err != nil {
-			ext.Error.Set(span, true)
-			span.LogFields(otlog.Error(err))
+func (c *Client) symbolInfoGRPC(ctx context.Context, args types.RepoCommitPathPoint) (result *types.SymbolInfo, err error) {
+	client, err := c.gRPCClient(args.Repo)
+	if err != nil {
+		return nil, errors.Wrap(err, "getting gRPC symbols client")
+	}
+
+	var rcp proto.RepoCommitPath
+	rcp.FromInternal(&args.RepoCommitPath)
+
+	var point proto.Point
+	point.FromInternal(&args.Point)
+
+	protoArgs := proto.SymbolInfoRequest{
+		RepoCommitPath: &rcp,
+		Point:          &point,
+	}
+
+	protoResponse, err := client.SymbolInfo(ctx, &protoArgs)
+	if err != nil {
+		if status.Code(err) == codes.Unimplemented {
+			// This ignores unimplemented errors from SymbolInfo to match the behavior here:
+			// https://sourcegraph.com/github.com/sourcegraph/sourcegraph@b039aa70fbd155b5b1eddc4b5deede739626a978/-/blob/cmd/symbols/squirrel/http_handlers.go?L114-114
+			return nil, nil
 		}
-		span.Finish()
-	}()
+		return nil, translateGRPCError(err)
+	}
 
-	url, err := c.url(repo)
+	return protoResponse.ToInternal(), nil
+}
+
+func (c *Client) gRPCClient(repo string) (proto.SymbolsServiceClient, error) {
+	address, err := c.Endpoints.Get(repo)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "getting symbols server address for repo %q", repo)
 	}
 
-	reqBody, err := json.Marshal(payload)
+	conn, err := c.GRPCConnectionCache.GetConnection(address)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "getting gRPC connection to symbols server at %q", address)
 	}
 
-	if !strings.HasSuffix(url, "/") {
-		url += "/"
-	}
-	req, err := http.NewRequest("POST", url+method, bytes.NewReader(reqBody))
-	if err != nil {
-		return nil, err
-	}
+	return &automaticRetryClient{base: proto.NewSymbolsServiceClient(conn)}, nil
+}
 
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(ctx)
-
-	if c.HTTPLimiter != nil {
-		span.LogKV("event", "Waiting on HTTP limiter")
-		c.HTTPLimiter.Acquire()
-		defer c.HTTPLimiter.Release()
-		span.LogKV("event", "Acquired HTTP limiter")
+// translateGRPCError translates gRPC errors to their corresponding context errors, if applicable.
+func translateGRPCError(err error) error {
+	st, ok := status.FromError(err)
+	if !ok {
+		return err
 	}
 
-	req, ht := nethttp.TraceRequest(span.Tracer(), req,
-		nethttp.OperationName("Symbols Client"),
-		nethttp.ClientTrace(false))
-	defer ht.Finish()
-
-	return c.HTTPClient.Do(req)
+	switch st.Code() {
+	case codes.Canceled:
+		return context.Canceled
+	case codes.DeadlineExceeded:
+		return context.DeadlineExceeded
+	default:
+		return err
+	}
 }

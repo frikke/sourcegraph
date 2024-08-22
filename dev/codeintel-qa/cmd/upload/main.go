@@ -17,6 +17,7 @@ var (
 	verbose              bool
 	pollInterval         time.Duration
 	timeout              time.Duration
+	srcPath              string
 
 	start = time.Now()
 )
@@ -28,6 +29,7 @@ func init() {
 	flag.BoolVar(&verbose, "verbose", false, "Display full state from graphql")
 	flag.DurationVar(&pollInterval, "poll-interval", time.Second*5, "The time to wait between graphql requests")
 	flag.DurationVar(&timeout, "timeout", 0, "The time it should take to upload and process all targets")
+	flag.StringVar(&srcPath, "src-path", "src", "Path to src-cli binary")
 }
 
 func main() {
@@ -54,13 +56,13 @@ func mainErr(ctx context.Context) error {
 		return err
 	}
 
-	commitsByRepo, err := internal.CommitsByRepo(indexDir)
+	extensionAndCommitsByRepo, err := internal.ExtensionAndCommitsByRepo(indexDir)
 	if err != nil {
 		return err
 	}
 
-	repoNames := make([]string, 0, len(commitsByRepo))
-	for name := range commitsByRepo {
+	repoNames := make([]string, 0, len(extensionAndCommitsByRepo))
+	for name := range extensionAndCommitsByRepo {
 		repoNames = append(repoNames, name)
 	}
 	sort.Strings(repoNames)
@@ -68,7 +70,7 @@ func mainErr(ctx context.Context) error {
 	limiter := internal.NewLimiter(numConcurrentUploads)
 	defer limiter.Close()
 
-	uploads, err := uploadAll(ctx, commitsByRepo, limiter)
+	uploads, err := uploadAll(ctx, extensionAndCommitsByRepo, limiter)
 	if err != nil {
 		return err
 	}

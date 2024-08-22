@@ -1,8 +1,8 @@
-import React, { SVGProps, useCallback } from 'react'
+import React, { type SVGProps, useCallback } from 'react'
 
-import { LineChart, SeriesLikeChart, LineChartProps } from '@sourcegraph/wildcard'
+import { LineChart, type SeriesLikeChart, type LineChartProps } from '@sourcegraph/wildcard'
 
-import { UseSeriesToggleReturn } from '../../../../../../insights/utils/use-series-toggle'
+import type { UseSeriesToggleReturn } from '../../../../../../insights/utils/use-series-toggle'
 import { LockedChart } from '../locked/LockedChart'
 
 export enum SeriesBasedChartTypes {
@@ -26,8 +26,11 @@ const DEFAULT_TRUE_GETTER = (): true => true
 export function SeriesChart<Datum>(props: SeriesChartProps<Datum>): React.ReactElement {
     const { series, type, locked, seriesToggleState, ...otherProps } = props
 
-    const { isSeriesHovered = DEFAULT_TRUE_GETTER, isSeriesSelected = DEFAULT_TRUE_GETTER, hoveredId } =
-        seriesToggleState || {}
+    const {
+        isSeriesHovered = DEFAULT_TRUE_GETTER,
+        isSeriesSelected = DEFAULT_TRUE_GETTER,
+        hoveredId,
+    } = seriesToggleState || {}
 
     const getOpacity = (id: string, hasActivePoint: boolean, isActive: boolean): number => {
         if (hoveredId && !isSeriesHovered(id)) {

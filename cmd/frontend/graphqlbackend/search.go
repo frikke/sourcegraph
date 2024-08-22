@@ -2,16 +2,19 @@ package graphqlbackend
 
 import (
 	"context"
+	"slices"
 
+	"github.com/graph-gophers/graphql-go"
+	"github.com/graph-gophers/graphql-go/relay"
 	"github.com/sourcegraph/log"
 
-	"github.com/sourcegraph/sourcegraph/cmd/frontend/envvar"
+	"github.com/sourcegraph/sourcegraph/internal/auth"
 	"github.com/sourcegraph/sourcegraph/internal/database"
+	"github.com/sourcegraph/sourcegraph/internal/gitserver"
+	"github.com/sourcegraph/sourcegraph/internal/gqlutil"
 	"github.com/sourcegraph/sourcegraph/internal/search"
 	"github.com/sourcegraph/sourcegraph/internal/search/client"
-	"github.com/sourcegraph/sourcegraph/internal/trace"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
-	"github.com/sourcegraph/sourcegraph/schema"
 )
 
 type SearchArgs struct {
@@ -28,12 +31,7 @@ type SearchImplementer interface {
 
 // NewBatchSearchImplementer returns a SearchImplementer that provides search results and suggestions.
 func NewBatchSearchImplementer(ctx context.Context, logger log.Logger, db database.DB, args *SearchArgs) (_ SearchImplementer, err error) {
-	settings, err := DecodedViewerFinalSettings(ctx, db)
-	if err != nil {
-		return nil, err
-	}
-
-	cli := client.NewSearchClient(logger, db, search.Indexed(), search.SearcherURLs())
+	cli := client.New(logger, db, gitserver.NewClient("graphql.batchsearch"))
 	inputs, err := cli.Plan(
 		ctx,
 		args.Version,
@@ -41,19 +39,18 @@ func NewBatchSearchImplementer(ctx context.Context, logger log.Logger, db databa
 		args.Query,
 		search.Precise,
 		search.Batch,
-		settings,
-		envvar.SourcegraphDotComMode(),
+		nil,
 	)
 	if err != nil {
 		var queryErr *client.QueryError
 		if errors.As(err, &queryErr) {
-			return NewSearchAlertResolver(search.AlertForQuery(queryErr.Query, queryErr.Err)).wrapSearchImplementer(db), nil
+			return NewSearchAlertResolver(search.AlertForQuery(queryErr.Err)).wrapSearchImplementer(db), nil
 		}
 		return nil, err
 	}
 
 	return &searchResolver{
-		logger:       logger.Scoped("BatchSearchSearchImplementer", "provides search results and suggestions"),
+		logger:       logger.Scoped("BatchSearchSearchImplementer"),
 		client:       cli,
 		db:           db,
 		SearchInputs: inputs,
@@ -72,23 +69,62 @@ type searchResolver struct {
 	db           database.DB
 }
 
-var MockDecodedViewerFinalSettings *schema.Settings
+const indexedSearchInstanceIDKind = "IndexedSearchInstance"
 
-// DecodedViewerFinalSettings returns the final (merged) settings for the viewer
-func DecodedViewerFinalSettings(ctx context.Context, db database.DB) (_ *schema.Settings, err error) {
-	tr, ctx := trace.New(ctx, "decodedViewerFinalSettings", "")
-	defer func() {
-		tr.SetError(err)
-		tr.Finish()
-	}()
-	if MockDecodedViewerFinalSettings != nil {
-		return MockDecodedViewerFinalSettings, nil
+func marshalIndexedSearchInstanceID(id string) graphql.ID {
+	return relay.MarshalID(indexedSearchInstanceIDKind, id)
+}
+
+type indexedSearchInstance struct {
+	address string
+}
+
+func (i *indexedSearchInstance) Address() string {
+	return i.address
+}
+
+func (i *indexedSearchInstance) ID() graphql.ID {
+	return marshalIndexedSearchInstanceID(i.address)
+}
+
+func unmarshalIndexedSearchInstanceID(id graphql.ID) (indexedSearchInstanceID string, err error) {
+	err = relay.UnmarshalSpec(id, &indexedSearchInstanceID)
+	return
+}
+
+func (r *schemaResolver) indexedSearchInstanceByID(ctx context.Context, id graphql.ID) (*indexedSearchInstance, error) {
+	// 🚨 SECURITY: Site admins only.
+	if err := auth.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
+		return nil, err
 	}
 
-	cascade, err := newSchemaResolver(db).ViewerSettings(ctx)
+	address, err := unmarshalIndexedSearchInstanceID(id)
 	if err != nil {
 		return nil, err
 	}
 
-	return cascade.finalTyped(ctx)
+	return &indexedSearchInstance{address: address}, nil
+}
+
+func (r *schemaResolver) IndexedSearchInstances(ctx context.Context) (gqlutil.SliceConnectionResolver[*indexedSearchInstance], error) {
+	// 🚨 SECURITY: Site admins only.
+	if err := auth.CheckCurrentUserIsSiteAdmin(ctx, r.db); err != nil {
+		return nil, err
+	}
+
+	indexers := search.Indexers()
+	eps, err := indexers.Map.Endpoints()
+	if err != nil {
+		return nil, err
+	}
+
+	slices.Sort(eps)
+
+	var resolvers []*indexedSearchInstance
+	for _, ep := range eps {
+		resolvers = append(resolvers, &indexedSearchInstance{address: ep})
+	}
+	n := len(resolvers)
+
+	return gqlutil.NewSliceConnectionResolver(resolvers, n, n), nil
 }

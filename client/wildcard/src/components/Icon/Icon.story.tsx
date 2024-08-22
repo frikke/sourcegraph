@@ -1,30 +1,21 @@
 import { mdiClose } from '@mdi/js'
-import { Story, Meta } from '@storybook/react'
+import type { StoryFn, Meta } from '@storybook/react'
 import CloseIcon from 'mdi-react/CloseIcon'
-
-import { BrandedStory } from '@sourcegraph/branded/src/components/BrandedStory'
-import webStyles from '@sourcegraph/web/src/SourcegraphWebApp.scss'
 
 import { Icon } from '..'
 import { H3 } from '../..'
+import { BrandedStory } from '../../stories/BrandedStory'
 import { SourcegraphIcon } from '../SourcegraphIcon'
 import { Code } from '../Typography'
 
 const config: Meta = {
     title: 'wildcard/Icon',
 
-    decorators: [
-        story => (
-            <BrandedStory styles={webStyles}>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>
-        ),
-    ],
+    decorators: [story => <BrandedStory>{() => <div className="container mt-3">{story()}</div>}</BrandedStory>],
 
     parameters: {
         component: Icon,
-        chromatic: {
-            enableDarkMode: true,
-            disableSnapshot: false,
-        },
+
         design: {
             type: 'figma',
             name: 'Figma',
@@ -34,7 +25,7 @@ const config: Meta = {
 }
 export default config
 
-export const Simple: Story = () => (
+export const Simple: StoryFn = () => (
     <>
         <H3>Small Icon</H3>
         <Icon as={SourcegraphIcon} size="sm" aria-label="Sourcegraph logo" />

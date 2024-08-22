@@ -1,5 +1,6 @@
-import { DecoratorFn, Story, Meta } from '@storybook/react'
+import type { Decorator, StoryFn, Meta } from '@storybook/react'
 
+import { noOpTelemetryRecorder } from '@sourcegraph/shared/src/telemetry'
 import { NOOP_TELEMETRY_SERVICE } from '@sourcegraph/shared/src/telemetry/telemetryService'
 
 import { WebStory } from '../WebStory'
@@ -7,48 +8,45 @@ import { WebStory } from '../WebStory'
 import { AddExternalServicesPage } from './AddExternalServicesPage'
 import { codeHostExternalServices, nonCodeHostExternalServices } from './externalServices'
 
-const decorator: DecoratorFn = story => <div className="p-3 container">{story()}</div>
+const decorator: Decorator = story => <div className="p-3 container">{story()}</div>
 
 const config: Meta = {
     title: 'web/External services/AddExternalServicesPage',
     decorators: [decorator],
-    parameters: {
-        chromatic: {
-            // Delay screenshot taking, so Monaco has some time to get syntax highlighting prepared.
-            delay: 2000,
-        },
-    },
+    parameters: {},
 }
 
 export default config
 
-export const Overview: Story = () => (
+export const Overview: StoryFn = () => (
     <WebStory>
         {webProps => (
             <AddExternalServicesPage
                 {...webProps}
-                routingPrefix="/site-admin"
                 telemetryService={NOOP_TELEMETRY_SERVICE}
-                afterCreateRoute="/site-admin/after"
+                telemetryRecorder={noOpTelemetryRecorder}
                 codeHostExternalServices={codeHostExternalServices}
                 nonCodeHostExternalServices={nonCodeHostExternalServices}
                 autoFocusForm={false}
+                externalServicesFromFile={false}
+                allowEditExternalServicesWithFile={false}
             />
         )}
     </WebStory>
 )
 
-export const AddConnectionBykind: Story = () => (
+export const AddConnectionBykind: StoryFn = () => (
     <WebStory initialEntries={['/page?id=github']}>
         {webProps => (
             <AddExternalServicesPage
                 {...webProps}
-                routingPrefix="/site-admin"
                 telemetryService={NOOP_TELEMETRY_SERVICE}
-                afterCreateRoute="/site-admin/after"
+                telemetryRecorder={noOpTelemetryRecorder}
                 codeHostExternalServices={codeHostExternalServices}
                 nonCodeHostExternalServices={nonCodeHostExternalServices}
                 autoFocusForm={false}
+                externalServicesFromFile={false}
+                allowEditExternalServicesWithFile={false}
             />
         )}
     </WebStory>

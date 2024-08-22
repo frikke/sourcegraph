@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
 
 	"github.com/sourcegraph/sourcegraph/internal/gqltestutil"
 )
@@ -27,10 +28,9 @@ func TestOrganization(t *testing.T) {
 	// "authtest-organization", the user should not have access to any of the
 	// organization's resources.
 	const testUsername = "authtest-user-organization"
-	userClient, err := gqltestutil.SignUp(*baseURL, testUsername+"@sourcegraph.com", testUsername, "mysecurepassword")
-	if err != nil {
-		t.Fatal(err)
-	}
+	userClient, err := gqltestutil.NewClient(*baseURL)
+	require.NoError(t, err)
+	require.NoError(t, userClient.SignUp(testUsername+"@sourcegraph.com", testUsername, "mysecurepassword"))
 	defer func() {
 		err := client.DeleteUser(userClient.AuthenticatedUserID(), true)
 		if err != nil {
@@ -76,17 +76,9 @@ func TestOrganization(t *testing.T) {
 			wantErr: "current user is not an org member",
 		},
 		{
-			name: "view organization memebers",
-			run: func() error {
-				_, err := userClient.OrganizationMembers(orgID)
-				return err
-			},
-			wantErr: "must be a member of this organization to view members",
-		},
-		{
 			name: "invite user to organization",
 			run: func() error {
-				_, err := userClient.InviteUserToOrganization(orgID, testUsername, "")
+				_, err := userClient.InviteUserToOrganization(orgID, testUsername)
 				return err
 			},
 			wantErr: "current user is not an org member",

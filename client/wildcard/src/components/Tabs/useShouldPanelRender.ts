@@ -1,27 +1,22 @@
-import { useEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useState, type ReactNode } from 'react'
 
 import { useTabsContext as useReachTabsContext } from '@reach/tabs'
 
 import { useTablePanelIndex, useTabsState } from './context'
 
-export function useShouldPanelRender(children: React.ReactNode): boolean {
+type FunctionLikeChildren = ReactNode | ((context: any) => ReactNode)
+
+export function useShouldPanelRender(children: FunctionLikeChildren): boolean {
     const { selectedIndex } = useReachTabsContext()
     const index = useTablePanelIndex()
     const {
         settings: { lazy, behavior },
     } = useTabsState()
     const [wasRendered, setWasRendered] = useState(selectedIndex === index)
-    const previousChildren = useRef(children)
 
-    useEffect(() => {
-        if (lazy) {
-            // If children change, we should invalidate "cache" and unrender
-            if (children !== previousChildren.current) {
-                setWasRendered(index === selectedIndex)
-                previousChildren.current = children
-            } else if (index === selectedIndex) {
-                setWasRendered(true)
-            }
+    useLayoutEffect(() => {
+        if (lazy && index === selectedIndex) {
+            setWasRendered(true)
         }
     }, [lazy, children, index, selectedIndex])
 
@@ -33,5 +28,6 @@ export function useShouldPanelRender(children: React.ReactNode): boolean {
             return wasRendered
         }
     }
+
     return true
 }

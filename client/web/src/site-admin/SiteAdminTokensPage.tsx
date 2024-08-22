@@ -1,21 +1,21 @@
 import React, { useCallback, useMemo } from 'react'
 
 import { mdiPlus } from '@mdi/js'
-import { RouteComponentProps } from 'react-router'
 import { Subject } from 'rxjs'
 
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
-import { Button, ButtonLink, Container, Icon, PageHeader } from '@sourcegraph/wildcard'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { Button, ButtonLink, Container, Icon, PageHeader, Tooltip } from '@sourcegraph/wildcard'
 
-import { AuthenticatedUser } from '../auth'
+import type { AuthenticatedUser } from '../auth'
 import { FilteredConnection } from '../components/FilteredConnection'
 import { PageTitle } from '../components/PageTitle'
-import { AccessTokenFields } from '../graphql-operations'
-import { AccessTokenNode, AccessTokenNodeProps } from '../settings/tokens/AccessTokenNode'
+import type { AccessTokenFields } from '../graphql-operations'
+import { AccessTokenNode, type AccessTokenNodeProps } from '../settings/tokens/AccessTokenNode'
 
 import { queryAccessTokens } from './backend'
 
-interface Props extends Pick<RouteComponentProps<{}>, 'history' | 'location'>, TelemetryProps {
+interface Props extends TelemetryProps, TelemetryV2Props {
     authenticatedUser: AuthenticatedUser
 }
 
@@ -23,14 +23,14 @@ interface Props extends Pick<RouteComponentProps<{}>, 'history' | 'location'>, T
  * Displays a list of all access tokens on the site.
  */
 export const SiteAdminTokensPage: React.FunctionComponent<React.PropsWithChildren<Props>> = ({
-    history,
-    location,
     authenticatedUser,
     telemetryService,
+    telemetryRecorder,
 }) => {
     useMemo(() => {
         telemetryService.logViewEvent('SiteAdminTokens')
-    }, [telemetryService])
+        telemetryRecorder.recordEvent('admin.tokens', 'view')
+    }, [telemetryService, telemetryRecorder])
     const accessTokenUpdates = useMemo(() => new Subject<void>(), [])
     const onDidUpdateAccessToken = useCallback(() => accessTokenUpdates.next(), [accessTokenUpdates])
     const accessTokensEnabled = window.context.accessTokensAllow !== 'none'
@@ -54,18 +54,15 @@ export const SiteAdminTokensPage: React.FunctionComponent<React.PropsWithChildre
                                 className="ml-2"
                                 to={`${authenticatedUser.settingsURL!}/tokens/new`}
                             >
-                                <Icon aria-hidden={true} svgPath={mdiPlus} /> Generate access token
+                                <Icon aria-hidden={true} svgPath={mdiPlus} /> Generate new token
                             </ButtonLink>
                         )}
                         {!accessTokensEnabled && (
-                            <Button
-                                variant="primary"
-                                title="Access token creation is disabled in site configuration"
-                                className="ml-2"
-                                disabled={true}
-                            >
-                                <Icon aria-hidden={true} svgPath={mdiPlus} /> Generate access token
-                            </Button>
+                            <Tooltip content="Access token creation is disabled in site configuration">
+                                <Button variant="primary" className="ml-2" disabled={true}>
+                                    <Icon aria-hidden={true} svgPath={mdiPlus} /> Generate new token
+                                </Button>
+                            </Tooltip>
                         )}
                     </>
                 }
@@ -84,8 +81,6 @@ export const SiteAdminTokensPage: React.FunctionComponent<React.PropsWithChildre
                     }}
                     updates={accessTokenUpdates}
                     hideSearch={true}
-                    history={history}
-                    location={location}
                 />
             </Container>
         </div>

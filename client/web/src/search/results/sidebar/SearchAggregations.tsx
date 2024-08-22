@@ -1,11 +1,12 @@
-import { FC, useEffect, useState, memo } from 'react'
+import { type FC, useEffect, useState, memo } from 'react'
 
 import { mdiArrowExpand } from '@mdi/js'
 
-import { SearchAggregationMode, SearchPatternType } from '@sourcegraph/shared/src/schema'
-import { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
+import { TelemetryV2Props } from '@sourcegraph/shared/src/telemetry'
+import type { TelemetryProps } from '@sourcegraph/shared/src/telemetry/telemetryService'
 import { Button, Icon } from '@sourcegraph/wildcard'
 
+import type { SearchAggregationMode, SearchPatternType } from '../../../graphql-operations'
 import {
     AggregationChartCard,
     AggregationModeControls,
@@ -20,7 +21,7 @@ import {
 
 import styles from './SearchAggregations.module.scss'
 
-interface SearchAggregationsProps extends TelemetryProps {
+interface SearchAggregationsProps extends TelemetryProps, TelemetryV2Props {
     /**
      * Current submitted query, note that this query isn't a live query
      * that is synced with typed query in the search box, this query is submitted
@@ -41,11 +42,11 @@ interface SearchAggregationsProps extends TelemetryProps {
      * That should update the query and re-trigger search (but this should be connected
      * to this UI through its consumer)
      */
-    onQuerySubmit: (newQuery: string) => void
+    onQuerySubmit: (newQuery: string, updatedSearchQuery: string) => void
 }
 
 export const SearchAggregations: FC<SearchAggregationsProps> = memo(props => {
-    const { query, patternType, proactive, caseSensitive, telemetryService, onQuerySubmit } = props
+    const { query, patternType, proactive, caseSensitive, telemetryService, telemetryRecorder, onQuerySubmit } = props
 
     const [extendedTimeout, setExtendedTimeoutLocal] = useState(false)
 
@@ -58,6 +59,8 @@ export const SearchAggregations: FC<SearchAggregationsProps> = memo(props => {
         proactive,
         caseSensitive,
         extendedTimeout,
+        telemetryService,
+        telemetryRecorder,
     })
 
     // When query is updated reset extendedTimeout as per business rules
@@ -69,14 +72,15 @@ export const SearchAggregations: FC<SearchAggregationsProps> = memo(props => {
         // Clearing the aggregation mode on drill down would provide a better experience
         // in most cases and preserve the desired behavior of the capture group search
         // when the original query had multiple capture groups
-        setAggregationMode(null)
+        const updatedSearchQuery = setAggregationMode(null)
 
-        onQuerySubmit(query)
+        onQuerySubmit(query, updatedSearchQuery)
         telemetryService.log(
             GroupResultsPing.ChartBarClick,
             { aggregationMode, index, uiMode: 'sidebar' },
             { aggregationMode, index, uiMode: 'sidebar' }
         )
+        telemetryRecorder.recordEvent('search.group.results.chartBar', 'click')
     }
 
     const handleBarHover = (): void => {
@@ -85,11 +89,13 @@ export const SearchAggregations: FC<SearchAggregationsProps> = memo(props => {
             { aggregationMode, uiMode: 'sidebar' },
             { aggregationMode, uiMode: 'sidebar' }
         )
+        telemetryRecorder.recordEvent('search.group.results.chartBar', 'hover')
     }
 
     const handleExpandClick = (): void => {
         setAggregationUIMode(AggregationUIMode.SearchPage)
         telemetryService.log(GroupResultsPing.ExpandFullViewPanel, { aggregationMode }, { aggregationMode })
+        telemetryRecorder.recordEvent('search.group.results', 'openExpandedView')
     }
 
     const handleAggregationModeChange = (mode: SearchAggregationMode): void => {
@@ -99,6 +105,7 @@ export const SearchAggregations: FC<SearchAggregationsProps> = memo(props => {
             { aggregationMode: mode, uiMode: 'sidebar' },
             { aggregationMode: mode, uiMode: 'sidebar' }
         )
+        telemetryRecorder.recordEvent('search.group.aggregationMode', 'click')
     }
 
     const handleAggregationModeHover = (aggregationMode: SearchAggregationMode, available: boolean): void => {
@@ -108,11 +115,12 @@ export const SearchAggregations: FC<SearchAggregationsProps> = memo(props => {
                 { aggregationMode, uiMode: 'sidebar' },
                 { aggregationMode, uiMode: 'sidebar' }
             )
+            telemetryRecorder.recordEvent('search.group.aggregationMode', 'hover')
         }
     }
 
     return (
-        <article className="pt-2">
+        <div className="pt-2">
             <AggregationModeControls
                 availability={data?.searchQueryAggregate?.modeAvailability}
                 loading={loading}
@@ -153,6 +161,8 @@ export const SearchAggregations: FC<SearchAggregationsProps> = memo(props => {
                     </footer>
                 </>
             )}
-        </article>
+        </div>
     )
 })
+
+SearchAggregations.displayName = 'SearchAggregations'

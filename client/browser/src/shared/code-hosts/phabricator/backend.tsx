@@ -1,21 +1,20 @@
-import { from, Observable, of, throwError } from 'rxjs'
+import { from, type Observable, of, throwError, lastValueFrom } from 'rxjs'
 import { fromFetch } from 'rxjs/fetch'
-import { map, mapTo, switchMap, catchError } from 'rxjs/operators'
+import { map, switchMap, catchError } from 'rxjs/operators'
 
 import { memoizeObservable } from '@sourcegraph/common'
 import { dataOrThrowErrors, gql, checkOk } from '@sourcegraph/http-client'
 import { isRepoNotFoundErrorLike } from '@sourcegraph/shared/src/backend/errors'
-import { PlatformContext } from '@sourcegraph/shared/src/platform/context'
-import { RepoSpec, FileSpec, ResolvedRevisionSpec } from '@sourcegraph/shared/src/util/url'
+import type { PlatformContext } from '@sourcegraph/shared/src/platform/context'
+import type { RepoSpec, FileSpec, ResolvedRevisionSpec } from '@sourcegraph/shared/src/util/url'
 
 import { storage } from '../../../browser-extension/web-extension-api/storage'
-import { addPhabricatorRepoResult, ResolveStagingRevResult } from '../../../graphql-operations'
+import type { addPhabricatorRepoResult, ResolveStagingRevResult } from '../../../graphql-operations'
 import { isExtension } from '../../context'
 import { resolveRepo } from '../../repo/backend'
 
+import type { RevisionSpec, DiffSpec, BaseDiffSpec } from '.'
 import { normalizeRepoName } from './util'
-
-import { RevisionSpec, DiffSpec, BaseDiffSpec } from '.'
 
 interface PhabEntity {
     id: string // e.g. "48"
@@ -223,7 +222,7 @@ const createPhabricatorRepo = memoizeObservable(
             `,
             variables,
             mightContainPrivateInfo: true,
-        }).pipe(mapTo(undefined)),
+        }).pipe(map(() => undefined)),
     ({ callsign }) => callsign
 )
 
@@ -250,21 +249,21 @@ export function getRepoDetailsFromCallsign(
             if (!repo) {
                 throw new Error(`could not locate repo with callsign ${callsign}`)
             }
-            if (!repo.attachments || !repo.attachments.uris) {
+            if (!repo.attachments?.uris) {
                 throw new Error(`could not locate git uri for repo with callsign ${callsign}`)
             }
             return convertConduitRepoToRepoDetails(repo)
         }),
         switchMap((details: PhabricatorRepoDetails | null) => {
             if (!details) {
-                return throwError(new Error('could not parse repo details'))
+                return throwError(() => new Error('could not parse repo details'))
             }
             return createPhabricatorRepo({
                 callsign,
                 repoName: details.rawRepoName,
                 phabricatorURL: window.location.origin,
                 requestGraphQL,
-            }).pipe(mapTo(details))
+            }).pipe(map(() => details))
         })
     )
 }
@@ -276,9 +275,9 @@ export function getRepoDetailsFromCallsign(
  * case it fails we query the conduit API.
  */
 export function getSourcegraphURLFromConduit(): Promise<string> {
-    return queryConduitHelper<{ url: string }>('/api/sourcegraph.configuration', {})
-        .pipe(map(({ url }) => url))
-        .toPromise()
+    return lastValueFrom(
+        queryConduitHelper<{ url: string }>('/api/sourcegraph.configuration', {}).pipe(map(({ url }) => url))
+    )
 }
 
 const getRepoDetailsFromRepoPHID = memoizeObservable(
@@ -304,23 +303,23 @@ const getRepoDetailsFromRepoPHID = memoizeObservable(
                 if (!repo) {
                     throw new Error(`could not locate repo with phid ${phid}`)
                 }
-                if (!repo.attachments || !repo.attachments.uris) {
+                if (!repo.attachments?.uris) {
                     throw new Error(`could not locate git uri for repo with phid ${phid}`)
                 }
                 return from(convertConduitRepoToRepoDetails(repo)).pipe(
                     switchMap((details: PhabricatorRepoDetails | null) => {
                         if (!details) {
-                            return throwError(new Error('could not parse repo details'))
+                            return throwError(() => new Error('could not parse repo details'))
                         }
-                        if (!repo.fields || !repo.fields.callsign) {
-                            return throwError(new Error('callsign not found'))
+                        if (!repo.fields?.callsign) {
+                            return throwError(() => new Error('callsign not found'))
                         }
                         return createPhabricatorRepo({
                             callsign: repo.fields.callsign,
                             repoName: details.rawRepoName,
                             phabricatorURL: window.location.origin,
                             requestGraphQL,
-                        }).pipe(mapTo(details))
+                        }).pipe(map(() => details))
                     })
                 )
             })
@@ -591,10 +590,10 @@ export function resolveDiffRevision(
             return resolveRepo({ rawRepoName: stagingDetails.repoName, requestGraphQL }).pipe(
                 // If the repo is present on the Sourcegraph instance,
                 // use the commitID and repo name from the staging details.
-                mapTo({
+                map(() => ({
                     commitID: stagingDetails.ref.commit,
                     stagingRepoName: stagingDetails.repoName,
-                }),
+                })),
                 // Otherwise, create a one-off commit containing the patch on the Sourcegraph instance,
                 // and resolve to the commit ID returned by the Sourcegraph instance.
                 catchError(error => {

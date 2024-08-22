@@ -1,58 +1,30 @@
 import * as React from 'react'
 
-import { gql } from '@sourcegraph/http-client'
-import { LinkOrSpan } from '@sourcegraph/shared/src/components/LinkOrSpan'
-import * as GQL from '@sourcegraph/shared/src/schema'
+import { Badge, LinkOrSpan } from '@sourcegraph/wildcard'
 
-import { Timestamp } from '../../../../components/time/Timestamp'
-import { AccountName } from '../../../dotcom/productSubscriptions/AccountName'
-import { ProductSubscriptionLabel } from '../../../dotcom/productSubscriptions/ProductSubscriptionLabel'
-import { ProductLicenseTags } from '../../../productSubscription/ProductLicenseTags'
+import type { EnterprisePortalEnvironment } from './enterpriseportal'
+import {
+    type EnterpriseSubscription,
+    EnterpriseSubscriptionCondition_Status,
+} from './enterpriseportalgen/subscriptions_pb'
+import { InstanceTypeBadge } from './InstanceTypeBadge'
 
-export const siteAdminProductSubscriptionFragment = gql`
-    fragment SiteAdminProductSubscriptionFields on ProductSubscription {
-        id
-        name
-        account {
-            id
-            username
-            displayName
-            emails {
-                email
-                isPrimary
-            }
-        }
-        activeLicense {
-            id
-            info {
-                productNameWithBrand
-                tags
-                userCount
-                expiresAt
-            }
-            licenseKey
-            createdAt
-        }
-        createdAt
-        isArchived
-        urlForSiteAdmin
-    }
-`
+import styles from './SiteAdminProductSubscriptionNode.module.scss'
 
 export const SiteAdminProductSubscriptionNodeHeader: React.FunctionComponent<React.PropsWithChildren<unknown>> = () => (
     <thead>
         <tr>
-            <th>ID</th>
-            <th>Customer</th>
-            <th>Plan</th>
-            <th>Expiration</th>
-            <th>Tags</th>
+            <th>Display name</th>
+            <th>Salesforce subscription</th>
+            <th>Instance type</th>
+            <th>Instance domain</th>
         </tr>
     </thead>
 )
 
 export interface SiteAdminProductSubscriptionNodeProps {
-    node: GQL.IProductSubscription
+    env: EnterprisePortalEnvironment
+    node: EnterpriseSubscription
 }
 
 /**
@@ -60,42 +32,44 @@ export interface SiteAdminProductSubscriptionNodeProps {
  */
 export const SiteAdminProductSubscriptionNode: React.FunctionComponent<
     React.PropsWithChildren<SiteAdminProductSubscriptionNodeProps>
-> = ({ node }) => (
-    <tr>
-        <td className="text-nowrap">
-            <LinkOrSpan to={node.urlForSiteAdmin} className="mr-3">
-                {node.name}
-            </LinkOrSpan>
-        </td>
-        <td className="w-100">
-            <AccountName account={node.account} />
-            {node.account && (
-                <div>
-                    <small>
-                        {node.account.emails
-                            .filter(email => email.isPrimary)
-                            .map(({ email }) => email)
-                            .join(', ')}
-                    </small>
-                </div>
-            )}
-        </td>
-        <td className="text-nowrap">
-            <ProductSubscriptionLabel productSubscription={node} className="mr-3" />
-        </td>
-        <td className="text-nowrap">
-            {node.activeLicense?.info ? (
-                <Timestamp date={node.activeLicense.info.expiresAt} />
-            ) : (
-                <span className="text-muted font-italic">None</span>
-            )}
-        </td>
-        <td className="w-100">
-            {node.activeLicense?.info && node.activeLicense.info.tags.length > 0 ? (
-                <ProductLicenseTags tags={node.activeLicense.info.tags} />
-            ) : (
-                <span className="text-muted font-italic">None</span>
-            )}
-        </td>
-    </tr>
-)
+> = ({ env, node }) => {
+    const archived = node.conditions.find(
+        condition => condition.status === EnterpriseSubscriptionCondition_Status.ARCHIVED
+    )
+
+    return (
+        <tr className={styles.row}>
+            <td>
+                {archived && (
+                    <Badge variant="danger" small={true} className="mr-2">
+                        Archived
+                    </Badge>
+                )}
+                <LinkOrSpan to={`/site-admin/dotcom/product/subscriptions/${node.id}?env=${env}`} className="mr-2">
+                    <strong>{node.displayName}</strong>
+                </LinkOrSpan>
+            </td>
+            <td className="text-nowrap">
+                {node?.salesforce?.subscriptionId ? (
+                    <span className="text-monospace mr-2">{node?.salesforce?.subscriptionId}</span>
+                ) : (
+                    <span className="text-muted mr-2">Not set</span>
+                )}
+            </td>
+            <td className="text-nowrap">
+                {node?.instanceType ? (
+                    <InstanceTypeBadge instanceType={node.instanceType} className="mr-2" />
+                ) : (
+                    <span className="text-muted mr-2">Not set</span>
+                )}
+            </td>
+            <td className="text-nowrap">
+                {node?.instanceDomain ? (
+                    <small>{node?.instanceDomain}</small>
+                ) : (
+                    <span className="text-muted mr-2">Not set</span>
+                )}
+            </td>
+        </tr>
+    )
+}

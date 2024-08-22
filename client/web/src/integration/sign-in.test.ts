@@ -1,10 +1,11 @@
+import { afterEach, beforeEach, describe, it } from 'mocha'
+
 import { accessibilityAudit } from '@sourcegraph/shared/src/testing/accessibility'
-import { createDriverForTest, Driver } from '@sourcegraph/shared/src/testing/driver'
+import { createDriverForTest, type Driver } from '@sourcegraph/shared/src/testing/driver'
 import { afterEachSaveScreenshotIfFailed } from '@sourcegraph/shared/src/testing/screenshotReporter'
 
-import { createWebIntegrationTestContext, WebIntegrationTestContext } from './context'
+import { createWebIntegrationTestContext, type WebIntegrationTestContext } from './context'
 import { commonWebGraphQlResults } from './graphQlResults'
-import { percySnapshotWithVariants } from './utils'
 
 describe('SignIn', () => {
     let driver: Driver
@@ -30,11 +31,13 @@ describe('SignIn', () => {
                 currentUser: null,
             }),
         })
+        testContext.overrideJsContext({
+            currentUser: undefined,
+        })
+
         await driver.page.goto(driver.sourcegraphBaseUrl + '/sign-in')
         await driver.page.waitForSelector('#username-or-email')
         await driver.page.waitForSelector('input[name="password"]')
-
-        await percySnapshotWithVariants(driver.page, 'Sign in page')
         await accessibilityAudit(driver.page)
     })
 })

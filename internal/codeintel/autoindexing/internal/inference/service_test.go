@@ -3,13 +3,14 @@ package inference
 import (
 	"context"
 	"io"
-	"strings"
+	"io/fs"
+	"sort"
 	"testing"
 
-	"github.com/grafana/regexp"
 	"golang.org/x/time/rate"
 
 	"github.com/sourcegraph/sourcegraph/internal/api"
+	"github.com/sourcegraph/sourcegraph/internal/fileutil"
 	"github.com/sourcegraph/sourcegraph/internal/gitserver"
 	"github.com/sourcegraph/sourcegraph/internal/luasandbox"
 	"github.com/sourcegraph/sourcegraph/internal/observation"
@@ -18,30 +19,36 @@ import (
 )
 
 func testService(t *testing.T, repositoryContents map[string]string) *Service {
+	repositoryPaths := make([]string, 0, len(repositoryContents))
+	for path := range repositoryContents {
+		repositoryPaths = append(repositoryPaths, path)
+	}
+	sort.Strings(repositoryPaths)
+
 	// Real deal
-	sandboxService := luasandbox.GetService()
+	sandboxService := luasandbox.NewService()
 
 	// Fake deal
 	gitService := NewMockGitService()
-	gitService.ListFilesFunc.SetDefaultHook(func(ctx context.Context, repo api.RepoName, commit string, pattern *regexp.Regexp) (paths []string, _ error) {
-		for path := range repositoryContents {
-			if pattern.MatchString(path) {
-				paths = append(paths, path)
-			}
+	gitService.ReadDirFunc.SetDefaultHook(func(ctx context.Context, _ api.RepoName, _ api.CommitID, path string, recurse bool) ([]fs.FileInfo, error) {
+		var fds []fs.FileInfo
+		for _, repositoryPath := range repositoryPaths {
+			fds = append(fds, &fileutil.FileInfo{
+				Name_: repositoryPath,
+			})
 		}
-
-		return
+		return fds, nil
 	})
 	gitService.ArchiveFunc.SetDefaultHook(func(ctx context.Context, repoName api.RepoName, opts gitserver.ArchiveOptions) (io.ReadCloser, error) {
 		files := map[string]string{}
-		for _, spec := range opts.Pathspecs {
-			if contents, ok := repositoryContents[strings.TrimPrefix(string(spec), ":(literal)")]; ok {
-				files[string(spec)] = contents
+		for _, path := range opts.Paths {
+			if contents, ok := repositoryContents[path]; ok {
+				files[path] = contents
 			}
 		}
 
 		return unpacktest.CreateTarArchive(t, files), nil
 	})
 
-	return newService(sandboxService, gitService, ratelimit.NewInstrumentedLimiter("TestInference", rate.NewLimiter(rate.Limit(100), 1)), 100, 1024*1024, &observation.TestContext)
+	return newService(observation.TestContextTB(t), sandboxService, gitService, ratelimit.NewInstrumentedLimiter("TestInference", rate.NewLimiter(rate.Limit(100), 1)), 100, 1024*1024)
 }

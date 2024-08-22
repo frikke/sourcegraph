@@ -1,6 +1,7 @@
 import { render } from '@testing-library/react'
+import { describe, expect, it } from 'vitest'
 
-import { renderWithBrandedContext } from '@sourcegraph/shared/src/testing'
+import { renderWithBrandedContext } from '../../../testing'
 
 import { RouterLink } from './RouterLink'
 

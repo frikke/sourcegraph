@@ -17,16 +17,17 @@ import (
 
 	"github.com/RoaringBitmap/roaring"
 	"github.com/gomodule/oauth1/oauth"
-	"github.com/inconshreveable/log15"
-	"github.com/opentracing-contrib/go-stdlib/nethttp"
+	"github.com/inconshreveable/log15" //nolint:logging // TODO move all logging to sourcegraph/log
 	"github.com/segmentio/fasthash/fnv1"
+
+	"github.com/sourcegraph/log"
 
 	"github.com/sourcegraph/sourcegraph/internal/errcode"
 	"github.com/sourcegraph/sourcegraph/internal/extsvc/auth"
 	"github.com/sourcegraph/sourcegraph/internal/httpcli"
 	"github.com/sourcegraph/sourcegraph/internal/metrics"
 	"github.com/sourcegraph/sourcegraph/internal/ratelimit"
-	"github.com/sourcegraph/sourcegraph/internal/trace/ot"
+	"github.com/sourcegraph/sourcegraph/internal/trace"
 	"github.com/sourcegraph/sourcegraph/lib/errors"
 	"github.com/sourcegraph/sourcegraph/schema"
 )
@@ -68,7 +69,7 @@ func NewClient(urn string, config *schema.BitbucketServerConnection, httpClient 
 		return nil, err
 	}
 
-	if config.Authorization == nil {
+	if config.Authorization == nil || config.Authorization.Oauth2 {
 		if config.Token != "" {
 			client.Auth = &auth.OAuthBearerToken{Token: config.Token}
 		} else {
@@ -77,7 +78,7 @@ func NewClient(urn string, config *schema.BitbucketServerConnection, httpClient 
 				Password: config.Password,
 			}
 		}
-	} else {
+	} else if config.Authorization.Oauth != nil {
 		err := client.SetOAuth(
 			config.Authorization.Oauth.ConsumerKey,
 			config.Authorization.Oauth.SigningKey,
@@ -105,7 +106,7 @@ func newClient(urn string, config *schema.BitbucketServerConnection, httpClient 
 		httpClient: httpClient,
 		URL:        u,
 		// Default limits are defined in extsvc.GetLimitFromConfig
-		rateLimit: ratelimit.DefaultRegistry.Get(urn),
+		rateLimit: ratelimit.NewInstrumentedLimiter(urn, ratelimit.NewGlobalRateLimiter(log.Scoped("BitbucketServerClient"), urn)),
 	}, nil
 }
 
@@ -303,17 +304,15 @@ func (c *Client) UserPermissions(ctx context.Context, username string) (perms []
 		Permission Perm  `json:"permission"`
 	}
 
-	var ps []permission
-	_, err := c.send(ctx, "GET", "rest/api/1.0/admin/permissions/users", qry, nil, &struct {
+	resp := &struct {
 		Values []permission `json:"values"`
-	}{
-		Values: ps,
-	})
+	}{}
+	_, err := c.send(ctx, "GET", "rest/api/1.0/admin/permissions/users", qry, nil, &resp)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, p := range ps {
+	for _, p := range resp.Values {
 		if p.User.Name == username {
 			perms = append(perms, p.Permission)
 		}
@@ -474,9 +473,10 @@ type UpdatePullRequestInput struct {
 	PullRequestID string `json:"-"`
 	Version       int    `json:"version"`
 
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	ToRef       Ref    `json:"toRef"`
+	Title       string     `json:"title"`
+	Description string     `json:"description"`
+	ToRef       Ref        `json:"toRef"`
+	Reviewers   []Reviewer `json:"reviewers"`
 }
 
 func (c *Client) UpdatePullRequest(ctx context.Context, in *UpdatePullRequestInput) (*PullRequest, error) {
@@ -579,8 +579,12 @@ func (c *Client) CreatePullRequest(ctx context.Context, pr *PullRequest) error {
 		pr.ToRef.Repository.Slug,
 	)
 
-	_, err = c.send(ctx, "POST", path, nil, payload, pr)
+	resp, err := c.send(ctx, "POST", path, nil, payload, pr)
 	if err != nil {
+		var code int
+		if resp != nil {
+			code = resp.StatusCode
+		}
 		if IsDuplicatePullRequest(err) {
 			pr, extractErr := ExtractExistingPullRequest(err)
 			if extractErr != nil {
@@ -590,7 +594,7 @@ func (c *Client) CreatePullRequest(ctx context.Context, pr *PullRequest) error {
 				Existing: pr,
 			}
 		}
-		return err
+		return errcode.MaybeMakeNonRetryable(code, err)
 	}
 	return nil
 }
@@ -688,6 +692,33 @@ func (c *Client) ReopenPullRequest(ctx context.Context, pr *PullRequest) error {
 	qry := url.Values{"version": {strconv.Itoa(pr.Version)}}
 
 	_, err := c.send(ctx, "POST", path, qry, nil, pr)
+	return err
+}
+
+type DeleteBranchInput struct {
+	// Don't actually delete the ref name, just do a dry run
+	DryRun bool `json:"dryRun,omitempty"`
+	// Commit ID that the provided ref name is expected to point to. Should the ref point
+	// to a different commit ID, a 400 response will be returned with appropriate error
+	// details.
+	EndPoint *string `json:"endPoint,omitempty"`
+	// Name of the ref to be deleted
+	Name string `json:"name,omitempty"`
+}
+
+// DeleteBranch deletes a branch on the given repo.
+func (c *Client) DeleteBranch(ctx context.Context, projectKey, repoSlug string, input DeleteBranchInput) error {
+	path := fmt.Sprintf(
+		"rest/branch-utils/latest/projects/%s/repos/%s/branches",
+		projectKey,
+		repoSlug,
+	)
+
+	resp, err := c.send(ctx, "DELETE", path, nil, input, nil)
+	if resp != nil && resp.StatusCode != http.StatusNoContent {
+		return errors.Newf("unexpected status code: %d", resp.StatusCode)
+	}
+
 	return err
 }
 
@@ -912,7 +943,6 @@ func (c *Client) page(ctx context.Context, path string, qry url.Values, token *P
 		PageToken: &next,
 		Values:    results,
 	})
-
 	if err != nil {
 		return nil, err
 	}
@@ -942,17 +972,20 @@ func (c *Client) send(ctx context.Context, method, path string, qry url.Values, 
 	return c.do(ctx, req, result)
 }
 
-func (c *Client) do(ctx context.Context, req *http.Request, result any) (*http.Response, error) {
+func (c *Client) do(ctx context.Context, req *http.Request, result any) (_ *http.Response, err error) {
+	tr, ctx := trace.New(ctx, "BitbucketServer.do")
+	defer tr.EndWithErr(&err)
+	req = req.WithContext(ctx)
+
+	req.URL.Path, err = url.JoinPath(c.URL.Path, req.URL.Path) // First join paths so that base path is kept
+	if err != nil {
+		return nil, err
+	}
 	req.URL = c.URL.ResolveReference(req.URL)
+
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	}
-
-	req, ht := nethttp.TraceRequest(ot.GetTracer(ctx),
-		req.WithContext(ctx),
-		nethttp.OperationName("Bitbucket Server"),
-		nethttp.ClientTrace(false))
-	defer ht.Finish()
 
 	if err := c.Auth.Authenticate(req); err != nil {
 		return nil, err
@@ -964,29 +997,29 @@ func (c *Client) do(ctx context.Context, req *http.Request, result any) (*http.R
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return resp, err
 	}
 
 	defer resp.Body.Close()
 
 	bs, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return resp, err
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return nil, errors.WithStack(&httpError{
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusBadRequest {
+		return resp, errors.WithStack(errcode.MaybeMakeNonRetryable(resp.StatusCode, &httpError{
 			URL:        req.URL,
 			StatusCode: resp.StatusCode,
 			Body:       bs,
-		})
+		}))
 	}
 
 	// handle binary response
 	if s, ok := result.(*[]byte); ok {
 		*s = bs
 	} else if result != nil {
-		return resp, json.Unmarshal(bs, result)
+		return resp, errors.Wrap(json.Unmarshal(bs, result), "failed to unmarshal response to JSON")
 	}
 
 	return resp, nil
@@ -1142,26 +1175,31 @@ type GroupProjectPermission struct {
 	Project *Project
 }
 
+type Link struct {
+	Href string `json:"href"`
+	Name string `json:"name"`
+}
+
+type RepoLinks struct {
+	Clone []Link `json:"clone"`
+	Self  []struct {
+		Href string `json:"href"`
+	} `json:"self"`
+}
+
 type Repo struct {
-	Slug          string   `json:"slug"`
-	ID            int      `json:"id"`
-	Name          string   `json:"name"`
-	SCMID         string   `json:"scmId"`
-	State         string   `json:"state"`
-	StatusMessage string   `json:"statusMessage"`
-	Forkable      bool     `json:"forkable"`
-	Origin        *Repo    `json:"origin"`
-	Project       *Project `json:"project"`
-	Public        bool     `json:"public"`
-	Links         struct {
-		Clone []struct {
-			Href string `json:"href"`
-			Name string `json:"name"`
-		} `json:"clone"`
-		Self []struct {
-			Href string `json:"href"`
-		} `json:"self"`
-	} `json:"links"`
+	Slug          string    `json:"slug"`
+	ID            int       `json:"id"`
+	Name          string    `json:"name"`
+	Description   string    `json:"description"`
+	SCMID         string    `json:"scmId"`
+	State         string    `json:"state"`
+	StatusMessage string    `json:"statusMessage"`
+	Forkable      bool      `json:"forkable"`
+	Origin        *Repo     `json:"origin"`
+	Project       *Project  `json:"project"`
+	Public        bool      `json:"public"`
+	Links         RepoLinks `json:"links"`
 }
 
 // IsPersonalRepository tells if the repository is a personal one.
