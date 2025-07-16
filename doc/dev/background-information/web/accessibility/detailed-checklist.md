@@ -185,4 +185,3 @@
 - Run an audit in ARC Toolkit. Select the "Color Contrast" test group. It will report any contrast violations on the current page.
 - Be sure to run this audit in **both** dark and light themes.
 </details>
-
