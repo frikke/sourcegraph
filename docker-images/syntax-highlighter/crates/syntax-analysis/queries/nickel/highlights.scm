@@ -77,4 +77,3 @@
 ; application where the head terms is a record field path: foo.bar.function arg1 arg2 arg3
 (applicative t1:
   (applicative (record_operand (record_operation_chain)) @function))
-
