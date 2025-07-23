@@ -19,4 +19,3 @@ projects: 'sourcegraph/381'
 
 ## Expected behavior
 <!-- Explain how you expected the plugin to behave instead -->
-

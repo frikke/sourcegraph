@@ -66,4 +66,3 @@ diff --git a/src/conduit/ConduitClient.php b/src/conduit/ConduitClient.php
      return $this;
    }
  
-
