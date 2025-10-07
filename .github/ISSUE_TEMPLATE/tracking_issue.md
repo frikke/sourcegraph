@@ -20,4 +20,3 @@ Summarize what the team wants to achieve this iteration.
 
 <!-- BEGIN WORK -->
 <!-- END WORK -->
-
