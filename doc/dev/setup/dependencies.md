@@ -91,4 +91,3 @@ It's common for frontend developers to prefer using [`nvm`](https://github.com/n
 1. `cd WHERE_THE_SOURCEGRAPH_FOLDER_IS`
 1. `nvm install`
 1. `nvm use --delete-prefix`
-
