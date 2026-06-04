@@ -44,4 +44,3 @@ var myObject = {
   myMethod: function() {},
   myArrow: () => {},
 };
-
