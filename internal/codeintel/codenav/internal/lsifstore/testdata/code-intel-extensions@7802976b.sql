@@ -7562,4 +7562,3 @@ SELECT pg_catalog.setval('public.codeintel_scip_metadata_id_seq', 6237, true);
 --
 -- PostgreSQL database dump complete
 --
-
