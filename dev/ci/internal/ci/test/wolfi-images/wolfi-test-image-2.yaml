@@ -18,4 +18,3 @@ accounts:
     - username: sourcegraph
       uid: 100
       gid: 101
-
