@@ -199,4 +199,3 @@ static void parser__restore_external_scanner(Parser *self, StackVersion version)
     }
   }
 }
-
