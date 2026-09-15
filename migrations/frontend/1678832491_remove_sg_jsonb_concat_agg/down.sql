@@ -5,4 +5,3 @@ CREATE OR REPLACE AGGREGATE sg_jsonb_concat_agg(jsonb) (
     STYPE = jsonb,
     INITCOND = '{}'
 );
-
