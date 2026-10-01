@@ -36,5 +36,3 @@ Closes #{{ISSUE_NUMBER}}
   https://docs.sourcegraph.com/dev/background-information/testing_principles
   Write your test plan here after the "## Test plan" header.
 -->
-
-
