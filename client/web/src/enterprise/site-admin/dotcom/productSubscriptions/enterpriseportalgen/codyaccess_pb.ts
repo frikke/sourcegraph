@@ -716,4 +716,3 @@ export class GetCodyGatewayUsageResponse extends Message<GetCodyGatewayUsageResp
     return proto3.util.equals(GetCodyGatewayUsageResponse, a, b);
   }
 }
-
