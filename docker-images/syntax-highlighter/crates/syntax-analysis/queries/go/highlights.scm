@@ -141,5 +141,3 @@
 ((identifier) @constant (#eq? @constant "_"))
 (identifier) @variable
 (field_identifier) @identifier.property
-
-
