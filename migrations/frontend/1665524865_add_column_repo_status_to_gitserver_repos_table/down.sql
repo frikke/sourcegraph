@@ -2,4 +2,3 @@
 
 ALTER TABLE gitserver_repos
       DROP COLUMN IF EXISTS repo_status;
-

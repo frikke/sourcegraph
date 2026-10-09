@@ -9,4 +9,3 @@ zoekt-archive-index --help
 zoekt-git-index --version
 
 zoekt-sourcegraph-indexserver --help
-
