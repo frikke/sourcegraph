@@ -12,4 +12,3 @@
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS codeintel_scip_documents_dereference_logs_last_removal_time_desc_doc
 ON codeintel_scip_documents_dereference_logs (last_removal_time DESC, document_id);
-
