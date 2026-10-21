@@ -58,4 +58,3 @@ WHERE r.deleted_at IS NULL AND EXISTS (
              LEFT JOIN orgs namespace_org ON batch_changes.namespace_org_id = namespace_org.id
     WHERE c.batch_change_ids ? batch_changes.id::text AND namespace_user.deleted_at IS NULL AND namespace_org.deleted_at IS NULL
     );
-
