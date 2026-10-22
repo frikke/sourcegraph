@@ -1799,4 +1799,3 @@ export class Permission extends Message<Permission> {
     return proto3.util.equals(Permission, a, b);
   }
 }
-
