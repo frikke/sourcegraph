@@ -15,4 +15,3 @@ CREATE TABLE IF NOT EXISTS github_apps (
 
 CREATE UNIQUE INDEX IF NOT EXISTS github_apps_app_id_slug_base_url_unique
 ON github_apps USING btree (app_id, slug, base_url);
-
