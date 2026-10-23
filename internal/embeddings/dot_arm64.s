@@ -42,4 +42,3 @@ reduce:
 	VMOV V0.S[0], R6
 	MOVD R6, ret+48(FP)
 	RET
-
