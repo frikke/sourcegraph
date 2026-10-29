@@ -105,4 +105,3 @@ const scanToken = <T extends Term = Literal>(
 }
 
 export const URI: typeof URL
-
