@@ -335,4 +335,3 @@ The interesting bits are the `startCursor` and `endCursor`. These encode the fir
 If we want to go to the next page, we can take this opaque token and set it as the `after` value of the query. The new pagination parameters would be `first: 10, after: 'eeffgghh'".
 
 This is not something you need to manually implement in the frontend though. [`usePageSwitcherPagination()`](https://sourcegraph.com/github.com/sourcegraph/sourcegraph/-/blob/client/web/src/components/FilteredConnection/hooks/usePageSwitcherPagination.ts) and [`useShowMorePagination()`](https://sourcegraph.com/github.com/sourcegraph/sourcegraph/-/blob/client/web/src/components/FilteredConnection/hooks/useShowMorePagination.ts) already do that for you.
-
