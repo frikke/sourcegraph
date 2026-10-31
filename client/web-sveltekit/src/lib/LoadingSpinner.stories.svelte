@@ -52,4 +52,3 @@
         vertical-align: middle;
     }
 </style>
-
