@@ -49,4 +49,3 @@ SELECT (
         name = lr.name
 ) AS package_id, version
 FROM lsif_dependency_repos lr;
-
