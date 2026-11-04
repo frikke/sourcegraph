@@ -488,4 +488,3 @@ Sourcegraph.com instance and managed services.
 | <a name="bool" /> bool |  |
 | <a name="string" /> string | A string must always contain UTF-8 encoded or 7-bit ASCII text. |
 | <a name="bytes" /> bytes | May contain any arbitrary sequence of bytes. |
-
