@@ -65,4 +65,3 @@ class RemoteCollector:
     def close(self):
         self.sock.close()
         self.sock = None
-
