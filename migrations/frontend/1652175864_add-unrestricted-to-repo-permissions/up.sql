@@ -5,4 +5,3 @@ ADD
 
 CREATE INDEX IF NOT EXISTS repo_permissions_unrestricted_true_idx ON repo_permissions
     USING btree (unrestricted) WHERE unrestricted;
-
