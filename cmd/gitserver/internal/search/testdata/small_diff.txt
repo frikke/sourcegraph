@@ -20,4 +20,3 @@ index 2f71392b2f..d874527291 100644
 +import { Polly, Request, Response } from '@pollyjs/core'
  import { PuppeteerAdapter } from './polly/PuppeteerAdapter'
  import FSPersister from '@pollyjs/persister-fs'
-
