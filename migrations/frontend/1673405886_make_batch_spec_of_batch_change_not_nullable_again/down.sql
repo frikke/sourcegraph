@@ -12,4 +12,3 @@ UPDATE batch_changes SET batch_spec_id = NULL WHERE batch_spec_id IN (SELECT id 
 DELETE FROM batch_specs WHERE id IN (SELECT id FROM minimal_batch_specs);-- Delete existing empty batch specs.
 
 DROP TABLE minimal_batch_specs;
-
