@@ -980,4 +980,3 @@ INSERT INTO public.lsif_data_result_chunks VALUES (2408538, 0, '\x1f8b0800000000
 --
 -- PostgreSQL database dump complete
 --
-
